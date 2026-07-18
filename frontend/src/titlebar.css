@@ -1,0 +1,76 @@
+/* titlebar.css — the custom (frameless) window titlebar. Only shown when the
+   body has .has-custom-frame; otherwise the desktop environment decorates. */
+
+.titlebar {
+  display: none;
+}
+
+/* When custom-frame is on, stack the titlebar above the app in a body flex column
+   so it reserves its own height without overlapping content. */
+body.has-custom-frame {
+  display: flex;
+  flex-direction: column;
+}
+
+body.has-custom-frame #app {
+  height: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+body.has-custom-frame .titlebar {
+  display: flex;
+  flex: none;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 34px;
+  background: var(--benco-bg-deep);
+  border-bottom: 1px solid var(--benco-border);
+  user-select: none;
+}
+
+.titlebar__drag {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  padding: 0 12px;
+  min-width: 0;
+}
+
+.titlebar__title {
+  color: var(--benco-green);
+  font-family: var(--font-display, var(--font-ui));
+  font-size: 14px;
+  letter-spacing: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.titlebar__controls {
+  display: flex;
+  flex: none;
+}
+
+.titlebar__btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: var(--benco-dim);
+  cursor: pointer;
+  padding: 0;
+}
+
+.titlebar__btn:hover {
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+}
+
+.titlebar__btn--close:hover {
+  background: var(--benco-danger, #d84a3a);
+  color: #fff;
+}

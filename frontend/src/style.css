@@ -1,0 +1,196 @@
+/*
+ * BENCO design system — values taken directly from benco-design-style-guide.md.
+ * Voice: deadpan, unbothered, quietly retro. A late-80s terminal that has been
+ * running without complaint for a very long time. No gradients, no decorative
+ * animation, no exclamation.
+ *
+ * Fonts are vendored locally as woff2 (see fonts/fonts.css) so the client never
+ * phones home to a CDN on launch. The @import stays at the top of the file per
+ * CSS rules; Vite inlines and fingerprints the referenced font files.
+ */
+@import "./fonts/fonts.css";
+
+:root {
+  /* Core palette */
+  --benco-green: #78b946; /* Canonical Green — brand / primary CTA */
+  --benco-green-deep: #3f5c28; /* edges, borders, pressed states */
+  --benco-phosphor: #cdeab0; /* primary readable text ("screen glow") */
+  --benco-dim: #8aa878; /* secondary text */
+  --benco-dim-2: #6f8a5c; /* tertiary text: timestamps, captions */
+
+  /* Backgrounds — never pure black */
+  --benco-bg: #0c1408; /* base window background */
+  --benco-bg-deep: #060a05; /* deepest recess */
+  --benco-panel: #182010; /* cards / panels / inputs on top of base */
+  --benco-panel-2: #11170f; /* input fields, one step darker */
+
+  /* Accent / alert */
+  --benco-red: #d84a3a;
+  --benco-amber: #e8b23d;
+
+  /* Structure */
+  --benco-border: #2a3a1e; /* thin dim divider */
+  --benco-radius: 3px;
+  --benco-glow: 0 0 8px rgba(120, 185, 70, 0.4);
+
+  /* CJK / far-East fallback. We do NOT vendor CJK fonts — they are 5–40 MB and
+     would dwarf the whole binary — so Japanese/Chinese/Korean render via the
+     font every desktop OS already ships. This names the common ones (Linux
+     Noto, macOS PingFang/Hiragino/Apple SD Gothic, Windows Yu Gothic/YaHei/
+     JhengHei/Malgun) so a good one is tried before the browser's last-resort
+     fallback. Referenced by the --font-* stacks below rather than repeated in
+     each. Zero bytes added; only failure case is a host with no CJK font. */
+  --cjk-fallback: "Noto Sans CJK SC", "Noto Sans CJK TC", "Noto Sans CJK JP",
+    "Noto Sans CJK KR", "PingFang SC", "Hiragino Sans", "Yu Gothic", "Meiryo",
+    "Microsoft YaHei", "Microsoft JhengHei", "Malgun Gothic",
+    "Apple SD Gothic Neo", "Droid Sans Fallback";
+
+  /* Type. IBM Plex Mono sits in every stack as the non-latin fallback: VT323
+     and Share Tech Mono only cover latin (+ vietnamese for VT323), so cyrillic
+     and other scripts fall through to our vendored Plex — same type palette,
+     no reliance on the host's system monospace. var(--cjk-fallback) then covers
+     scripts no vendored family has (CJK). See fonts/fonts.css. */
+  --font-display: "VT323", "Share Tech Mono", "IBM Plex Mono",
+    var(--cjk-fallback), monospace;
+  --font-ui: "Share Tech Mono", "IBM Plex Mono", "Consolas",
+    var(--cjk-fallback), monospace;
+  --font-prose: "IBM Plex Mono", "Share Tech Mono", var(--cjk-fallback),
+    monospace;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* The `hidden` attribute must win over component `display` rules. Without this,
+   an element with e.g. `display: flex` in its class stays visible even when
+   hidden — which silently stacked the chat's empty-state over the live
+   conversation. Toggling `hidden` is the app's standard show/hide mechanism. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--benco-bg);
+  color: var(--benco-phosphor);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* --- Labels & headings ---------------------------------------------------- */
+
+.benco-title {
+  font-family: var(--font-display);
+  font-size: 42px;
+  letter-spacing: 2px;
+  color: var(--benco-green);
+  text-shadow: var(--benco-glow); /* one glowing title per screen */
+  margin: 0;
+  line-height: 1;
+}
+
+.benco-label {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--benco-dim);
+}
+
+.benco-caption {
+  font-size: 12px;
+  letter-spacing: 0.5px;
+  color: var(--benco-dim-2);
+}
+
+/* --- Controls ------------------------------------------------------------- */
+
+.benco-input {
+  width: 100%;
+  background: var(--benco-panel-2);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  color: var(--benco-phosphor);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.benco-input:focus {
+  border-color: var(--benco-green-deep);
+}
+
+.benco-input::placeholder {
+  color: var(--benco-dim-2);
+}
+
+.benco-button {
+  background: var(--benco-green);
+  color: var(--benco-bg-deep);
+  border: 1px solid var(--benco-green-deep);
+  border-radius: var(--benco-radius);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 9px 16px;
+  cursor: pointer;
+}
+
+.benco-button:hover {
+  background: #83c650;
+}
+
+.benco-button:active {
+  background: var(--benco-green-deep);
+  color: var(--benco-phosphor);
+}
+
+.benco-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.benco-button--ghost {
+  background: transparent;
+  color: var(--benco-dim);
+  border-color: var(--benco-border);
+}
+
+.benco-button--ghost:hover {
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+}
+
+/* --- Divider -------------------------------------------------------------- */
+
+.benco-rule {
+  border: none;
+  border-top: 1px solid var(--benco-border);
+  margin: 0;
+}
+
+.benco-error {
+  color: var(--benco-red);
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  min-height: 18px;
+}

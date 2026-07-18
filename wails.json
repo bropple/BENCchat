@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "BENCchat",
+  "outputfilename": "BENCchat",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "BENCO Holdings",
+    "email": "ben@ropple.net"
+  },
+  "info": {
+    "companyName": "BENCO Holdings",
+    "productName": "BENCchat",
+    "productVersion": "0.1.0",
+    "comments": "A modern OSCAR/AIM client for the BENCO network."
+  }
+}

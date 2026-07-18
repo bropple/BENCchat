@@ -1,0 +1,112 @@
+/* Sign-on screen layout. Kept deliberately spare — a form on a dark panel. */
+
+.signon {
+  flex: 1;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* BENCO wordmark, pinned centered at the bottom of the sign-on screen. Sized
+   down and dimmed so it reads as a quiet footer, not a second headline. The
+   panel stays perfectly centered because the logo is positioned out of flow. */
+.signon__logo {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 132px;
+  max-width: 40%;
+  height: auto;
+  opacity: 0.38;
+  pointer-events: none;
+  user-select: none;
+}
+
+.signon__panel {
+  width: 340px;
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  padding: 28px 26px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.signon__brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.signon__mark {
+  width: 44px;
+  height: 44px;
+  flex: none;
+}
+
+.signon__wordmark {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.signon__sub {
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--benco-dim-2);
+}
+
+.signon__field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.signon__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.signon__server {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.signon__server-value {
+  color: var(--benco-dim);
+}
+
+.signon__server:hover .signon__server-value {
+  color: var(--benco-phosphor);
+}
+
+.signon__actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.signon__actions .benco-button:first-child {
+  flex: 1;
+}
+
+/* "Stay signed in" checkbox on the sign-on form. */
+.signon__remember {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+  cursor: pointer;
+}
+.signon__remember input {
+  accent-color: var(--benco-green);
+}

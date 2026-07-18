@@ -1,0 +1,900 @@
+/*
+ * roster.css — the signed-on view: buddy list + conversation.
+ * Values come from benco-design-system tokens in style.css. Flat, dark,
+ * green-tinted, quiet. No gradients, no decorative animation.
+ */
+
+.roster {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) 1fr;
+  height: 100%;
+  min-height: 0;
+}
+
+/* --- Buddy list ----------------------------------------------------------- */
+
+.roster__list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--benco-bg-deep);
+  border-right: 1px solid var(--benco-border);
+}
+
+.roster__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.roster__me {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.roster__me-name {
+  color: var(--benco-green);
+  font-size: 15px;
+  letter-spacing: 0.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roster__me-status {
+  color: var(--benco-amber);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+/* The away button reads as active (amber) while away is set. */
+.settings-gear.is-away {
+  color: var(--benco-amber);
+  border-color: var(--benco-amber);
+}
+
+.roster__head-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.roster__signoff {
+  flex: none;
+  font-size: 11px;
+  padding: 5px 9px;
+}
+
+.roster__actions {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+
+.roster__act-btn {
+  flex: 1;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+/* The three roster sections (Conversations, Buddies, Rooms) share one scroll
+   container so the whole people-list scrolls as a unit. */
+.roster__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.roster__convos,
+.roster__buddies {
+  display: block;
+}
+
+.roster__hint {
+  padding: 8px 12px 4px;
+}
+
+.roster__group {
+  margin-bottom: 10px;
+}
+
+.roster__group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 4px 12px;
+}
+
+/* Section headers ("Conversations", "Buddies", "Rooms") — the primary dividers
+   of the roster, each with a green label and a hairline rule under it so the
+   three sections read as distinct blocks. */
+.roster__section-head,
+.roster__convos .roster__group-head {
+  padding-top: 7px;
+  padding-bottom: 7px;
+  margin: 0 8px 4px;
+  border-bottom: 1px solid var(--benco-border);
+}
+
+.roster__section-head .benco-label,
+.roster__convos .roster__group-head .benco-label {
+  color: var(--benco-green);
+  letter-spacing: 1px;
+}
+
+/* A per-group sub-label shown only when a buddy list spans multiple feedbag
+   groups; lighter than the section header, no rule. */
+.roster__group-head--sub {
+  padding-top: 3px;
+  padding-bottom: 2px;
+  opacity: 0.8;
+}
+
+.roster__buddy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--benco-phosphor);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 5px 12px;
+  text-align: left;
+}
+
+.roster__buddy:hover {
+  background: var(--benco-panel);
+}
+
+.roster__buddy.is-selected {
+  background: var(--benco-panel);
+  border-left-color: var(--benco-green);
+}
+
+.roster__name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-row actions reveal on hover so the list stays quiet at rest. */
+.roster__acts {
+  display: none;
+  flex: none;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.roster__buddy:hover .roster__acts {
+  display: flex;
+}
+
+.roster__act {
+  background: transparent;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  color: var(--benco-dim);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 5px;
+}
+
+.roster__act:hover {
+  background: var(--benco-panel-2);
+  color: var(--benco-phosphor);
+  border-color: var(--benco-green-deep);
+}
+
+/* The single ⋯ action button on each row. Subtle until the row is hovered or
+   selected, so the list stays clean. */
+.roster__menu-btn {
+  margin-left: auto;
+  border-color: transparent;
+  opacity: 0.4;
+  font-size: 15px;
+  padding: 1px 6px;
+}
+.roster__buddy:hover .roster__menu-btn,
+.roster__room:hover .roster__menu-btn,
+.roster__buddy.is-selected .roster__menu-btn,
+.roster__room.is-selected .roster__menu-btn {
+  opacity: 1;
+}
+
+/* Floating action menu opened by a ⋯ button. */
+.roster__menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-green-deep);
+  border-radius: var(--benco-radius);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+}
+.roster__menu-item {
+  text-align: left;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--benco-radius);
+  color: var(--benco-phosphor);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  cursor: pointer;
+}
+.roster__menu-item:hover {
+  background: var(--benco-panel-2);
+}
+.roster__menu-item.is-danger {
+  color: var(--benco-red);
+}
+.roster__menu-item.is-danger:hover {
+  background: color-mix(in srgb, var(--benco-red) 16%, transparent);
+}
+
+/* Presence is carried by a dot plus text dimming — never by color alone, which
+   would be invisible to anyone who can't distinguish these greens. */
+.roster__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--benco-dim-2);
+}
+
+.roster__rooms {
+  padding-bottom: 6px;
+}
+
+.roster__room {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  border-radius: var(--benco-radius);
+}
+
+.roster__room:hover {
+  background: var(--benco-panel);
+}
+
+.roster__room.is-selected {
+  background: var(--benco-panel);
+  box-shadow: inset 2px 0 0 var(--benco-green);
+}
+
+.roster__room-icon {
+  flex: none;
+  font-size: 13px;
+}
+
+.roster__room-count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Recent (not currently joined) rooms: dimmed, click to re-join. */
+.roster__room--recent {
+  opacity: 0.55;
+}
+.roster__room--recent .roster__room-icon {
+  filter: grayscale(0.7);
+}
+.roster__room-rejoin {
+  margin-left: auto;
+  color: var(--benco-dim-2);
+}
+
+.roster__room .roster__act {
+  margin-left: 6px;
+}
+
+/* Buddy icon (BART): a small avatar between the presence dot and the name.
+   Pixelated scaling keeps low-res AIM-era icons crisp rather than blurred. */
+.roster__icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  object-fit: cover;
+  border: 1px solid var(--benco-border);
+  background: var(--benco-panel-2);
+  image-rendering: pixelated;
+}
+
+.roster__buddy--offline .roster__icon {
+  opacity: 0.5;
+  filter: grayscale(0.6);
+}
+
+.roster__buddy--online .roster__dot {
+  background: var(--benco-green);
+}
+
+.roster__buddy--away .roster__dot,
+.roster__buddy--idle .roster__dot {
+  background: var(--benco-amber);
+}
+
+.roster__buddy--offline {
+  color: var(--benco-dim-2);
+}
+
+.roster__buddy--away .roster__name,
+.roster__buddy--idle .roster__name {
+  color: var(--benco-dim);
+}
+
+.roster__badge {
+  flex: none;
+  background: var(--benco-green);
+  color: var(--benco-bg-deep);
+  border-radius: 2px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+}
+
+.roster__buddy.is-blocked .roster__name {
+  color: var(--benco-dim-2);
+  text-decoration: line-through;
+}
+
+.roster__blocked-tag {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--benco-red);
+}
+
+/* --- Conversation --------------------------------------------------------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.chat__warn {
+  margin-left: auto;
+  flex: none;
+  color: var(--benco-amber);
+  border-color: var(--benco-border);
+}
+
+.chat__warn:hover {
+  border-color: var(--benco-amber);
+  background: var(--benco-panel);
+}
+
+/* Transient notices float over the top of the conversation pane. */
+/* Bottom-left, clear of the chat header — a toast sitting over the encryption
+   badge hid the very thing it was usually telling you about. */
+.roster__toast {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  z-index: 50;
+  max-width: 80%;
+  padding: 8px 14px;
+  border-radius: var(--benco-radius);
+  border: 1px solid var(--benco-border);
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.roster__toast--warn {
+  border-color: var(--benco-amber);
+}
+
+.roster__toast--error {
+  border-color: var(--benco-red);
+}
+
+.chat__empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.chat__active {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.chat__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+}
+
+.chat__with {
+  color: var(--benco-green);
+  font-family: var(--font-display);
+  font-size: 24px;
+  letter-spacing: 1px;
+}
+
+.chat__enc {
+  margin-right: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--benco-green);
+  border-radius: 999px;
+  color: var(--benco-green);
+  font-family: var(--font-prose);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.chat__enc {
+  cursor: pointer;
+}
+
+.chat__enc--verified {
+  border-color: var(--benco-green);
+  background: color-mix(in srgb, var(--benco-green) 15%, transparent);
+}
+
+/* Not encrypted, and we know the peer's client can't be: stated in the amber
+   warning voice rather than the green "secure" one. */
+.chat__enc--plain {
+  border-color: var(--benco-amber);
+  color: var(--benco-amber);
+  background: transparent;
+}
+
+.chat__enc--changed {
+  border-color: var(--benco-amber);
+  color: var(--benco-amber);
+  background: color-mix(in srgb, var(--benco-amber) 15%, transparent);
+}
+
+.chat__lock {
+  opacity: 0.75;
+}
+
+/* --- Safety-number verify dialog --- */
+.verify__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px;
+}
+
+.verify__number {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  justify-content: center;
+  padding: 14px;
+  border: 1px solid var(--benco-green);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel);
+}
+
+.verify__group {
+  font-family: var(--font-display, monospace);
+  font-size: 22px;
+  letter-spacing: 2px;
+  color: var(--benco-phosphor);
+  font-variant-numeric: tabular-nums;
+}
+
+.verify__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.verify__ok {
+  color: var(--benco-green);
+  font-family: var(--font-display);
+  letter-spacing: 1px;
+}
+
+/* Informational sibling of .verify__alert — a device was added, which is
+   expected. Green rather than amber, so it doesn't read as a warning. */
+.verify__note {
+  padding: 8px 10px;
+  border: 1px solid var(--benco-green-deep);
+  border-radius: var(--benco-radius);
+  background: color-mix(in srgb, var(--benco-green) 10%, transparent);
+  color: var(--benco-phosphor);
+  font-family: var(--font-prose);
+  font-size: 13px;
+}
+
+.verify__alert {
+  padding: 8px 10px;
+  border: 1px solid var(--benco-amber);
+  border-radius: var(--benco-radius);
+  background: color-mix(in srgb, var(--benco-amber) 12%, transparent);
+  color: var(--benco-phosphor);
+  font-family: var(--font-prose);
+  font-size: 13px;
+}
+
+.chat__away {
+  margin: 8px 14px 0;
+  padding: 7px 10px;
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-amber);
+  border-radius: var(--benco-radius);
+  color: var(--benco-phosphor);
+  font-family: var(--font-prose);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat__away-label {
+  color: var(--benco-amber);
+  font-family: var(--font-ui);
+  letter-spacing: 0.5px;
+  margin-right: 6px;
+}
+
+.chat__away-pending {
+  color: var(--benco-dim-2);
+  font-style: italic;
+}
+
+.chat__profile {
+  margin: 8px 14px 0;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  padding: 6px 10px;
+}
+
+.chat__profile summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat__profile-text {
+  margin-top: 6px;
+  font-family: var(--font-prose);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--benco-phosphor);
+}
+
+.chat__log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  user-select: text;
+}
+
+.chat__hint {
+  margin: 0;
+}
+
+.chat__msg {
+  max-width: 78%;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  padding: 6px 9px;
+}
+
+.chat__msg--in {
+  align-self: flex-start;
+  background: var(--benco-panel);
+}
+
+.chat__msg--out {
+  align-self: flex-end;
+  background: var(--benco-panel-2);
+  border-color: var(--benco-green-deep);
+}
+
+.chat__msg-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.chat__msg-from {
+  color: var(--benco-dim);
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+
+.chat__auto {
+  color: var(--benco-amber);
+}
+
+.chat__msg-text {
+  font-family: var(--font-prose);
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Emoticons rendered from :-) style codes. Slightly larger than the surrounding
+   monospace so they read as glyphs, not punctuation. */
+.chat__msg-text .emoticon {
+  font-size: 1.15em;
+  line-height: 1;
+  vertical-align: -0.05em;
+}
+
+/* Links carried in AIM HTML messages. Open externally (see roster.ts); styled
+   as the accent so they read as actionable without leaving the terminal look. */
+.chat__msg-text a[data-ext] {
+  color: var(--benco-green);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.chat__msg-text a[data-ext]:hover {
+  text-shadow: var(--benco-glow);
+}
+/* AIM <font> sizes can be large; keep them from blowing out the bubble. */
+.chat__msg-text font {
+  line-height: 1.35;
+}
+
+.chat__typing {
+  min-height: 16px;
+  padding: 0 14px;
+}
+
+.chat__compose {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 14px;
+  position: relative; /* anchor for the emoji popover */
+}
+
+/* Room header: the "N here" status becomes a clickable disclosure. */
+.chat__status--room {
+  cursor: pointer;
+  user-select: none;
+}
+.chat__status--room:hover {
+  color: var(--benco-phosphor);
+}
+
+/* Expandable participant list under the room header. */
+.chat__participants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 14px 2px;
+}
+.chat__participant {
+  font-size: 12px;
+  color: var(--benco-phosphor);
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-border);
+  border-radius: 10px;
+  padding: 2px 9px;
+}
+
+/* Emoji picker button + popover. */
+.chat__emoji-btn {
+  flex: none;
+  align-self: stretch;
+  padding: 0 10px;
+  font-size: 18px;
+  line-height: 1;
+  background: var(--benco-panel-2);
+  color: var(--benco-phosphor);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  cursor: pointer;
+}
+.chat__emoji-btn:hover {
+  border-color: var(--benco-green-deep);
+  box-shadow: var(--benco-glow);
+}
+
+.chat__emoji-panel {
+  position: absolute;
+  right: 14px;
+  bottom: calc(100% - 2px);
+  width: min(360px, 86vw);
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-green-deep);
+  border-radius: var(--benco-radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  z-index: 20;
+  overflow: hidden;
+}
+
+/* Category tab strip. */
+.chat__emoji-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 6px 4px;
+  border-bottom: 1px solid var(--benco-border);
+  flex: none;
+}
+.chat__emoji-tab {
+  flex: 1;
+  font-size: 16px;
+  line-height: 1;
+  padding: 5px 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--benco-radius);
+  cursor: pointer;
+}
+.chat__emoji-tab:hover {
+  background: var(--benco-panel-2);
+}
+
+/* Scrolling grid of labelled sections. */
+.chat__emoji-grid {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 8px;
+}
+.chat__emoji-cat-label {
+  position: sticky;
+  top: 0;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--benco-dim-2);
+  background: var(--benco-panel);
+  padding: 6px 2px 3px;
+}
+.chat__emoji-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 34px);
+  gap: 1px;
+  justify-content: start;
+}
+.chat__emoji {
+  width: 34px;
+  height: 34px;
+  font-size: 21px;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  border-radius: var(--benco-radius);
+  cursor: pointer;
+}
+.chat__emoji:hover {
+  background: var(--benco-panel-2);
+}
+
+.chat__input {
+  flex: 1;
+  resize: none;
+  font-family: var(--font-prose);
+  user-select: text;
+}
+
+.chat__active .benco-error {
+  padding: 0 14px 8px;
+}
+
+/* --- Encrypted room participants --- */
+/* Who can and can't read is the room's most important property, so it is shown
+   on each name rather than only in a summary. */
+.chat__participant--reader {
+  border-color: var(--benco-green-deep);
+}
+
+.chat__participant--blind {
+  border-color: var(--benco-amber);
+  color: var(--benco-amber);
+}
+
+/* A room message whose signature failed: someone with the group key is
+   impersonating a member. It must not read as an ordinary message. */
+.chat__msg--forged {
+  border-color: var(--benco-amber);
+  background: color-mix(in srgb, var(--benco-amber) 8%, transparent);
+}
+
+.chat__lock--forged {
+  color: var(--benco-amber);
+  opacity: 1;
+}
+
+/* Encrypted but unattributable — an older client, or a sender whose signing
+   key we haven't fetched yet. Quieter than a failure. */
+.chat__lock--unsigned {
+  opacity: 0.55;
+}
+
+/* --- Pending room invitations --- */
+.roster__invites:not(:empty) {
+  margin-bottom: 10px;
+}
+
+.roster__invite {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+.roster__invite-what {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.roster__invite-room {
+  color: var(--benco-phosphor);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roster__invite-acts {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+
+.roster__invite-yes,
+.roster__invite-no {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+/* The dot marks waiting invitations without a modal demanding attention. */
+.roster__invite-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--benco-amber);
+  vertical-align: middle;
+}
+
+/* An encrypted-but-unattributable message: the lock still holds, but authorship
+   can't be confirmed, so the triangle sits beside it rather than replacing it. */
+.chat__lock-warn {
+  color: var(--benco-amber);
+  font-size: 10px;
+  margin-left: 1px;
+}

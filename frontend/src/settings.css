@@ -1,0 +1,522 @@
+/* settings.css — the settings overlay + theme editor. Themed via the same
+   tokens it edits, so it restyles live as the user tweaks. */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 100%);
+  max-height: 100%;
+  background: var(--benco-bg);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+.settings__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+}
+
+.settings__title {
+  font-size: 28px;
+  margin: 0;
+}
+
+/* Body is split into a category sidebar + the active panel. */
+.settings__main {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  width: 150px;
+  padding: 10px 8px;
+  border-right: 1px solid var(--benco-border);
+  overflow-y: auto;
+}
+
+.settings__tab {
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: var(--benco-radius);
+  color: var(--benco-dim);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.settings__tab:hover {
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+}
+
+.settings__tab.is-active {
+  background: var(--benco-panel);
+  border-left-color: var(--benco-green);
+  color: var(--benco-green);
+}
+
+.settings__body {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px 16px;
+}
+
+.settings__panel {
+  display: none;
+}
+
+.settings__panel.is-active {
+  display: block;
+}
+
+.settings__section {
+  padding: 12px 0;
+}
+
+.settings__section > .benco-label {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.settings__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.settings__preset {
+  font-size: 12px;
+  padding: 5px 9px;
+}
+
+.settings__preset.is-active {
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+  border-color: var(--benco-green);
+}
+
+/* Sound-pack preview grid: one tappable chip per event, plays on click. */
+.settings__sounds {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* A grid cell pairs the preview button with its mute toggle; the preview takes
+   the leftover width so the toggles line up in a column. */
+.settings__sound-cell {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings__sound {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 6px 9px;
+  text-align: left;
+  justify-content: flex-start;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings__sound-mute {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  padding: 0;
+  color: var(--benco-dim);
+}
+
+.settings__sound-mute:hover {
+  color: var(--benco-phosphor);
+}
+
+/* A muted event reads as "off" at a glance: the toggle warms to amber and the
+   label beside it dims. */
+.settings__sound-mute.is-muted,
+.settings__sound-mute.is-muted:hover {
+  color: var(--benco-amber);
+  border-color: var(--benco-amber);
+}
+
+.settings__sound-cell:has(.settings__sound-mute.is-muted) .settings__sound {
+  opacity: 0.5;
+}
+
+.settings__sound-play {
+  color: var(--benco-green);
+  flex: none;
+  font-size: 10px;
+}
+
+.settings__sound-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings__sound-soon {
+  color: var(--benco-dim-2);
+  font-size: 10px;
+}
+
+/* Custom-sound import list. */
+.settings__imports {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.settings__import {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings__import-label {
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings__import-status {
+  color: var(--benco-green);
+  flex: none;
+}
+
+.settings__import-btn,
+.settings__import-clear {
+  flex: none;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.settings__group {
+  margin-bottom: 14px;
+}
+
+.settings__group-label {
+  display: block;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.settings__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.settings__row-label {
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+  color: var(--benco-phosphor);
+}
+
+.settings__hint {
+  font-size: 11px;
+}
+
+.settings__color {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings__swatch {
+  width: 34px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: none;
+  cursor: pointer;
+}
+
+.settings__hex {
+  width: 92px;
+  font-size: 13px;
+  padding: 5px 7px;
+}
+
+.settings__text {
+  width: 220px;
+  max-width: 46vw;
+  font-size: 13px;
+  padding: 5px 7px;
+}
+
+.settings__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.settings__toggle input {
+  accent-color: var(--benco-green);
+}
+
+.settings__acct {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.settings__acct .benco-input {
+  flex: 1;
+  min-width: 140px;
+  font-size: 13px;
+  padding: 6px 8px;
+}
+
+.settings__acct-msg {
+  display: block;
+  min-height: 16px;
+  color: var(--benco-dim);
+}
+
+.settings__profile {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-prose);
+}
+
+.settings__profile-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.settings__profile-msg {
+  color: var(--benco-dim);
+}
+
+.settings__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+.settings__msg {
+  flex: 1;
+  text-align: right;
+  min-height: 0;
+}
+
+.settings__msg.is-ok {
+  color: var(--benco-dim);
+}
+
+/* Find-user dialog reuses the settings overlay chrome. */
+.find {
+  width: min(440px, 100%);
+}
+
+.find__body {
+  padding: 12px 16px;
+}
+
+.find__row {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0;
+}
+
+.find__row .benco-input {
+  flex: 1;
+}
+
+/* Chat-history controls in the settings panel. */
+.settings__history-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.settings__select {
+  width: auto;
+  padding: 4px 8px;
+}
+
+.settings__history-msg.is-ok {
+  color: var(--benco-green);
+}
+
+/* Segmented toggle between the email and name search modes. */
+.find__tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.find__tab {
+  flex: 1;
+  padding: 6px 10px;
+  background: var(--benco-panel-2);
+  color: var(--benco-dim);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.find__tab.is-active {
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+  border-color: var(--benco-green-deep);
+}
+
+.find__result {
+  min-height: 24px;
+  font-size: 14px;
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.find__none {
+  color: var(--benco-dim-2);
+}
+
+.find__hit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--benco-border);
+}
+
+.find__hit-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.find__name {
+  color: var(--benco-green);
+  font-size: 16px;
+}
+
+.find__detail {
+  color: var(--benco-dim-2);
+  font-size: 12px;
+}
+
+/* A small gear entry point, used on the sign-on and roster screens. */
+.settings-gear {
+  background: transparent;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  color: var(--benco-dim);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  padding: 5px 9px;
+}
+
+.settings-gear:hover {
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+}
+
+/* --- Device list (Privacy & Security) --- */
+.settings__devices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.settings__device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel-2);
+}
+
+.settings__device-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings__device-name {
+  font-size: 12px;
+  color: var(--benco-phosphor);
+}
+
+/* The comparable code: tabular figures so digits line up between devices. */
+.settings__device-fp {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.5px;
+}
+
+.settings__device-here {
+  color: var(--benco-green);
+  flex: none;
+}
+
+.settings__device-remove {
+  flex: none;
+  font-size: 11px;
+  padding: 4px 10px;
+}

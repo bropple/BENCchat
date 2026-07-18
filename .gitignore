@@ -1,0 +1,25 @@
+# Build output
+build/bin/
+frontend/dist/
+frontend/node_modules/
+
+# Upstream reference clone — a separate repo with its own history.
+# CLAUDE.md is explicit: reference it, don't vendor it.
+open-oscar-server/
+
+# Generated bundle (rebuilt from benchat-tls/ sources)
+benchat-tls.tar.gz
+
+# Deployment specifics: server address, VPS details, test-account notes.
+# Deliberately untracked — the address is not something to publish.
+DEPLOYMENT.local.md
+
+# Never track a database or its backups
+*.sqlite
+*.sqlite.backup-*
+
+# Local crash/debug captures
+bencchat.txt
+
+# Local Claude Code settings
+.claude/settings.local.json

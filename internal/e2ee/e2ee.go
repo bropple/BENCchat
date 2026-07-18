@@ -1,0 +1,182 @@
+// Package e2ee provides opt-in end-to-end encryption for 1:1 messages using
+// NaCl box (X25519 key agreement + XSalsa20-Poly1305 authenticated encryption).
+//
+// Keys are exchanged out of band via profiles (see the client layer); the server
+// only ever relays the resulting ciphertext, so it never sees plaintext. This is
+// deliberately simple: static keys (no forward secrecy) and trust-on-first-use
+// key discovery. It protects message content from the server and the network,
+// not metadata (who talks to whom, when).
+package e2ee
+
+import (
+	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"strings"
+
+	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/nacl/box"
+)
+
+// KeyPair is an X25519 keypair. Public is published (in the profile); Private is
+// secret (kept in the OS secret store).
+type KeyPair struct {
+	Public  [32]byte
+	Private [32]byte
+}
+
+// GenerateKeyPair creates a fresh X25519 keypair.
+func GenerateKeyPair() (KeyPair, error) {
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		return KeyPair{}, fmt.Errorf("e2ee: generate key: %w", err)
+	}
+	return KeyPair{Public: *pub, Private: *priv}, nil
+}
+
+// KeyPairFromPrivate reconstructs a full keypair from a stored private key by
+// deriving the matching public key.
+func KeyPairFromPrivate(priv [32]byte) (KeyPair, error) {
+	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	if err != nil {
+		return KeyPair{}, fmt.Errorf("e2ee: derive public: %w", err)
+	}
+	kp := KeyPair{Private: priv}
+	copy(kp.Public[:], pub)
+	return kp, nil
+}
+
+// EncodeKey base64-encodes a 32-byte key (public or private).
+func EncodeKey(k [32]byte) string { return base64.StdEncoding.EncodeToString(k[:]) }
+
+// DecodeKey parses a base64-encoded 32-byte key.
+func DecodeKey(s string) ([32]byte, error) {
+	var out [32]byte
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return out, fmt.Errorf("e2ee: decode key: %w", err)
+	}
+	if len(b) != 32 {
+		return out, fmt.Errorf("e2ee: key is %d bytes, want 32", len(b))
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+// SafetyNumber derives a stable, human-comparable verification code from two
+// public keys. It defends against a man-in-the-middle on the (server-mediated,
+// trust-on-first-use) key exchange: both parties compute the SAME number, so if
+// they read it to each other out of band and it matches, no third key was
+// substituted in the middle.
+//
+// The input is order-independent — the keys are sorted first — so each side
+// produces the same string regardless of who is "self" and who is "peer". The
+// output is six space-separated groups of five decimal digits, derived from a
+// SHA-256 of the two keys.
+func SafetyNumber(a, b [32]byte) string {
+	x, y := a, b
+	if bytes.Compare(x[:], y[:]) > 0 {
+		x, y = y, x
+	}
+	sum := sha256.Sum256(append(x[:], y[:]...))
+	groups := make([]string, 6)
+	for i := range groups {
+		n := binary.BigEndian.Uint32(sum[i*4:i*4+4]) % 100000
+		groups[i] = fmt.Sprintf("%05d", n)
+	}
+	return strings.Join(groups, " ")
+}
+
+// envelopePrefix marks an encrypted message body. The leading ESC byte makes an
+// accidental collision with a message a user actually typed essentially
+// impossible, and it survives the ASCII message-text path unchanged.
+const envelopePrefix = "\x1bBENCO-E2EE:v1:"
+
+// IsEnvelope reports whether a message body is an E2EE envelope.
+func IsEnvelope(body string) bool { return strings.HasPrefix(body, envelopePrefix) }
+
+// Seal encrypts message for recipientPub, signed with senderPriv. The result is
+// an envelope string safe to carry in a normal (ASCII) message body: the marker
+// prefix followed by base64(nonce || ciphertext).
+func Seal(message string, recipientPub, senderPriv [32]byte) (string, error) {
+	var nonce [24]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("e2ee: nonce: %w", err)
+	}
+	// Prepend the nonce so the recipient can recover it; box.Seal appends the
+	// ciphertext to whatever is passed as the output prefix.
+	sealed := box.Seal(nonce[:], []byte(message), &nonce, &recipientPub, &senderPriv)
+	return envelopePrefix + base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+// Profiles carry a peer's public key inside an HTML comment, so it rides in the
+// existing Locate profile field with no server change and stays invisible in
+// clients that render the profile as HTML (BENCchat strips comments too).
+const (
+	profileMarkerOpen  = "<!--BENCO-E2EE:v1:"
+	profileMarkerClose = "-->"
+)
+
+// ProfileMarker builds the hidden marker to append to a profile to publish pub.
+func ProfileMarker(pub [32]byte) string {
+	return profileMarkerOpen + EncodeKey(pub) + profileMarkerClose
+}
+
+// ExtractKey pulls a published public key out of a profile, if present.
+func ExtractKey(profile string) ([32]byte, bool) {
+	i := strings.Index(profile, profileMarkerOpen)
+	if i < 0 {
+		return [32]byte{}, false
+	}
+	rest := profile[i+len(profileMarkerOpen):]
+	j := strings.Index(rest, profileMarkerClose)
+	if j < 0 {
+		return [32]byte{}, false
+	}
+	key, err := DecodeKey(rest[:j])
+	if err != nil {
+		return [32]byte{}, false
+	}
+	return key, true
+}
+
+// StripMarker removes the E2EE marker (and any surrounding whitespace) from a
+// profile so it isn't shown to the user.
+func StripMarker(profile string) string {
+	i := strings.Index(profile, profileMarkerOpen)
+	if i < 0 {
+		return profile
+	}
+	rest := profile[i:]
+	j := strings.Index(rest, profileMarkerClose)
+	if j < 0 {
+		return strings.TrimRight(profile[:i], " \n\r\t")
+	}
+	return strings.TrimRight(profile[:i], " \n\r\t") + rest[j+len(profileMarkerClose):]
+}
+
+// Open decrypts an envelope from senderPub using recipientPriv. It fails if the
+// envelope is malformed or authentication doesn't verify (wrong key / tampered).
+func Open(envelope string, senderPub, recipientPriv [32]byte) (string, error) {
+	if !IsEnvelope(envelope) {
+		return "", errors.New("e2ee: not an envelope")
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(envelope, envelopePrefix))
+	if err != nil {
+		return "", fmt.Errorf("e2ee: decode envelope: %w", err)
+	}
+	if len(raw) < 24 {
+		return "", errors.New("e2ee: envelope too short")
+	}
+	var nonce [24]byte
+	copy(nonce[:], raw[:24])
+	msg, ok := box.Open(nil, raw[24:], &nonce, &senderPub, &recipientPriv)
+	if !ok {
+		return "", errors.New("e2ee: decryption failed (wrong key or tampered)")
+	}
+	return string(msg), nil
+}

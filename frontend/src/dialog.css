@@ -1,0 +1,56 @@
+/* dialog.css — themed modal dialogs (alert/confirm/prompt). Uses the same BENCO
+   tokens as everything else, so it follows the active theme. */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200; /* above the settings overlay (100) */
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(400px, 100%);
+  background: var(--benco-bg);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+  padding: 18px;
+}
+
+.dialog__title {
+  display: block;
+}
+
+.dialog__msg {
+  color: var(--benco-phosphor);
+  font-family: var(--font-prose);
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dialog__input {
+  width: 100%;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+/* Destructive button (delete / block / remove). */
+.dialog__btn--danger {
+  background: var(--benco-danger, #d84a3a);
+  border-color: var(--benco-danger, #d84a3a);
+  color: #fff;
+}
