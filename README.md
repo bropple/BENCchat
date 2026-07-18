@@ -5,7 +5,7 @@ ran on), speaking to a self-hosted [open-oscar-server](https://github.com/mk6i/o
 at a self-hosted OSCAR server. A BENCO Holdings project.
 
 See [`CLAUDE.md`](CLAUDE.md) for scope and protocol notes, and
-[`benco-design-style-guide.md`](benco-design-style-guide.md) for the visual
+[`docs/benco-design-style-guide.md`](docs/benco-design-style-guide.md) for the visual
 language.
 
 ## Stack

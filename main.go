@@ -14,7 +14,8 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// Application/tray icons, rendered from the R. Triy mark (benco-roster-triy.svg).
+// Application/tray icons, rendered from the R. Triy mark
+// (assets/brand/benco-roster-triy.svg).
 // appIconPNG doubles as the Linux window icon; the tray uses PNG on Linux/macOS
 // and ICO on Windows.
 //
