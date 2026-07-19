@@ -89,3 +89,57 @@ AUTH_HOST=chat.example.com ./scripts/build-desktop.sh
 The host is passed through `-ldflags` and never written to a file, so it can't
 reach git by accident. Don't use it for anything you publish — the value lands
 in the binary as a plain string, so `strings` recovers it immediately.
+
+## Code signing (Windows)
+
+Windows Defender flags unsigned Go GUI binaries as a matter of course —
+`Trojan:Win32/DefenseEvasion.A!ml` is a typical verdict. The `!ml` suffix means
+a machine-learning heuristic rather than a signature match, and
+"DefenseEvasion" is a MITRE ATT&CK tactic bucket, not a malware family.
+
+BENCchat fits that heuristic unusually well: it's an unsigned Go binary that
+reads the **Windows Credential Manager** (through `go-keyring` → `wincred`),
+spawns a WebView2 host process, and draws a borderless window. Each of those is
+ordinary; together they resemble the API profile of credential-stealing
+malware.
+
+The credential-store access is not something to design away — it's where the
+E2EE private keys and the saved password belong, instead of on disk in the
+clear. Removing it would make the client *less* safe to make an antivirus
+quieter. The fix is a signature.
+
+`.github/workflows/build.yml` signs Windows artifacts with **Azure Trusted
+Signing** when these repository secrets are set, and silently skips signing
+when they aren't (so forks still get working, unsigned builds):
+
+| Secret | What it is |
+| --- | --- |
+| `AZURE_TENANT_ID` | Directory (tenant) ID of the app registration |
+| `AZURE_CLIENT_ID` | Application (client) ID — also the on/off switch for the signing step |
+| `AZURE_CLIENT_SECRET` | Client secret for that registration |
+| `AZURE_SIGNING_ENDPOINT` | Regional endpoint, e.g. `https://eus.codesigning.azure.net` |
+| `AZURE_SIGNING_ACCOUNT` | Trusted Signing account name |
+| `AZURE_CERT_PROFILE` | Certificate profile name within that account |
+
+Setup, roughly: create a Trusted Signing account in Azure, add a certificate
+profile (public-trust needs an org identity validation; there's an individual
+tier), register an app and give its service principal the **Trusted Signing
+Certificate Profile Signer** role on the account, then store the six values
+above as repository secrets.
+
+Signing does **not** grant instant SmartScreen reputation — that accrues as
+copies are seen in the wild — but it attaches a verified publisher, which is
+what stops the "unknown publisher" path and clears most heuristic detections.
+
+Two things worth knowing:
+
+- **Reporting a false positive is free and works.** Submit the binary at
+  <https://www.microsoft.com/en-us/wdsi/filesubmission>; these are usually
+  cleared within a day or two, and it fixes it for everyone rather than one
+  machine.
+- **Never pack or obfuscate to dodge a detection.** Wails offers `-upx` and
+  `-obfuscated`; both sharply *increase* false positives, and evading detection
+  is what actual malware does. The builds here deliberately use neither.
+
+macOS artifacts stay unsigned — notarization needs an Apple Developer account
+($99/yr). Gatekeeper's workaround is in the release notes.

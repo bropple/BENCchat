@@ -64,6 +64,11 @@ jobs:
     name: ${{ matrix.name }}
     needs: check
     runs-on: ${{ matrix.runner }}
+    env:
+      # Mapped here so the signing step can test whether signing is configured.
+      # A step-level `if:` cannot read the `secrets` context, but a job-level
+      # `env:` can — so this is how "skip unless secrets exist" is expressed.
+      SIGNING_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
     strategy:
       # One platform failing shouldn't deny you the artifacts for the others —
       # a broken macOS build is no reason to withhold a working Windows one.
@@ -129,6 +134,44 @@ jobs:
             wails build -platform ${{ matrix.platform }} -clean
           fi
 
+      # Windows Defender flags unsigned Go GUI binaries as a matter of course
+      # (Trojan:Win32/DefenseEvasion.A!ml and friends — the !ml suffix means an
+      # ML heuristic, not a signature). BENCchat is a particularly good match
+      # for that heuristic: it reads the Windows Credential Manager, because
+      # that is where the E2EE private keys and the saved password belong
+      # rather than on disk in the clear. The answer is to sign it, not to stop
+      # doing that.
+      #
+      # Skipped entirely until the Azure Trusted Signing secrets are set, so
+      # forks and unconfigured runs still produce working (unsigned) artifacts.
+      - name: Sign Windows binary
+        if: runner.os == 'Windows' && env.SIGNING_CLIENT_ID != ''
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\build\bin
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # Proves the signature is actually attached, rather than trusting that a
+      # green signing step means a signed binary.
+      - name: Verify signature
+        if: runner.os == 'Windows' && env.SIGNING_CLIENT_ID != ''
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature build\bin\BENCchat.exe
+          $sig | Format-List
+          if ($sig.Status -ne 'Valid') {
+            throw "signature is $($sig.Status), expected Valid"
+          }
+
       # The .app is a directory, so tar it to preserve the bundle structure and
       # the executable bit — upload-artifact would otherwise flatten it into
       # loose files that macOS won't launch.
@@ -172,10 +215,15 @@ jobs:
           body: |
             Builds of BENCchat for Linux, Windows and macOS.
 
-            These are **unsigned**. On macOS, Gatekeeper will refuse the first
-            launch: right-click the app and choose Open, or run
-            `xattr -dr com.apple.quarantine BENCchat.app`. On Windows,
-            SmartScreen shows "unrecognized app" — choose More info → Run anyway.
+            The macOS build is **unsigned**: Gatekeeper will refuse the first
+            launch, so right-click the app and choose Open, or run
+            `xattr -dr com.apple.quarantine BENCchat.app`.
+
+            The Windows build is signed when the release was built with signing
+            configured. If it wasn't, Defender may flag it — unsigned Go GUI
+            binaries that use the credential store are a standard false
+            positive. Check the SHA-256 against the build log before allowing
+            anything you didn't build yourself.
 
             No server address is baked into these binaries. Enter the address of
             the OSCAR server you're connecting to on the sign-on screen.
