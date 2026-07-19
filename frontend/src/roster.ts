@@ -75,8 +75,12 @@ export function renderRoster(
           <div class="roster__log" id="logPanel" hidden>
             <header class="roster__log-head">
               <span class="benco-label">System Log</span>
-              <button class="settings-gear" id="logClear" type="button"
-                      title="Clear the log">Clear</button>
+              <span class="roster__log-head-btns">
+                <button class="settings-gear" id="logCopy" type="button"
+                        title="Copy the whole log">Copy all</button>
+                <button class="settings-gear" id="logClear" type="button"
+                        title="Clear the log">Clear</button>
+              </span>
             </header>
             <hr class="benco-rule" />
             <div class="roster__log-list" id="logList"></div>
@@ -1526,6 +1530,7 @@ export function renderRoster(
   const logPanelEl = el<HTMLDivElement>("logPanel");
   const logListEl = el<HTMLDivElement>("logList");
   const logClearEl = el<HTMLButtonElement>("logClear");
+  const logCopyEl = el<HTMLButtonElement>("logCopy");
 
   type NoticeLevel = "info" | "warn" | "error";
 
@@ -1573,6 +1578,16 @@ export function renderRoster(
     return new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
   }
 
+  /** One log entry as plain text: timestamp, sender if any, then the message
+   *  with any markup flattened. This is what gets copied, so a pasted notice
+   *  reads the same as the one on screen rather than as raw HTML. */
+  function entryText(e: LogEntry): string {
+    const stamp = e.at.toLocaleString();
+    const who = e.from ? ` ${e.from}` : "";
+    const body = e.from ? plainText(e.text) : e.text;
+    return `[${stamp}]${who} ${body}`;
+  }
+
   function renderLogDot(): void {
     logDotEl.hidden = logUnseen === 0;
     logDotEl.textContent = logUnseen > 9 ? "9+" : String(logUnseen);
@@ -1610,6 +1625,22 @@ export function renderRoster(
         who.textContent = entry.from;
         meta.appendChild(who);
       }
+
+      // Per-entry copy. The body is selectable too (see roster.css), but the
+      // markup in a server notice means a hand-selection picks up link text
+      // without the URL — this copies the plain text of the whole entry.
+      const copy = document.createElement("button");
+      copy.className = "roster__log-copy";
+      copy.type = "button";
+      copy.title = "Copy this notice";
+      copy.setAttribute("aria-label", "Copy this notice");
+      copy.textContent = "⧉";
+      copy.addEventListener("click", async () => {
+        const ok = await Bridge.copyText(entryText(entry));
+        copy.textContent = ok ? "✓" : "✗";
+        window.setTimeout(() => (copy.textContent = "⧉"), 1500);
+      });
+      meta.appendChild(copy);
 
       const dismiss = document.createElement("button");
       dismiss.className = "roster__log-x";
@@ -1653,6 +1684,17 @@ export function renderRoster(
   logClearEl.addEventListener("click", () => {
     logEntries = [];
     renderLog();
+  });
+
+  // Oldest first when copying: a log you're pasting for someone else to read
+  // should run in the order things happened, even though the panel shows the
+  // newest at the top.
+  logCopyEl.addEventListener("click", async () => {
+    if (logEntries.length === 0) return;
+    const text = [...logEntries].reverse().map(entryText).join("\n");
+    const ok = await Bridge.copyText(text);
+    logCopyEl.textContent = ok ? "Copied" : "Failed";
+    window.setTimeout(() => (logCopyEl.textContent = "Copy all"), 2000);
   });
 
   // Links in server notices open in the real browser, exactly as they do in

@@ -88,6 +88,14 @@ body {
   user-select: none;
 }
 
+/* Selection is themed rather than left as the browser's blue, which reads as a
+   web page dropped into the app. Worth defining now that error messages, the
+   system log and the chat log are all selectable. */
+::selection {
+  background: var(--benco-green-deep);
+  color: var(--benco-phosphor);
+}
+
 #app {
   height: 100vh;
   display: flex;

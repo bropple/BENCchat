@@ -264,6 +264,7 @@ interface AppBindings {
 interface WailsRuntime {
   EventsOn(event: string, cb: (data: unknown) => void): void;
   BrowserOpenURL(url: string): void;
+  ClipboardSetText(text: string): Promise<boolean>;
 }
 
 declare global {
@@ -394,6 +395,37 @@ export const Bridge = {
    *  (which would replace the whole app). Used for links inside messages. */
   openExternal(url: string): void {
     window.runtime?.BrowserOpenURL(url);
+  },
+
+  /** Copies text to the system clipboard.
+   *
+   *  Goes through the Wails runtime rather than navigator.clipboard: the
+   *  latter needs a secure context and a permission the webview doesn't grant
+   *  under the wails:// scheme, so it fails silently. Falls back to a hidden
+   *  textarea + execCommand for the dev-server case, where window.runtime is
+   *  the stub and not the real thing. */
+  async copyText(text: string): Promise<boolean> {
+    if (window.runtime?.ClipboardSetText) {
+      try {
+        return await window.runtime.ClipboardSetText(text);
+      } catch {
+        /* fall through */
+      }
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
   },
 };
 

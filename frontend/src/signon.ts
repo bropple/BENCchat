@@ -3,7 +3,7 @@
 import { Bridge, type SessionStatus } from "./bridge";
 import { openSettings } from "./settings";
 import { setSoundEnabled } from "./sound";
-import { promptDialog } from "./dialog";
+import { serverDialog } from "./dialog";
 import bencoLogo from "./assets/benco-logo.png";
 
 // The R. Triy mark (canonical roster triangle + visor) rendered inline so the
@@ -51,7 +51,11 @@ export function renderSignOn(root: HTMLElement, onSignedOn: () => void): void {
           <button class="benco-button" id="signOn">Sign On</button>
         </div>
 
-        <div class="benco-error" id="error"></div>
+        <div class="signon__error-wrap">
+          <div class="benco-error signon__error" id="error"></div>
+          <button class="signon__copy" id="copyError" type="button"
+                  title="Copy this message" hidden>Copy</button>
+        </div>
 
         <hr class="benco-rule" />
 
@@ -81,9 +85,22 @@ export function renderSignOn(root: HTMLElement, onSignedOn: () => void): void {
   const serverToggle = el<HTMLDivElement>("serverToggle");
   const rememberMe = el<HTMLInputElement>("rememberMe");
 
+  const copyError = el<HTMLButtonElement>("copyError");
+
   const setError = (msg: string) => {
     error.textContent = msg;
+    copyError.hidden = msg === "";
+    copyError.textContent = "Copy";
   };
+
+  // Sign-on failures are exactly the text someone needs to paste elsewhere to
+  // ask what it means, so copying it shouldn't require selecting it by hand.
+  // (Selecting still works too — see .signon__error in signon.css.)
+  copyError.addEventListener("click", async () => {
+    const ok = await Bridge.copyText(error.textContent ?? "");
+    copyError.textContent = ok ? "Copied" : "Press Ctrl+C";
+    window.setTimeout(() => (copyError.textContent = "Copy"), 2000);
+  });
 
   // Prefill server address + remembered screen name from Go config, and reflect
   // whether a password is already saved for auto-login.
@@ -143,26 +160,30 @@ export function renderSignOn(root: HTMLElement, onSignedOn: () => void): void {
   // Minimal server switcher via prompt() for now — a proper settings panel is
   // a later phase; the point today is that the address is not hardcoded.
   serverToggle.addEventListener("click", async () => {
-    const current = serverValue.textContent ?? "";
-    const next = await promptDialog("Server address (host:port)", current, { title: "Change server" });
+    // Ask the backend rather than re-parsing serverValue: that element holds a
+    // display string with a "🔒 TLS" suffix, and feeding it back in as an
+    // editable value is what used to produce a NaN port.
+    const s = await Bridge.getServerSettings();
+    const next = await serverDialog(s.host, s.port);
     if (!next) return;
-    const [host, portStr] = next.split(":");
-    const port = Number(portStr);
-    if (!host || !Number.isFinite(port)) {
-      setError("Enter the server as host:port");
-      return;
-    }
-    const err = await Bridge.saveServerSettings(host, port);
+    const err = await Bridge.saveServerSettings(next.host, next.port);
     if (err) {
       setError(err);
       return;
     }
-    serverValue.textContent = `${host}:${port}`;
+    serverValue.textContent = `${next.host}:${next.port}${
+      s.tls ? (s.tlsInsecure ? " 🔓 TLS (unverified)" : " 🔒 TLS") : " (not encrypted)"
+    }`;
   });
 }
 
 /** Shows a sign-on status update in the error slot. */
 export function showSignOnStatus(status: SessionStatus): void {
   const error = document.getElementById("error");
-  if (error && status.state === "error") error.textContent = status.message;
+  if (error && status.state === "error") {
+    error.textContent = status.message;
+    // Keep the copy affordance in step with the message it copies.
+    const copy = document.getElementById("copyError");
+    if (copy) copy.hidden = status.message === "";
+  }
 }

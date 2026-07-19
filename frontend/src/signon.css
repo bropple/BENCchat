@@ -110,3 +110,41 @@
 .signon__remember input {
   accent-color: var(--benco-green);
 }
+
+/* The error slot and its copy button.
+
+   body sets user-select:none for a native feel, which also made failure
+   messages impossible to select — and a sign-on error is precisely the text
+   someone wants to paste somewhere to ask about. Both routes work here:
+   select it by hand, or press Copy. */
+.signon__error-wrap {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.signon__error {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+
+.signon__copy {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: none;
+  color: var(--benco-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.signon__copy:hover {
+  border-color: var(--benco-phosphor);
+  color: var(--benco-phosphor);
+}

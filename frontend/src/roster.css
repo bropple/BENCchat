@@ -534,7 +534,6 @@
 }
 
 .roster__log-x {
-  margin-left: auto;
   padding: 0 4px;
   border: none;
   background: none;
@@ -552,6 +551,30 @@
   margin-top: 2px;
   color: var(--benco-phosphor);
   overflow-wrap: anywhere;
+  /* body sets user-select:none app-wide; opt back in here so a notice can be
+     selected and copied with the OS shortcut as well as the button. */
+  user-select: text;
+  cursor: text;
+}
+
+.roster__log-head-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.roster__log-copy {
+  margin-left: auto;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--benco-dim);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.roster__log-copy:hover {
+  color: var(--benco-phosphor);
 }
 
 .roster__log-body a {

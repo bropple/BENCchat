@@ -41,6 +41,27 @@
   width: 100%;
 }
 
+/* Fields share a row and split it by their flex weight, so an address box sits
+   next to a much narrower port box instead of both taking half. */
+.dialog__fields {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* Empty until something fails validation; collapsed so it doesn't reserve a
+   gap in the common case. */
+.dialog__error:empty {
+  display: none;
+}
+
 .dialog__actions {
   display: flex;
   justify-content: flex-end;
