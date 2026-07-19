@@ -35,8 +35,19 @@ func (a *App) setupE2EE(screenName string) {
 	a.e2eeHasKey = false
 	var kp e2ee.KeyPair
 
+	// A read that FAILED and a store that holds nothing are different answers,
+	// and only one of them means "generate a key". Minting on failure gives this
+	// device a new identity every time the keyring is locked or slow to start:
+	// every contact sees the safety number change, the old key is still in the
+	// account's device set, and nothing prunes it — so repeated failures fill
+	// the 32-device cap with dead keys until a real device gets evicted.
+	//
+	// So a failed read disables encryption for the session, which is what this
+	// function has always claimed to do.
+	keyringFailed := false
 	if priv, err := secret.RetrievePrivateKey(screenName); err != nil {
 		slog.Default().Warn("could not read E2EE key from the secret store", "err", err)
+		keyringFailed = true
 	} else if priv != "" {
 		if pk, derr := e2ee.DecodeKey(priv); derr == nil {
 			if loaded, lerr := e2ee.KeyPairFromPrivate(pk); lerr == nil {
@@ -45,8 +56,16 @@ func (a *App) setupE2EE(screenName string) {
 		}
 	}
 
-	// Enabling but no key yet → generate one now.
-	if a.cfg.E2EEOn() && !a.e2eeHasKey {
+	if keyringFailed {
+		a.store.Notify(state.NoticeError,
+			"Encryption is off for this session: your keychain couldn't be reached, "+
+				"so BENCchat can't load this device's key. It will NOT create a new one — "+
+				"that would change your safety number and look like a key substitution to "+
+				"your contacts. Unlock your keychain and sign in again.")
+	}
+
+	// Enabling but genuinely no key yet → generate one now.
+	if a.cfg.E2EEOn() && !a.e2eeHasKey && !keyringFailed {
 		if generated, err := e2ee.GenerateKeyPair(); err == nil {
 			if serr := secret.StorePrivateKey(screenName, e2ee.EncodeKey(generated.Private)); serr != nil {
 				slog.Default().Warn("could not save E2EE key", "err", serr)
@@ -119,7 +138,8 @@ func (a *App) publishAfterDeviceCheck() {
 	// none of which is ours, means we're the new machine and somebody has to
 	// approve us — which the user otherwise has no way of knowing, since the
 	// approval happens on the other device entirely.
-	if published, has, ok := a.client.FetchOwnPublishedKeys(5 * time.Second); ok && has {
+	published, has, ok := a.client.FetchOwnPublishedKeys(5 * time.Second)
+	if ok && has {
 		known := false
 		for _, k := range published {
 			if k == a.e2eePub {
@@ -133,12 +153,38 @@ func (a *App) publishAfterDeviceCheck() {
 		merged = append(merged, published...)
 	} else if !ok {
 		slog.Default().Warn("could not read the published device set; using the remembered one")
+		published = nil
 	}
 	merged = append(merged, a.e2eePub)
 
-	a.setDeviceKeys(merged)
+	// Everything observed this sign-on counts as seen now; anything only
+	// remembered keeps whatever timestamp it had. That is what lets the cap
+	// evict the machine nobody has used in months rather than an arbitrary one.
+	now := time.Now().Unix()
+	seen, err := trust.LoadDeviceSeen(a.currentAccount(), now)
+	if err != nil {
+		slog.Default().Warn("could not read device timestamps", "err", err)
+		seen = map[string]int64{}
+	}
+	for _, k := range published {
+		seen[e2ee.EncodeKey(k)] = now
+	}
+	seen[e2ee.EncodeKey(a.e2eePub)] = now
+
+	kept := e2ee.PickDevices(a.e2eePub, merged, seen)
+	if dropped := len(e2ee.DecodeKeys(e2ee.EncodeKeys(merged))) - len(kept); dropped > 0 {
+		// Never silently: a dropped key means messages sent to that machine
+		// stop being readable there, which is worth saying out loud.
+		a.store.Notify(state.NoticeWarn, fmt.Sprintf(
+			"This account is at the %d-device limit, so %d least-recently-used device key(s) "+
+				"were dropped. Remove devices you no longer use in Privacy & Security.",
+			e2ee.MaxDevices, dropped))
+	}
+
+	a.setDeviceKeys(kept)
 	devices := a.deviceKeys()
-	if err := trust.SaveDevices(a.currentAccount(), strings.Split(e2ee.EncodeKeys(devices), ",")); err != nil {
+	if err := trust.SaveDevicesSeen(a.currentAccount(),
+		strings.Split(e2ee.EncodeKeys(devices), ","), seen); err != nil {
 		slog.Default().Warn("could not remember device keys", "err", err)
 	}
 	a.publishProfile()
@@ -150,6 +196,14 @@ func (a *App) publishAfterDeviceCheck() {
 		a.store.Notify(state.NoticeInfo, fmt.Sprintf(
 			"This account has %d devices set up for encryption. Messages sent to you are "+
 				"encrypted to all of them.", n))
+	}
+	// Warn while there is still room to act, not once the cap is already
+	// evicting things.
+	if n := len(devices); n >= e2ee.MaxDevices*3/4 && n < e2ee.MaxDevices {
+		a.store.Notify(state.NoticeWarn, fmt.Sprintf(
+			"This account has %d device keys, close to the limit of %d. Old keys are not "+
+				"removed automatically — prune ones you no longer use in Privacy & Security.",
+			n, e2ee.MaxDevices))
 	}
 }
 

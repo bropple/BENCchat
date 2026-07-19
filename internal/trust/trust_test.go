@@ -92,3 +92,63 @@ func TestLoadLegacyFormat(t *testing.T) {
 		t.Errorf("legacy last-seen key = %q, want AAAA — a change would go unnoticed", got["bob"].Seen)
 	}
 }
+
+// Device timestamps have to survive a round trip, and a file written before
+// they existed must not read back as "every key is infinitely stale" — that
+// would evict a whole device set at once on first upgrade.
+func TestDeviceSeenRoundTripAndMigration(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	const acct = "alice"
+
+	// A v1-shaped file: devices, no timestamps.
+	if err := SaveDevices(acct, []string{"aaa", "bbb"}); err != nil {
+		t.Fatalf("SaveDevices: %v", err)
+	}
+	seen, err := LoadDeviceSeen(acct, 5000)
+	if err != nil {
+		t.Fatalf("LoadDeviceSeen: %v", err)
+	}
+	for _, k := range []string{"aaa", "bbb"} {
+		if seen[k] != 5000 {
+			t.Errorf("migrated key %q has timestamp %d, want the supplied now (5000)", k, seen[k])
+		}
+	}
+
+	// Real timestamps round-trip.
+	if err := SaveDevicesSeen(acct, []string{"aaa", "bbb"}, map[string]int64{"aaa": 111, "bbb": 222}); err != nil {
+		t.Fatalf("SaveDevicesSeen: %v", err)
+	}
+	seen, err = LoadDeviceSeen(acct, 5000)
+	if err != nil {
+		t.Fatalf("LoadDeviceSeen: %v", err)
+	}
+	if seen["aaa"] != 111 || seen["bbb"] != 222 {
+		t.Errorf("timestamps did not round-trip: %v", seen)
+	}
+
+	// A key that leaves the set takes its timestamp with it, so the map can't
+	// grow without bound as devices come and go.
+	if err := SaveDevicesSeen(acct, []string{"aaa"}, map[string]int64{"aaa": 111, "bbb": 222}); err != nil {
+		t.Fatalf("SaveDevicesSeen: %v", err)
+	}
+	seen, _ = LoadDeviceSeen(acct, 5000)
+	if _, ok := seen["bbb"]; ok {
+		t.Error("timestamp for a removed device was retained")
+	}
+
+	// Peer trust must survive all of this.
+	if err := Save(acct, Store{"bob": Entry{Verified: "k", Seen: "k"}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	f, err := LoadFile(acct)
+	if err != nil {
+		t.Fatalf("LoadFile: %v", err)
+	}
+	if f.Peers["bob"].Verified != "k" {
+		t.Error("peer trust was lost")
+	}
+	if len(f.Devices) != 1 {
+		t.Errorf("device list = %v, want it preserved across a peer save", f.Devices)
+	}
+}

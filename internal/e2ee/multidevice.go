@@ -511,3 +511,68 @@ func Fingerprint(pub [32]byte) string {
 	}
 	return strings.Join(groups, " ")
 }
+
+// MaxDevices is the ceiling on an account's device set, exported so callers can
+// warn before they reach it.
+const MaxDevices = maxDevices
+
+// PickDevices chooses which keys survive when a device set is over the cap.
+//
+// dedupeKeys truncates by key order, which is fine as a bound on a peer's list
+// but wrong for our own: public keys sort randomly, so it evicts an arbitrary
+// device — possibly the one running this code, which then cannot read messages
+// sent to its own account and has no way to say why.
+//
+// Here `ours` is always kept, and the remaining slots go to the most recently
+// seen keys. Eviction then means "this machine hasn't been seen in a long
+// time", which is the only thing that can be said honestly about a key set.
+// Ties break on key order so the result is deterministic.
+func PickDevices(ours [32]byte, keys [][32]byte, seen map[string]int64) [][32]byte {
+	keys = dedupeAll(keys)
+	if len(keys) <= maxDevices {
+		return keys
+	}
+
+	rest := make([][32]byte, 0, len(keys))
+	for _, k := range keys {
+		if k != ours {
+			rest = append(rest, k)
+		}
+	}
+	sort.SliceStable(rest, func(i, j int) bool {
+		si, sj := seen[EncodeKey(rest[i])], seen[EncodeKey(rest[j])]
+		if si != sj {
+			return si > sj // most recently seen first
+		}
+		return string(rest[i][:]) < string(rest[j][:])
+	})
+
+	out := [][32]byte{ours}
+	for _, k := range rest {
+		if len(out) == maxDevices {
+			break
+		}
+		out = append(out, k)
+	}
+	return dedupeAll(out)
+}
+
+// dedupeAll sorts and removes duplicates WITHOUT applying the cap, so the
+// selection above decides what to drop rather than having it decided already.
+func dedupeAll(keys [][32]byte) [][32]byte {
+	if len(keys) == 0 {
+		return nil
+	}
+	sorted := make([][32]byte, len(keys))
+	copy(sorted, keys)
+	sort.Slice(sorted, func(i, j int) bool {
+		return string(sorted[i][:]) < string(sorted[j][:])
+	})
+	out := sorted[:1]
+	for _, k := range sorted[1:] {
+		if k != out[len(out)-1] {
+			out = append(out, k)
+		}
+	}
+	return out
+}

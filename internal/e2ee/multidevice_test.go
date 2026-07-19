@@ -276,3 +276,104 @@ func TestFingerprintDistinguishesKeys(t *testing.T) {
 		t.Errorf("fingerprint %q should be 4 groups", fa)
 	}
 }
+
+// The cap used to truncate by key order. Public keys sort randomly, so that
+// evicted an arbitrary device — including possibly this one, which then could
+// not read messages sent to its own account.
+func TestPickDevicesNeverEvictsThisDevice(t *testing.T) {
+	ours, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := [][32]byte{ours.Public}
+	seen := map[string]int64{}
+	for i := 0; i < MaxDevices*2; i++ {
+		kp, err := GenerateKeyPair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, kp.Public)
+		seen[EncodeKey(kp.Public)] = int64(i) // later index == more recent
+	}
+	// Deliberately the STALEST entry, so recency alone would evict it. Only the
+	// "never drop ourselves" rule can save it.
+	seen[EncodeKey(ours.Public)] = -1
+
+	got := PickDevices(ours.Public, keys, seen)
+	if len(got) != MaxDevices {
+		t.Fatalf("kept %d devices, want the cap of %d", len(got), MaxDevices)
+	}
+	found := false
+	for _, k := range got {
+		if k == ours.Public {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("this device was evicted from its own key set — it could not read its own messages")
+	}
+}
+
+// What survives should be the machines still in use, not an arbitrary subset.
+func TestPickDevicesKeepsMostRecentlySeen(t *testing.T) {
+	ours, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := [][32]byte{ours.Public}
+	seen := map[string]int64{EncodeKey(ours.Public): 1000}
+
+	var stale, fresh [32]byte
+	for i := 0; i < MaxDevices+5; i++ {
+		kp, err := GenerateKeyPair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, kp.Public)
+		switch i {
+		case 0:
+			stale = kp.Public
+			seen[EncodeKey(kp.Public)] = 1 // ancient
+		case 1:
+			fresh = kp.Public
+			seen[EncodeKey(kp.Public)] = 9999 // just now
+		default:
+			seen[EncodeKey(kp.Public)] = 500
+		}
+	}
+
+	got := PickDevices(ours.Public, keys, seen)
+	has := func(want [32]byte) bool {
+		for _, k := range got {
+			if k == want {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(fresh) {
+		t.Error("the most recently seen device was evicted")
+	}
+	if has(stale) {
+		t.Error("the least recently seen device survived; eviction is not by recency")
+	}
+}
+
+// Under the cap nothing is dropped, whatever the timestamps say.
+func TestPickDevicesUnderCapKeepsEverything(t *testing.T) {
+	ours, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := [][32]byte{ours.Public}
+	for i := 0; i < 5; i++ {
+		kp, err := GenerateKeyPair()
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, kp.Public)
+	}
+	if got := PickDevices(ours.Public, keys, nil); len(got) != 6 {
+		t.Errorf("kept %d of 6 devices while under the cap", len(got))
+	}
+}

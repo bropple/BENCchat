@@ -1447,3 +1447,136 @@ func TestLiveRoomHost(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveDeviceWatch signs on, opens a DM, then watches the target's
+// published device set and reports every change the way the app would classify
+// it. This is the peer's-eye view of someone adding a machine: the safety
+// number moves, and the question is whether the previously-known keys survived
+// (a new device) or were replaced (a substitution). Run:
+//
+//	BENCCHAT_LIVE_SERVER=... BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
+//	BENCCHAT_LIVE_TARGET=... BENCCHAT_LIVE_WATCH=1 \
+//	go test ./internal/client/ -run TestLiveDeviceWatch -v -timeout 30m
+func TestLiveDeviceWatch(t *testing.T) {
+	addr, sn, pw := liveCreds(t)
+	if os.Getenv("BENCCHAT_LIVE_WATCH") == "" {
+		t.Skip("set BENCCHAT_LIVE_WATCH=1 to run the device watcher")
+	}
+	target := os.Getenv("BENCCHAT_LIVE_TARGET")
+	if target == "" {
+		t.Skip("set BENCCHAT_LIVE_TARGET to the screen name to watch")
+	}
+	secs := 900
+	if v := os.Getenv("BENCCHAT_LIVE_LISTEN_SECS"); v != "" {
+		if d, err := time.ParseDuration(v + "s"); err == nil {
+			secs = int(d.Seconds())
+		}
+	}
+
+	// Reuse the keyring key exactly as the app does. A fresh key each run would
+	// move the safety number on its own and make the observation meaningless.
+	var kp e2ee.KeyPair
+	if priv, err := secret.RetrievePrivateKey(sn); err == nil && priv != "" {
+		if pk, derr := e2ee.DecodeKey(priv); derr == nil {
+			if kp, err = e2ee.KeyPairFromPrivate(pk); err != nil {
+				t.Fatalf("loading stored key: %v", err)
+			}
+			t.Logf("reusing the stored E2EE key for %q", sn)
+		}
+	}
+	if kp.Public == ([32]byte{}) {
+		var err error
+		if kp, err = e2ee.GenerateKeyPair(); err != nil {
+			t.Fatalf("GenerateKeyPair: %v", err)
+		}
+		if err := secret.StorePrivateKey(sn, e2ee.EncodeKey(kp.Private)); err != nil {
+			t.Logf("warning: could not persist the key (%v)", err)
+		}
+		t.Logf("generated a new E2EE key for %q", sn)
+	}
+
+	store := state.NewStore()
+	c := New(store, nil)
+	c.SetE2EEKeyPair(kp, true)
+	c.SetE2EEOn(true)
+
+	unsub := store.Subscribe(func(e state.Event) {
+		if e.Kind != state.EventMessage || e.Message == nil || e.Message.Outgoing {
+			return
+		}
+		lock := "PLAINTEXT"
+		if e.Message.Encrypted {
+			lock = "ENCRYPTED"
+		}
+		t.Logf("[DM recv %s] <%s> %s", lock, e.Message.From, e.Message.Text)
+	})
+	defer unsub()
+
+	ctx := context.Background()
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+		t.Fatalf("SignOn: %v", err)
+	}
+	defer func() { _ = c.SignOff() }()
+
+	if err := c.SetProfile("cmaximus, BENCO coworker.\n" + e2ee.ProfileMarker(kp.Public)); err != nil {
+		t.Fatalf("SetProfile: %v", err)
+	}
+	ours := [][32]byte{kp.Public}
+
+	// Learn the target's keys BEFORE the opening DM. SendMessage falls back to
+	// plaintext for a peer whose keys we don't hold yet, so sending first sends
+	// the first message in the clear — which is exactly what happened the first
+	// time this driver ran.
+	for i := 0; i < 20; i++ {
+		c.RequestUserInfo(target)
+		if keys, ok := c.PeerKeys(target); ok && len(keys) > 0 {
+			t.Logf("learned %d key(s) for %q before sending", len(keys), target)
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !c.CanEncryptTo(target) {
+		t.Logf("WARNING: still cannot encrypt to %q — the opening DM will be plaintext", target)
+	}
+
+	if err := c.SendMessage(target,
+		"cmaximus here. Watching your device list — add a device whenever you're ready."); err != nil {
+		t.Fatalf("opening DM to %s failed: %v", target, err)
+	}
+	t.Logf("online as %q, watching %q for %ds", sn, target, secs)
+
+	// Poll the profile. The server keeps a BUCP client's keys on the live
+	// session, so a re-request is the only way to observe a change.
+	var last [][32]byte
+	deadline := time.Now().Add(time.Duration(secs) * time.Second)
+	for time.Now().Before(deadline) {
+		c.RequestUserInfo(target)
+		time.Sleep(3 * time.Second)
+
+		keys, ok := c.PeerKeys(target)
+		if !ok || len(keys) == 0 {
+			continue
+		}
+		if e2ee.EncodeKeys(keys) == e2ee.EncodeKeys(last) {
+			continue
+		}
+
+		if last == nil {
+			t.Logf("BASELINE: %q publishes %d device key(s)", target, len(keys))
+		} else {
+			// The same classification VerificationInfo applies: every old key
+			// still present means an addition, anything missing is a swap.
+			verdict := "changed (a key we relied on is GONE — substitution)"
+			if e2ee.KeysOnlyAdded(last, keys) {
+				verdict = "device-added (all previously-known keys still present)"
+			}
+			t.Logf("CHANGE: %d -> %d device key(s); classified as %s",
+				len(last), len(keys), verdict)
+			t.Logf("  old safety number: %s", e2ee.SafetyNumberSet(ours, last))
+		}
+		t.Logf("  new safety number: %s", e2ee.SafetyNumberSet(ours, keys))
+		t.Logf("  keys: %s", e2ee.EncodeKeys(keys))
+		last = keys
+	}
+	t.Logf("watch window ended")
+}

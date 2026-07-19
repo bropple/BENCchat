@@ -64,16 +64,26 @@ type File struct {
 	// Without this, signing in on a laptop while the desktop is off would drop
 	// the desktop's key, and messages sent meanwhile would be unreadable there.
 	Devices []string
+	// DeviceSeen records when each device key was last observed published, as a
+	// unix timestamp keyed by the base64 key.
+	//
+	// The device list is capped, so something has to be dropped when it fills.
+	// Dropping by key order evicts an arbitrary device — including, possibly,
+	// the one you are sitting at, which then silently cannot read its own
+	// messages. Recency makes the eviction mean "this machine hasn't been seen
+	// in a long time", which is the only defensible answer.
+	DeviceSeen map[string]int64
 }
 
 // fileFormat is the versioned on-disk envelope.
 type fileFormat struct {
-	Version int      `json:"version"`
-	Peers   Store    `json:"peers"`
-	Devices []string `json:"devices,omitempty"`
+	Version    int              `json:"version"`
+	Peers      Store            `json:"peers"`
+	Devices    []string         `json:"devices,omitempty"`
+	DeviceSeen map[string]int64 `json:"deviceSeen,omitempty"`
 }
 
-const currentVersion = 1
+const currentVersion = 2
 
 // safeName turns an account into a filesystem-safe file stem, matching the
 // history package's convention so both stores name files the same way.
@@ -128,7 +138,7 @@ func LoadFile(account string) (File, error) {
 	if f.Peers == nil {
 		f.Peers = Store{}
 	}
-	return File{Peers: f.Peers, Devices: f.Devices}, nil
+	return File{Peers: f.Peers, Devices: f.Devices, DeviceSeen: f.DeviceSeen}, nil
 }
 
 // SaveFile writes an account's trust record atomically (temp file then rename).
@@ -141,9 +151,10 @@ func SaveFile(account string, file File) error {
 		file.Peers = Store{}
 	}
 	raw, err := json.MarshalIndent(fileFormat{
-		Version: currentVersion,
-		Peers:   file.Peers,
-		Devices: file.Devices,
+		Version:    currentVersion,
+		Peers:      file.Peers,
+		Devices:    file.Devices,
+		DeviceSeen: file.DeviceSeen,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -179,12 +190,47 @@ func LoadDevices(account string) ([]string, error) {
 	return f.Devices, err
 }
 
+// LoadDeviceSeen returns when each remembered device was last observed.
+//
+// A file written before this was recorded has no timestamps; those keys are
+// reported as seen `now`, so they age from this point rather than all looking
+// infinitely stale and being evicted at once.
+func LoadDeviceSeen(account string, now int64) (map[string]int64, error) {
+	f, err := LoadFile(account)
+	seen := map[string]int64{}
+	for k, v := range f.DeviceSeen {
+		seen[k] = v
+	}
+	for _, k := range f.Devices {
+		if _, ok := seen[k]; !ok {
+			seen[k] = now
+		}
+	}
+	return seen, err
+}
+
 // SaveDevices records the account's device key set, preserving peer trust.
 func SaveDevices(account string, devices []string) error {
+	return SaveDevicesSeen(account, devices, nil)
+}
+
+// SaveDevicesSeen records the device set along with when each was last seen.
+// Timestamps for keys no longer in the set are dropped, so the map cannot grow
+// without bound as devices come and go.
+func SaveDevicesSeen(account string, devices []string, seen map[string]int64) error {
 	existing, err := LoadFile(account)
 	if err != nil {
 		existing = File{}
 	}
 	existing.Devices = devices
+	if seen != nil {
+		pruned := make(map[string]int64, len(devices))
+		for _, k := range devices {
+			if ts, ok := seen[k]; ok {
+				pruned[k] = ts
+			}
+		}
+		existing.DeviceSeen = pruned
+	}
 	return SaveFile(account, existing)
 }
