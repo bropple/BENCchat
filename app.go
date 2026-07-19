@@ -151,7 +151,7 @@ func (a *App) shutdown(ctx context.Context) {
 // reconnect and chat connections can't silently drop to plaintext.
 func (a *App) transport() oscar.Transport {
 	return oscar.Transport{
-		TLS:                a.cfg.TLSEnabled,
+		TLS:                a.cfg.TLSOn(),
 		InsecureSkipVerify: a.cfg.TLSInsecure,
 	}
 }
@@ -210,7 +210,7 @@ func (a *App) GetServerSettings() ServerSettings {
 		Host:           a.cfg.AuthHost,
 		Port:           a.cfg.AuthPort,
 		LastScreenName: a.cfg.LastScreenName,
-		TLS:            a.cfg.TLSEnabled,
+		TLS:            a.cfg.TLSOn(),
 		TLSInsecure:    a.cfg.TLSInsecure,
 		Remembered:     a.cfg.RememberedScreenName != "",
 	}
@@ -222,7 +222,7 @@ func (a *App) GetServerSettings() ServerSettings {
 // certificate verification and is for testing against a self-signed server
 // only — it defeats the point of TLS, so the UI must label it as such.
 func (a *App) SetTLS(on, insecure bool) string {
-	a.cfg.TLSEnabled = on
+	a.cfg.TLSEnabled = &on
 	a.cfg.TLSInsecure = on && insecure
 	if err := config.Save(a.cfg); err != nil {
 		return err.Error()
@@ -267,8 +267,12 @@ func (a *App) SignIn(screenName string, password string, remember bool) string {
 		return "no server set — use “Change server” below to enter your OSCAR server address"
 	}
 	if err := a.doSignOn(screenName, password, remember); err != nil {
-		a.emitStatus(SessionStatus{State: "error", Message: signOnErrorMessage(err)})
-		return signOnErrorMessage(err)
+		msg := signOnErrorMessage(err)
+		if hint := transportHint(err, a.cfg.TLSOn()); hint != "" {
+			msg += "\n\n" + hint
+		}
+		a.emitStatus(SessionStatus{State: "error", Message: msg})
+		return msg
 	}
 	a.emitStatus(SessionStatus{State: "online", Message: "Signed on."})
 	return ""
@@ -371,6 +375,47 @@ func signOnErrorMessage(err error) string {
 		return loginErr.Error()
 	}
 	return "Could not sign on: " + err.Error()
+}
+
+// transportHint explains the two ways a port and the TLS setting can disagree.
+// Both fail in a way that reads like a network fault while actually being a
+// one-checkbox misconfiguration, so the error says which checkbox.
+//
+// Plaintext at a TLS port is the quiet one: the connection succeeds, then both
+// ends wait — stunnel for a ClientHello, us for a FLAP hello — until the read
+// times out. Nothing in "i/o timeout" suggests the transport is the problem.
+func transportHint(err error, tlsOn bool) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+
+	if !tlsOn {
+		// A timeout mid-handshake, having already connected. A genuinely
+		// unreachable host fails to dial instead, and reads that time out later
+		// in a live session don't come through sign-on.
+		if strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "timeout") {
+			return "The server accepted the connection but sent nothing back. " +
+				"That usually means this port expects TLS — turn on “Require an " +
+				"encrypted connection (TLS)” in Settings and try again."
+		}
+		return ""
+	}
+
+	// A certificate that doesn't check out is a different problem from a port
+	// that doesn't speak TLS at all, and pointing at the wrong one sends people
+	// off disabling verification when the port was the issue.
+	if strings.Contains(msg, "x509") || strings.Contains(msg, "certificate") {
+		return "TLS connected but the server's certificate was rejected. Check " +
+			"that the address matches the certificate's name."
+	}
+	if strings.Contains(msg, "first record does not look like a TLS handshake") ||
+		strings.Contains(msg, "tls: ") {
+		return "This port doesn't speak TLS. Use the server's TLS port, or turn " +
+			"off “Require an encrypted connection (TLS)” in Settings — which " +
+			"sends your login and buddy list in the clear."
+	}
+	return ""
 }
 
 // SignOff tears down the session.

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,5 +72,52 @@ func TestAppHistoryDisabledDoesNotWrite(t *testing.T) {
 
 	if convs, _ := history.Load("tester"); len(convs.Conversations) != 0 {
 		t.Fatalf("history was written while disabled: %+v", convs)
+	}
+}
+
+// A port/TLS mismatch fails in a way that reads like a network fault while
+// actually being one checkbox. The message has to say which.
+func TestTransportHint(t *testing.T) {
+	// The verbatim error from a Windows client speaking plaintext at the TLS
+	// port: the connection succeeded, then both ends waited for each other.
+	plainAtTLSPort := errors.New("oscar: server hello: oscar: read FLAP frame: " +
+		"failed to unmarshal: read tcp 10.0.0.245:51786->198.51.100.7:5191: i/o timeout")
+	tlsAtPlainPort := errors.New("oscar: dial: tls: first record does not look like a TLS handshake")
+	badCert := errors.New(`oscar: dial: x509: certificate is valid for other.example, not this.example`)
+	badPassword := errors.New("incorrect screen name or password")
+
+	tests := []struct {
+		name   string
+		err    error
+		tlsOn  bool
+		expect string // substring the hint must contain; "" means no hint at all
+	}{
+		{"plaintext at a TLS port suggests turning TLS on", plainAtTLSPort, false, "turn on"},
+		{"TLS at a plaintext port names the port, not the setting", tlsAtPlainPort, true, "doesn't speak TLS"},
+		{"a bad certificate is not a wrong port", badCert, true, "certificate"},
+		{"an ordinary auth failure gets no transport advice", badPassword, false, ""},
+		{"a timeout with TLS already on gets no advice", plainAtTLSPort, true, ""},
+		{"no error, no hint", nil, true, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transportHint(tc.err, tc.tlsOn)
+			if tc.expect == "" {
+				if got != "" {
+					t.Errorf("expected no hint, got %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.expect) {
+				t.Errorf("hint = %q, want it to mention %q", got, tc.expect)
+			}
+		})
+	}
+
+	// The certificate case must not tell people the port is wrong: that sends
+	// them disabling verification when the address was the actual problem.
+	if h := transportHint(badCert, true); strings.Contains(h, "doesn't speak TLS") {
+		t.Errorf("certificate failure misreported as a port problem: %q", h)
 	}
 }

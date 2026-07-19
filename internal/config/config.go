@@ -45,9 +45,15 @@ type Config struct {
 	// so users (or a future sync feature) can hand-edit this in config.json.
 	Theme Theme `json:"theme,omitempty"`
 
-	// TLSEnabled connects over TLS. Off by default because the deployment is
-	// still plaintext; turning it on requires a TLS listener server-side.
-	TLSEnabled bool `json:"tlsEnabled,omitempty"`
+	// TLSEnabled connects over TLS. ON by default — a chat client should not
+	// put your login handshake and buddy list on the wire in the clear because
+	// you didn't find a checkbox. A pointer so an explicit false survives a
+	// round trip: with omitempty a plain bool cannot distinguish "the user
+	// turned this off" from "this config predates the setting", and those two
+	// have to mean different things when the default is on.
+	//
+	// Read it through TLSOn(), never directly.
+	TLSEnabled *bool `json:"tlsEnabled,omitempty"`
 
 	// TLSInsecure skips certificate verification. For testing against a
 	// self-signed development server ONLY — it removes exactly the protection
@@ -108,6 +114,13 @@ type Theme struct {
 // SoundOn reports the effective sound setting, defaulting to true on first run.
 func (c Config) SoundOn() bool {
 	return c.SoundEnabled == nil || *c.SoundEnabled
+}
+
+// TLSOn reports the effective transport setting, defaulting to true on first
+// run. There is no fallback to plaintext: when this is on, sign-on fails rather
+// than connecting in the clear.
+func (c Config) TLSOn() bool {
+	return c.TLSEnabled == nil || *c.TLSEnabled
 }
 
 // E2EEOn reports the effective encryption setting, defaulting to true.
