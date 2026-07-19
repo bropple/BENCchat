@@ -34,14 +34,19 @@ type LoginError struct {
 func (e *LoginError) Error() string { return wire.LoginErrString(e.Code) }
 
 // Credentials is a single sign-on attempt. The password lives here only for the
-// duration of Login; it is hashed and never retained or persisted.
+// duration of Login and is never retained or persisted.
+//
+// It is sent to the server as-is rather than hashed, which is safe only because
+// the connection is TLS — the server needs the cleartext to verify it against an
+// argon2id hash. Anything that could route a Login over an unencrypted transport
+// is therefore a credential leak, not merely a downgrade.
 type Credentials struct {
 	ScreenName string
 	Password   string
 }
 
-// LoginResult is a successful BUCP authorization: where to reconnect and the
-// cookie proving we may.
+// LoginResult is a successful authorization: where to reconnect and the cookie
+// proving we may.
 type LoginResult struct {
 	// ScreenName is the server's canonical form (correct casing/spacing), which
 	// may differ from what the user typed.
@@ -65,8 +70,8 @@ type LoginResult struct {
 // Expired reports whether the cookie is past its lifetime.
 func (r *LoginResult) Expired() bool { return time.Now().After(r.ExpiresAt) }
 
-// Login runs the BUCP (MD5) sign-on against the authorizer at addr and returns
-// the BOS address plus auth cookie. It opens and closes its own connection: the
+// Login runs the FLAP sign-on against the authorizer at addr and returns the
+// BOS address plus auth cookie. It opens and closes its own connection: the
 // server always signs off the auth connection once it has answered, so this
 // connection is never reused for messaging.
 func Login(ctx context.Context, addr string, creds Credentials, tr ...Transport) (*LoginResult, error) {
@@ -99,107 +104,66 @@ func Login(ctx context.Context, addr string, creds Credentials, tr ...Transport)
 	return res, nil
 }
 
-// loginOn runs the BUCP exchange over an already-connected Conn. Split from
+// loginOn runs the sign-on exchange over an already-connected Conn. Split from
 // Login so tests can drive the full handshake over a net.Pipe.
+//
+// This is the FLAP sign-on path, not BUCP. BENCchat used to do the two-step BUCP
+// challenge-response: ask for the user's salt, hash the password against it,
+// send the digest. BENCoscar no longer supports that, because it requires the
+// server to store a value it can reproduce the client's digest from — a password
+// equivalent — which rules out hashing passwords with a one-way KDF. The server
+// now verifies a password against argon2id, so the password itself goes on the
+// wire, inside TLS.
+//
+// That is one round trip instead of two, and it deletes the MD5 entirely.
 func loginOn(conn *Conn, creds Credentials) (*LoginResult, error) {
 	// The server greets us first.
 	if _, err := conn.ReadSignonFrame(); err != nil {
 		return nil, fmt.Errorf("oscar: server hello: %w", err)
 	}
 
-	// Our sign-on frame must carry NO TLVs. The server picks the auth mechanism
-	// by inspecting this frame: a login cookie (0x06) means service reconnect, a
-	// screen name (0x01) means the legacy roasted-password FLAP path, and only an
-	// empty TLV list selects BUCP. Putting the screen name here — the obvious
-	// thing to do — silently routes us down the wrong path and fails later with a
-	// misleading error.
-	if err := conn.WriteSignonFrame(nil); err != nil {
-		return nil, fmt.Errorf("oscar: send signon: %w", err)
-	}
-
-	authKey, err := requestChallenge(conn, creds.ScreenName)
-	if err != nil {
-		return nil, err
-	}
-
-	return sendLogin(conn, creds, authKey)
-}
-
-// requestChallenge asks for the screen name's auth key (a per-user salt).
-func requestChallenge(conn *Conn, screenName string) (string, error) {
-	req := wire.SNAC_0x17_0x06_BUCPChallengeRequest{}
-	req.Append(wire.NewTLVBE(wire.LoginTLVTagsScreenName, []byte(screenName)))
-
-	if err := conn.WriteSNAC(wire.SNACFrame{
-		FoodGroup: wire.BUCP,
-		SubGroup:  wire.BUCPChallengeRequest,
-		RequestID: 1,
-	}, req); err != nil {
-		return "", fmt.Errorf("oscar: send challenge request: %w", err)
-	}
-
-	frame, body, err := conn.ReadSNAC()
-	if err != nil {
-		return "", fmt.Errorf("oscar: read challenge response: %w", err)
-	}
-
-	switch {
-	case frame.FoodGroup == wire.BUCP && frame.SubGroup == wire.BUCPChallengeResponse:
-		var resp wire.SNAC_0x17_0x07_BUCPChallengeResponse
-		if err := wire.UnmarshalBE(&resp, bytes.NewReader(body)); err != nil {
-			return "", fmt.Errorf("oscar: decode challenge response: %w", err)
-		}
-		return resp.AuthKey, nil
-
-	case frame.FoodGroup == wire.BUCP && frame.SubGroup == wire.BUCPLoginResponse:
-		// An unknown screen name is rejected at the challenge stage rather than at
-		// login. This response carries only the error TLV — no screen name.
-		return "", parseLoginError(body)
-
-	default:
-		return "", fmt.Errorf("oscar: unexpected SNAC %s while awaiting challenge", snacName(frame))
-	}
-}
-
-// sendLogin hashes the password against the auth key and completes sign-on.
-func sendLogin(conn *Conn, creds Credentials, authKey string) (*LoginResult, error) {
-	// Strong hashing: md5(authKey + md5(password) + magic). The server stores both
-	// digests and accepts either, but strong is what every client since AIM 4.8
-	// sends and it keeps the raw password out of the outer digest.
-	hash := wire.StrongMD5PasswordHash(creds.Password, authKey)
-
-	req := wire.SNAC_0x17_0x02_BUCPLoginRequest{}
-	req.Append(wire.NewTLVBE(wire.LoginTLVTagsScreenName, []byte(creds.ScreenName)))
-	req.Append(wire.NewTLVBE(wire.LoginTLVTagsPasswordHash, hash))
-	req.Append(wire.NewTLVBE(wire.LoginTLVTagsClientIdentity, []byte(ClientIdentity)))
-	// Announce multi-connection support. This opts into concurrent sessions and,
-	// just as importantly, makes the server use modern FLAP signoff frames on a
-	// forced disconnect rather than the legacy 4-byte disconnect frame, which has
-	// no length field and would desynchronize our reader.
-	req.Append(wire.NewTLVBE(wire.LoginTLVTagsMultiConnFlags, wire.MultiConnFlagsRecentClient))
-
-	if err := conn.WriteSNAC(wire.SNACFrame{
-		FoodGroup: wire.BUCP,
-		SubGroup:  wire.BUCPLoginRequest,
-		RequestID: 2,
-	}, req); err != nil {
-		return nil, fmt.Errorf("oscar: send login request: %w", err)
+	// The server picks the auth mechanism by inspecting this frame's TLVs: a
+	// login cookie (0x06) means service reconnect, and an EMPTY list selects
+	// BUCP. Carrying a screen name plus a password TLV selects the FLAP path,
+	// where 0x1339 specifically means "this is the password in the clear".
+	tlvs := []wire.TLV{
+		wire.NewTLVBE(wire.LoginTLVTagsScreenName, []byte(creds.ScreenName)),
+		wire.NewTLVBE(wire.LoginTLVTagsPlaintextPassword, []byte(creds.Password)),
+		wire.NewTLVBE(wire.LoginTLVTagsClientIdentity, []byte(ClientIdentity)),
+		// Announce multi-connection support. This opts into concurrent sessions
+		// and, just as importantly, makes the server use modern FLAP signoff
+		// frames on a forced disconnect rather than the legacy 4-byte disconnect
+		// frame, which has no length field and would desynchronize our reader.
+		wire.NewTLVBE(wire.LoginTLVTagsMultiConnFlags, wire.MultiConnFlagsRecentClient),
 	}
 
 	// Stamp expiry before the round trip so a slow response eats into the budget
 	// rather than being credited against it.
 	issued := time.Now()
 
-	frame, body, err := conn.ReadSNAC()
+	if err := conn.WriteSignonFrame(tlvs); err != nil {
+		return nil, fmt.Errorf("oscar: send signon: %w", err)
+	}
+
+	return readLoginResponse(conn, creds, issued)
+}
+
+// readLoginResponse reads the server's verdict.
+//
+// Unlike BUCP, the FLAP path answers with a bare TLV block in a FLAP SIGNOFF
+// frame rather than a SNAC — the auth server states its result and hangs up in
+// the same breath, which is why Login never reuses this connection.
+func readLoginResponse(conn *Conn, creds Credentials, issued time.Time) (*LoginResult, error) {
+	frame, err := conn.ReadFrame()
 	if err != nil {
 		return nil, fmt.Errorf("oscar: read login response: %w", err)
 	}
-	if frame.FoodGroup != wire.BUCP || frame.SubGroup != wire.BUCPLoginResponse {
-		return nil, fmt.Errorf("oscar: unexpected SNAC %s while awaiting login response", snacName(frame))
+	if frame.FrameType != wire.FLAPFrameSignoff {
+		return nil, fmt.Errorf("oscar: unexpected FLAP frame type 0x%02x while awaiting login response", frame.FrameType)
 	}
 
-	var resp wire.SNAC_0x17_0x03_BUCPLoginResponse
-	if err := wire.UnmarshalBE(&resp, bytes.NewReader(body)); err != nil {
+	var resp wire.TLVRestBlock
+	if err := wire.UnmarshalBE(&resp, bytes.NewReader(frame.Payload)); err != nil {
 		return nil, fmt.Errorf("oscar: decode login response: %w", err)
 	}
 
@@ -207,7 +171,7 @@ func sendLogin(conn *Conn, creds Credentials, authKey string) (*LoginResult, err
 	// of an error TLV — this is how the server's own code discriminates.
 	cookie, ok := resp.Bytes(wire.LoginTLVTagsAuthorizationCookie)
 	if !ok {
-		return nil, parseLoginError(body)
+		return nil, parseLoginError(resp)
 	}
 
 	bosAddr, ok := resp.String(wire.LoginTLVTagsReconnectHere)
@@ -228,15 +192,10 @@ func sendLogin(conn *Conn, creds Credentials, authKey string) (*LoginResult, err
 	}, nil
 }
 
-// parseLoginError turns a failed BUCPLoginResponse body into a *LoginError. The
-// screen name TLV is present on login failures but absent on challenge-stage
-// failures, so it is treated as optional.
-func parseLoginError(body []byte) error {
-	var resp wire.SNAC_0x17_0x03_BUCPLoginResponse
-	if err := wire.UnmarshalBE(&resp, bytes.NewReader(body)); err != nil {
-		return fmt.Errorf("oscar: decode login error: %w", err)
-	}
-
+// parseLoginError turns a failed login response into a *LoginError. The screen
+// name TLV is present on some rejections and absent on others, so it is treated
+// as optional.
+func parseLoginError(resp wire.TLVRestBlock) error {
 	code, ok := resp.Uint16BE(wire.LoginTLVTagsErrorSubcode)
 	if !ok {
 		return errors.New("oscar: login rejected without an error code")

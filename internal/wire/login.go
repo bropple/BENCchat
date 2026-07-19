@@ -15,6 +15,13 @@ const (
 	LoginTLVTagsAuthorizationCookie uint16 = 0x06
 	LoginTLVTagsErrorSubcode        uint16 = 0x08
 	LoginTLVTagsPasswordHash        uint16 = 0x25
+	// LoginTLVTagsPlaintextPassword carries the password itself in the sign-on
+	// frame. This is the mechanism BENCchat uses, and it is safe only because the
+	// connection is TLS: the server verifies it against an argon2id hash, which
+	// is impossible with challenge-response because that requires the server to
+	// store a value it can reproduce the client's digest from. See BENCoscar's
+	// docs/BENCO_AUTH.md.
+	LoginTLVTagsPlaintextPassword   uint16 = 0x1339
 	LoginTLVTagsMultiConnFlags      uint16 = 0x4A
 	LoginTLVTagsClientCountry       uint16 = 0x0E
 	LoginTLVTagsClientLanguage      uint16 = 0x0F

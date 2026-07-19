@@ -25,7 +25,7 @@ const DefaultAuthPort = 5190
 
 // Config is the persisted client configuration.
 type Config struct {
-	// AuthHost / AuthPort address the BUCP authorizer — the first connection a
+	// AuthHost / AuthPort address the authorizer — the first connection a
 	// client makes. The server then hands back a BOS address to reconnect to,
 	// so this is only the front door, not necessarily where messaging happens.
 	AuthHost string `json:"authHost"`

@@ -3,7 +3,6 @@ package oscar
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
 	"errors"
 	"testing"
 	"time"
@@ -66,6 +65,31 @@ func (f *fakeServer) send(fg, sg uint16, body any) {
 	}
 }
 
+// sendLoginResult writes the server's verdict the way the FLAP sign-on path
+// does: a bare TLV block inside a SIGNOFF frame, not a SNAC. The auth server
+// states its result and hangs up in the same breath.
+func (f *fakeServer) sendLoginResult(tlvs wire.TLVRestBlock) {
+	f.t.Helper()
+	buf := &bytes.Buffer{}
+	if err := wire.MarshalBE(tlvs, buf); err != nil {
+		f.t.Fatalf("marshal login result: %v", err)
+	}
+	if err := f.c.WriteFrame(wire.FLAPFrameSignoff, buf.Bytes()); err != nil {
+		f.t.Errorf("fake server send login result: %v", err)
+	}
+}
+
+// loginErrTLVs builds a rejection carrying an error subcode, optionally with the
+// screen name the server echoes back on some failures but not others.
+func loginErrTLVs(code uint16, screenName string) wire.TLVRestBlock {
+	tlvs := wire.TLVRestBlock{}
+	if screenName != "" {
+		tlvs.Append(wire.NewTLVBE(wire.LoginTLVTagsScreenName, []byte(screenName)))
+	}
+	tlvs.Append(wire.NewTLVBE(wire.LoginTLVTagsErrorSubcode, code))
+	return tlvs
+}
+
 // tlvsOf decodes a bare TLV block from a SNAC body.
 func tlvsOf(t *testing.T, body []byte) wire.TLVRestBlock {
 	t.Helper()
@@ -77,7 +101,6 @@ func tlvsOf(t *testing.T, body []byte) wire.TLVRestBlock {
 }
 
 const (
-	testAuthKey    = "the-auth-key"
 	testScreenName = "triy"
 	testPassword   = "hunter2"
 )
@@ -104,50 +127,44 @@ func TestLoginSuccess(t *testing.T) {
 
 	fs.hello()
 
-	// The BUCP branch is selected by an EMPTY TLV list. A screen name here would
-	// silently route the server into the legacy FLAP roasted-password path.
-	if sf := fs.expectSignon(); len(sf.TLVList) != 0 {
-		t.Fatalf("client signon frame must carry no TLVs (BUCP selector), got %d", len(sf.TLVList))
+	// The whole handshake is this one frame now. The server selects the auth
+	// mechanism from its TLVs: an EMPTY list would select BUCP, which BENCoscar
+	// refuses, and a login cookie would mean a service reconnect.
+	sf := fs.expectSignon()
+	login := wire.TLVRestBlock{TLVList: sf.TLVList}
+
+	if sn, ok := login.String(wire.LoginTLVTagsScreenName); !ok || sn != testScreenName {
+		t.Fatalf("signon screen name = %q (found=%v), want %q", sn, ok, testScreenName)
 	}
 
-	chal := tlvsOf(t, fs.expectSNAC(wire.BUCP, wire.BUCPChallengeRequest))
-	if sn, ok := chal.String(wire.LoginTLVTagsScreenName); !ok || sn != testScreenName {
-		t.Fatalf("challenge screen name = %q (found=%v), want %q", sn, ok, testScreenName)
-	}
-	fs.send(wire.BUCP, wire.BUCPChallengeResponse,
-		wire.SNAC_0x17_0x07_BUCPChallengeResponse{AuthKey: testAuthKey})
-
-	login := tlvsOf(t, fs.expectSNAC(wire.BUCP, wire.BUCPLoginRequest))
-
-	// The hash must be strong MD5: md5(authKey + md5(password) + magic).
-	inner := md5.Sum([]byte(testPassword))
-	outer := md5.New()
-	outer.Write([]byte(testAuthKey))
-	outer.Write(inner[:])
-	outer.Write([]byte("AOL Instant Messenger (SM)"))
-	wantHash := outer.Sum(nil)
-
-	gotHash, ok := login.Bytes(wire.LoginTLVTagsPasswordHash)
+	// The password goes in TLV 0x1339, verbatim. This is only acceptable because
+	// the transport is TLS; the server verifies it against argon2id.
+	gotPass, ok := login.Bytes(wire.LoginTLVTagsPlaintextPassword)
 	if !ok {
-		t.Fatal("login request missing password hash TLV 0x25")
+		t.Fatal("signon frame missing plaintext password TLV 0x1339")
 	}
-	if !bytes.Equal(gotHash, wantHash) {
-		t.Fatalf("password hash:\n got %x\nwant %x", gotHash, wantHash)
+	if string(gotPass) != testPassword {
+		t.Fatalf("password TLV = %q, want %q", gotPass, testPassword)
 	}
 
-	// The roasted-password TLV must never accompany the BUCP hash.
-	if login.HasTag(wire.LoginTLVTagsRoastedPassword) {
-		t.Error("login request must not carry roasted password TLV 0x02 alongside 0x25")
+	// No MD5 may survive anywhere in the frame. If either of these appears, the
+	// client is still speaking a challenge-response dialect the server dropped.
+	if login.HasTag(wire.LoginTLVTagsPasswordHash) {
+		t.Error("signon frame must not carry BUCP password hash TLV 0x25")
 	}
+	if login.HasTag(wire.LoginTLVTagsRoastedPassword) {
+		t.Error("signon frame must not carry roasted password TLV 0x02")
+	}
+
 	if flags, ok := login.Bytes(wire.LoginTLVTagsMultiConnFlags); !ok || flags[0] != wire.MultiConnFlagsRecentClient {
 		t.Errorf("multi-conn flags = %v (found=%v), want 0x01", flags, ok)
 	}
 
-	resp := wire.SNAC_0x17_0x03_BUCPLoginResponse{}
+	resp := wire.TLVRestBlock{}
 	resp.Append(wire.NewTLVBE(wire.LoginTLVTagsScreenName, []byte("Triy")))
 	resp.Append(wire.NewTLVBE(wire.LoginTLVTagsReconnectHere, []byte("bos.example.com:5190")))
 	resp.Append(wire.NewTLVBE(wire.LoginTLVTagsAuthorizationCookie, testCookie()))
-	fs.send(wire.BUCP, wire.BUCPLoginResponse, resp)
+	fs.sendLoginResult(resp)
 
 	got := <-done
 	if got.err != nil {
@@ -179,15 +196,7 @@ func TestLoginBadPassword(t *testing.T) {
 
 	fs.hello()
 	fs.expectSignon()
-	fs.expectSNAC(wire.BUCP, wire.BUCPChallengeRequest)
-	fs.send(wire.BUCP, wire.BUCPChallengeResponse,
-		wire.SNAC_0x17_0x07_BUCPChallengeResponse{AuthKey: testAuthKey})
-	fs.expectSNAC(wire.BUCP, wire.BUCPLoginRequest)
-
-	resp := wire.SNAC_0x17_0x03_BUCPLoginResponse{}
-	resp.Append(wire.NewTLVBE(wire.LoginTLVTagsScreenName, []byte(testScreenName)))
-	resp.Append(wire.NewTLVBE(wire.LoginTLVTagsErrorSubcode, wire.LoginErrInvalidPassword))
-	fs.send(wire.BUCP, wire.BUCPLoginResponse, resp)
+	fs.sendLoginResult(loginErrTLVs(wire.LoginErrInvalidPassword, testScreenName))
 
 	err := <-done
 	var le *LoginError
@@ -199,10 +208,10 @@ func TestLoginBadPassword(t *testing.T) {
 	}
 }
 
-// TestLoginUnknownUserFailsAtChallenge covers the server's real behavior for an
-// unknown screen name: it answers the CHALLENGE with a login-response error
-// carrying only TLV 0x08 — no screen name TLV. Parsing must not require one.
-func TestLoginUnknownUserFailsAtChallenge(t *testing.T) {
+// TestLoginUnknownUserOmitsScreenName covers a rejection that carries only TLV
+// 0x08 and no screen name. The server does this for an unknown account, so
+// parsing must not require the screen name to be present.
+func TestLoginUnknownUserOmitsScreenName(t *testing.T) {
 	client, fs := newFakeServer(t)
 
 	done := make(chan error, 1)
@@ -213,11 +222,7 @@ func TestLoginUnknownUserFailsAtChallenge(t *testing.T) {
 
 	fs.hello()
 	fs.expectSignon()
-	fs.expectSNAC(wire.BUCP, wire.BUCPChallengeRequest)
-
-	resp := wire.SNAC_0x17_0x03_BUCPLoginResponse{}
-	resp.Append(wire.NewTLVBE(wire.LoginTLVTagsErrorSubcode, wire.LoginErrInvalidUsernameOrPassword))
-	fs.send(wire.BUCP, wire.BUCPLoginResponse, resp)
+	fs.sendLoginResult(loginErrTLVs(wire.LoginErrInvalidUsernameOrPassword, ""))
 
 	err := <-done
 	var le *LoginError
@@ -272,7 +277,13 @@ func TestSignoffErrorReportsNewLogin(t *testing.T) {
 
 // TestReadSNACSkipsKeepAlive ensures a keepalive between SNACs doesn't get
 // mistaken for a response.
+//
+// The SNAC it uses is incidental — this is a framing test, not an auth test. It
+// still carries a BUCP challenge response because that type remains a correct
+// description of the wire format, even though BENCchat no longer sends one.
 func TestReadSNACSkipsKeepAlive(t *testing.T) {
+	const testAuthKey = "the-auth-key"
+
 	client, fs := newFakeServer(t)
 
 	go func() {

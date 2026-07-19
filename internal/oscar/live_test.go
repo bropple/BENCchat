@@ -28,6 +28,27 @@ func liveAddr(t *testing.T) string {
 	return addr
 }
 
+// liveTransport builds the transport for live tests. BENCoscar terminates TLS
+// itself and a real deployment runs no plaintext OSCAR port at all, so a live
+// test against one has to speak TLS:
+//
+//	BENCCHAT_LIVE_TLS=1          verify the certificate normally
+//	BENCCHAT_LIVE_TLS=insecure   skip verification, for a self-signed dev server
+//
+// Unset means plaintext, which still works against a server started without a
+// certificate configured.
+func liveTransport(t *testing.T) Transport {
+	t.Helper()
+	switch os.Getenv("BENCCHAT_LIVE_TLS") {
+	case "":
+		return Transport{}
+	case "insecure":
+		return Transport{TLS: true, InsecureSkipVerify: true}
+	default:
+		return Transport{TLS: true}
+	}
+}
+
 // TestLiveServerHello checks our framing against the real thing: the server
 // must greet us with a FLAP signon frame carrying version 1. This is the
 // cheapest possible end-to-end proof that the transport reads real bytes
@@ -91,7 +112,7 @@ func TestLiveSignOn(t *testing.T) {
 		t.Skip("set BENCCHAT_LIVE_SCREENNAME and BENCCHAT_LIVE_PASSWORD to run the full sign-on test")
 	}
 
-	res, err := Login(context.Background(), addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(context.Background(), addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -102,6 +123,21 @@ func TestLiveSignOn(t *testing.T) {
 		t.Error("empty BOS address")
 	}
 	t.Logf("signed on as %q; BOS=%s, cookie=%dB", res.ScreenName, res.BOSAddress, len(res.Cookie))
+
+	// A wrong password must be refused. Without this the test would pass against
+	// a server with authentication disabled, which is exactly the configuration
+	// where a broken credential path looks healthy.
+	if _, err := Login(context.Background(), addr,
+		Credentials{ScreenName: sn, Password: pw + "-wrong"}, liveTransport(t)); err == nil {
+		t.Error("a wrong password was accepted")
+	} else {
+		var le *LoginError
+		if !errors.As(err, &le) {
+			t.Errorf("wrong password gave %v (%T), want *LoginError", err, err)
+		} else {
+			t.Logf("wrong password correctly refused: %v (code 0x%02x)", le, le.Code)
+		}
+	}
 }
 
 // TestLiveRateParams proves our RateParamsReply wire layout matches what the
