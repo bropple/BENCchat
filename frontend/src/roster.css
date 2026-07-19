@@ -388,30 +388,174 @@
   background: var(--benco-panel);
 }
 
-/* Transient notices float over the top of the conversation pane. */
-/* Bottom-left, clear of the chat header — a toast sitting over the encryption
-   badge hid the very thing it was usually telling you about. */
+/* Transient notices get their own strip along the bottom of the conversation
+   pane. This deliberately does NOT float: as an overlay it covered the
+   encryption badge in one position and the system-log button in the next, and
+   any third position would eventually find something of its own to sit on.
+   In flow it can only ever take space, never hide anything.
+
+   Nothing is lost when it times out — every notice is kept in the system log. */
 .roster__toast {
-  position: absolute;
-  bottom: 16px;
-  left: 16px;
-  z-index: 50;
-  max-width: 80%;
+  flex: none;
   padding: 8px 14px;
-  border-radius: var(--benco-radius);
-  border: 1px solid var(--benco-border);
+  border-top: 1px solid var(--benco-border);
   background: var(--benco-panel);
   color: var(--benco-phosphor);
   font-size: 13px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
 }
 
+/* Level reads as a left stripe, matching the system-log entries, so the same
+   notice looks the same in both places. */
 .roster__toast--warn {
-  border-color: var(--benco-amber);
+  border-left: 2px solid var(--benco-amber);
 }
 
 .roster__toast--error {
-  border-color: var(--benco-red);
+  border-left: 2px solid var(--benco-red);
+}
+
+/* --- System log ---------------------------------------------------------- */
+
+/* The footer pins the log button to the bottom of the sidebar and anchors the
+   panel, which is why it — not .roster__list — carries the positioning. */
+.roster__foot {
+  position: relative;
+  flex: none;
+  padding: 8px;
+  border-top: 1px solid var(--benco-border);
+}
+
+.roster__log-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--benco-radius);
+  background: none;
+  color: var(--benco-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.roster__log-btn:hover,
+.roster__log-btn[aria-expanded="true"] {
+  border-color: var(--benco-border);
+  background: var(--benco-panel);
+  color: var(--benco-phosphor);
+}
+
+/* Pushed to the right edge by the flex gap collapsing around it. */
+.roster__log-dot {
+  margin-left: auto;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--benco-amber);
+  color: var(--benco-bg-deep);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* Wider than the sidebar on purpose: server notices are full sentences, and
+   wrapping them into a 200px column makes a three-line entry out of each. */
+.roster__log {
+  position: absolute;
+  bottom: 100%;
+  left: 8px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-width: calc(100vw - 32px);
+  max-height: 60vh;
+  margin-bottom: 6px;
+  padding: 10px;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+
+.roster__log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.roster__log-list {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.roster__log-empty {
+  padding: 12px 4px;
+  text-align: center;
+}
+
+/* The level shows as a left stripe rather than tinted text, so the notice body
+   stays readable and the colour is never the only thing carrying the level. */
+.roster__log-entry {
+  padding: 6px 8px;
+  border-left: 2px solid var(--benco-border);
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+.roster__log-entry--warn {
+  border-left-color: var(--benco-amber);
+}
+
+.roster__log-entry--error {
+  border-left-color: var(--benco-red);
+}
+
+.roster__log-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--benco-dim);
+  font-size: 10px;
+}
+
+.roster__log-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.roster__log-from {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.roster__log-x {
+  margin-left: auto;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--benco-dim);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.roster__log-x:hover {
+  color: var(--benco-red);
+}
+
+.roster__log-body {
+  margin-top: 2px;
+  color: var(--benco-phosphor);
+  overflow-wrap: anywhere;
+}
+
+.roster__log-body a {
+  color: var(--benco-amber);
 }
 
 .chat__empty {

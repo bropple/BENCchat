@@ -161,6 +161,10 @@ type Event struct {
 	// Notice / NoticeLevel are set for Kind == EventNotice.
 	Notice      string `json:"notice,omitempty"`
 	NoticeLevel string `json:"noticeLevel,omitempty"`
+	// NoticeFrom names the reserved server screen name a notice arrived from,
+	// and is empty for notices BENCchat generated itself. It doubles as the
+	// signal that Notice holds server-supplied AIM HTML rather than plain text.
+	NoticeFrom string `json:"noticeFrom,omitempty"`
 	// SearchQuery / SearchFound are set for Kind == EventSearchResult.
 	SearchQuery string `json:"searchQuery,omitempty"`
 	SearchFound bool   `json:"searchFound,omitempty"`
@@ -253,6 +257,18 @@ const (
 // Notify broadcasts a transient notice to the UI. Notices are not stored.
 func (s *Store) Notify(level NoticeLevel, text string) {
 	s.emit(Event{Kind: EventNotice, Notice: text, NoticeLevel: string(level)})
+}
+
+// NotifyFrom broadcasts a notice the SERVER generated, attributed to the
+// reserved screen name it arrived from. Its text is AIM HTML, so the UI runs
+// it through the message sanitizer instead of showing it as plain text.
+func (s *Store) NotifyFrom(level NoticeLevel, from, text string) {
+	s.emit(Event{
+		Kind:        EventNotice,
+		Notice:      text,
+		NoticeLevel: string(level),
+		NoticeFrom:  from,
+	})
 }
 
 // SetSelfWarning records our own warning level and notifies subscribers.

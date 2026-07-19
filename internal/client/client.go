@@ -605,6 +605,22 @@ func (c *Client) handleBART(frame wire.SNACFrame, body []byte) {
 	c.store.SetBuddyIcon(icon.ScreenName, hex.EncodeToString(icon.Hash), icon.Data)
 }
 
+// systemSenders are screen names reserved for the server's own notifications
+// rather than for people. "AOL System Msg" is what real AIM used;
+// open-oscar-server sends "OOS System Msg". Both are recognised so a
+// differently-branded server still routes to the notice log.
+//
+// The names are normalized, so spacing and casing don't matter.
+var systemSenders = map[string]bool{
+	"aolsystemmsg": true,
+	"oossystemmsg": true,
+}
+
+// isSystemSender reports whether a message came from the server itself.
+func isSystemSender(from string) bool {
+	return systemSenders[state.NormalizeScreenName(from)]
+}
+
 func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 	switch frame.SubGroup {
 	case wire.ICBMChannelMsgToClient:
@@ -626,6 +642,14 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		// it, or the user sees protocol noise in a conversation with themselves.
 		if c.isSelf(msg.From) && e2ee.IsDeviceMessage(msg.Text) {
 			c.handleDeviceMessage(msg.Text)
+			return
+		}
+		// The server sends its own notices (offline-message counts,
+		// multi-instance sign-on) as ordinary IMs from a reserved screen name.
+		// They belong in the notice log: filed as a conversation they look like
+		// a buddy you could reply to, and nothing is listening on the far end.
+		if isSystemSender(msg.From) {
+			c.store.NotifyFrom(state.NoticeInfo, msg.From, msg.Text)
 			return
 		}
 		// Decrypt if it's an E2EE envelope; otherwise it's plaintext as-is.

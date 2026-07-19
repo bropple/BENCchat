@@ -297,3 +297,67 @@ func TestSignOffWhenNotSignedOnIsSafe(t *testing.T) {
 		t.Fatalf("SignOff when signed off should be a no-op, got %v", err)
 	}
 }
+
+// The server sends its own notifications as ordinary IMs from a reserved
+// screen name. They must reach the notice log and never become a conversation
+// — a "buddy" you cannot reply to, holding markup nobody would type.
+func TestSystemMessageBecomesNoticeNotConversation(t *testing.T) {
+	const body = `You just received 2 IM(s) while you were offline. ` +
+		`If you do not wish to receive offline messages, please go to ` +
+		`<a href="https://example.com/settings">IM Settings</a>.`
+
+	for _, sender := range []string{"OOS System Msg", "AOL System Msg", "oossystemmsg"} {
+		t.Run(sender, func(t *testing.T) {
+			c, store := newTestClient(t)
+			store.SetSelf("me")
+
+			var notices []state.Event
+			unsub := store.Subscribe(func(e state.Event) {
+				if e.Kind == state.EventNotice {
+					notices = append(notices, e)
+				}
+			})
+			defer unsub()
+
+			text, err := wire.MarshalICBMMessageText(body)
+			if err != nil {
+				t.Fatalf("build message: %v", err)
+			}
+			msg := wire.SNAC_0x04_0x07_ICBMChannelMsgToClient{
+				Cookie:      1,
+				ChannelID:   wire.ICBMChannelIM,
+				TLVUserInfo: wire.TLVUserInfo{ScreenName: sender},
+			}
+			msg.TLVRestBlock.Append(wire.NewTLVBE(wire.ICBMTLVAOLIMData, text))
+
+			c.handleSNAC(
+				wire.SNACFrame{FoodGroup: wire.ICBM, SubGroup: wire.ICBMChannelMsgToClient},
+				marshal(t, msg),
+			)
+
+			if len(store.Conversations()) != 0 {
+				t.Errorf("server notice created a conversation: %+v", store.Conversations())
+			}
+			if len(notices) != 1 {
+				t.Fatalf("notice count = %d, want 1", len(notices))
+			}
+			if notices[0].Notice != body {
+				t.Errorf("Notice = %q, want the message verbatim", notices[0].Notice)
+			}
+			// NoticeFrom is what tells the UI this is server markup rather than
+			// one of our own plain-text notices.
+			if notices[0].NoticeFrom != sender {
+				t.Errorf("NoticeFrom = %q, want %q", notices[0].NoticeFrom, sender)
+			}
+		})
+	}
+}
+
+// A person whose name merely resembles the reserved one is still a person.
+func TestSystemSenderMatchIsExact(t *testing.T) {
+	for _, name := range []string{"OOS System Msgs", "Not OOS System Msg", "system msg", "oos"} {
+		if isSystemSender(name) {
+			t.Errorf("isSystemSender(%q) = true, want false", name)
+		}
+	}
+}

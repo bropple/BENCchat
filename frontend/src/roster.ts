@@ -65,11 +65,27 @@ export function renderRoster(
           <div class="roster__buddies" id="buddies"></div>
           <div class="roster__rooms" id="rooms"></div>
         </div>
+        <footer class="roster__foot">
+          <button class="roster__log-btn" id="logBtn" type="button"
+                  title="System log" aria-expanded="false">
+            <span aria-hidden="true">▤</span>
+            <span>System Log</span>
+            <span class="roster__log-dot" id="logDot" hidden></span>
+          </button>
+          <div class="roster__log" id="logPanel" hidden>
+            <header class="roster__log-head">
+              <span class="benco-label">System Log</span>
+              <button class="settings-gear" id="logClear" type="button"
+                      title="Clear the log">Clear</button>
+            </header>
+            <hr class="benco-rule" />
+            <div class="roster__log-list" id="logList"></div>
+          </div>
+        </footer>
       </aside>
 
-      <div class="roster__toast" id="toast" hidden></div>
-
       <section class="chat" id="chat">
+
         <div class="chat__empty" id="chatEmpty">
           <p class="benco-caption">Select a buddy to start a conversation.</p>
         </div>
@@ -99,6 +115,11 @@ export function renderRoster(
           </div>
           <div class="benco-error" id="chatError"></div>
         </div>
+
+        <!-- Last child of the pane and IN FLOW, not floating over it: a toast
+             that overlays always ends up covering something eventually. Here it
+             takes its own strip along the bottom and obstructs nothing. -->
+        <div class="roster__toast" id="toast" hidden></div>
       </section>
     </div>`;
 
@@ -1491,18 +1512,171 @@ export function renderRoster(
     if (err) showToast(err, "error");
   });
 
-  // --- Transient notices (toast) -----------------------------------------
+  // --- Notices: transient toast, durable log ------------------------------
+
+  // A toast is gone in five seconds, which is fine for "message sent" and
+  // useless for anything you might want to act on. Every notice is therefore
+  // also filed in the system log, where it keeps its timestamp and stays
+  // clickable. The log is session-scoped — it's a record of what happened
+  // while signed on, not a persisted audit trail.
 
   const toastEl = el<HTMLDivElement>("toast");
+  const logBtnEl = el<HTMLButtonElement>("logBtn");
+  const logDotEl = el<HTMLSpanElement>("logDot");
+  const logPanelEl = el<HTMLDivElement>("logPanel");
+  const logListEl = el<HTMLDivElement>("logList");
+  const logClearEl = el<HTMLButtonElement>("logClear");
+
+  type NoticeLevel = "info" | "warn" | "error";
+
+  interface LogEntry {
+    id: number;
+    at: Date;
+    level: NoticeLevel;
+    text: string;
+    /** Set when the server sent this; also means `text` is AIM HTML. */
+    from?: string;
+  }
+
+  /** Oldest entries fall off the end; a chat client left running for days
+   *  shouldn't accumulate notices without bound. */
+  const LOG_MAX = 200;
+
+  let logEntries: LogEntry[] = [];
+  let logSeq = 0;
+  let logUnseen = 0;
   let toastTimer: number | undefined;
 
-  function showToast(text: string, level: "info" | "warn" | "error"): void {
-    toastEl.textContent = text;
+  function showToast(text: string, level: NoticeLevel, from?: string): void {
+    logEntries.unshift({ id: ++logSeq, at: new Date(), level, text, from });
+    if (logEntries.length > LOG_MAX) logEntries.length = LOG_MAX;
+
+    if (logPanelEl.hidden) {
+      logUnseen++;
+      renderLogDot();
+    }
+    renderLog();
+
+    // Server notices arrive as markup. The toast shows their text only: a link
+    // that disappears after five seconds is a tease, and the log keeps the real
+    // one. Our own notices are already plain text.
+    toastEl.textContent = from ? plainText(text) : text;
     toastEl.className = `roster__toast roster__toast--${level}`;
     toastEl.hidden = false;
     window.clearTimeout(toastTimer);
     toastTimer = window.setTimeout(() => (toastEl.hidden = true), 5000);
   }
+
+  /** Flatten markup to the text a toast can show, without executing anything:
+   *  DOMParser builds an inert document, so no script or loader ever runs. */
+  function plainText(html: string): string {
+    return new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
+  }
+
+  function renderLogDot(): void {
+    logDotEl.hidden = logUnseen === 0;
+    logDotEl.textContent = logUnseen > 9 ? "9+" : String(logUnseen);
+  }
+
+  function renderLog(): void {
+    logListEl.replaceChildren();
+
+    if (logEntries.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "benco-caption roster__log-empty";
+      empty.textContent = "Nothing yet. Notices land here as they happen.";
+      logListEl.appendChild(empty);
+      return;
+    }
+
+    for (const entry of logEntries) {
+      const row = document.createElement("div");
+      row.className = `roster__log-entry roster__log-entry--${entry.level}`;
+
+      const meta = document.createElement("div");
+      meta.className = "roster__log-meta";
+
+      const time = document.createElement("span");
+      time.className = "roster__log-time";
+      time.textContent = entry.at.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+      meta.appendChild(time);
+
+      if (entry.from) {
+        const who = document.createElement("span");
+        who.className = "roster__log-from";
+        who.textContent = entry.from;
+        meta.appendChild(who);
+      }
+
+      const dismiss = document.createElement("button");
+      dismiss.className = "roster__log-x";
+      dismiss.type = "button";
+      dismiss.title = "Dismiss this notice";
+      dismiss.setAttribute("aria-label", "Dismiss this notice");
+      dismiss.textContent = "×";
+      dismiss.addEventListener("click", () => {
+        logEntries = logEntries.filter((x) => x.id !== entry.id);
+        renderLog();
+      });
+      meta.appendChild(dismiss);
+
+      const body = document.createElement("div");
+      body.className = "roster__log-body";
+      // Server text is markup and goes through the same sanitizer as messages,
+      // which is what keeps its links clickable. Ours is plain text, and
+      // textContent is the only correct way to place it.
+      if (entry.from) body.innerHTML = renderMessageBody(entry.text);
+      else body.textContent = entry.text;
+
+      row.append(meta, body);
+      logListEl.appendChild(row);
+    }
+  }
+
+  function setLogOpen(open: boolean): void {
+    logPanelEl.hidden = !open;
+    logBtnEl.setAttribute("aria-expanded", String(open));
+    if (!open) return;
+    logUnseen = 0;
+    renderLogDot();
+    logListEl.scrollTop = 0;
+  }
+
+  logBtnEl.addEventListener("click", (e) => {
+    e.stopPropagation(); // don't let the close-on-outside-click handler undo this
+    setLogOpen(logPanelEl.hidden);
+  });
+
+  logClearEl.addEventListener("click", () => {
+    logEntries = [];
+    renderLog();
+  });
+
+  // Links in server notices open in the real browser, exactly as they do in
+  // messages — renderMessageBody vets the URL and marks it data-ext.
+  logListEl.addEventListener("click", (e) => {
+    const link = (e.target as HTMLElement).closest("a[data-ext]");
+    if (!link) return;
+    e.preventDefault();
+    const href = link.getAttribute("href");
+    if (href) Bridge.openExternal(href);
+  });
+
+  logPanelEl.addEventListener("click", (e) => e.stopPropagation());
+
+  const closeLogOnOutsideClick = (): void => {
+    if (!logPanelEl.hidden) setLogOpen(false);
+  };
+  const closeLogOnEscape = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && !logPanelEl.hidden) setLogOpen(false);
+  };
+  document.addEventListener("click", closeLogOnOutsideClick);
+  document.addEventListener("keydown", closeLogOnEscape);
+
+  renderLog();
 
   async function refreshBuddies(): Promise<void> {
     buddies = await Bridge.getBuddies();
@@ -1614,7 +1788,7 @@ export function renderRoster(
         if (e.notice) {
           const level = e.noticeLevel ?? "info";
           if (level === "error" || level === "warn") playAlert();
-          showToast(e.notice, level);
+          showToast(e.notice, level, e.noticeFrom);
         }
         break;
 
@@ -1724,6 +1898,11 @@ export function renderRoster(
     destroy() {
       window.clearTimeout(typingTimer);
       window.clearTimeout(stopTypingTimer);
+      window.clearTimeout(toastTimer);
+      // These two are on `document`, so clearing root would leave them bound to
+      // detached nodes and firing for the rest of the process's life.
+      document.removeEventListener("click", closeLogOnOutsideClick);
+      document.removeEventListener("keydown", closeLogOnEscape);
       root.innerHTML = "";
     },
   };

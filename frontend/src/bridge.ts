@@ -176,6 +176,9 @@ export interface StateEvent {
   screenName?: string;
   notice?: string;
   noticeLevel?: "info" | "warn" | "error";
+  /** Reserved server screen name a notice came from; empty for our own
+   *  notices. Its presence also means `notice` holds AIM HTML, not plain text. */
+  noticeFrom?: string;
   searchQuery?: string;
   searchFound?: boolean;
   directory?: DirEntry[];
