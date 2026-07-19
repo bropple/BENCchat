@@ -70,6 +70,10 @@ type Client struct {
 	ownKeyWait chan ownKeyReply
 	// onDeviceMessage handles device-linking traffic from our own other sessions.
 	onDeviceMessage func(kind string, keys [][32]byte)
+	// keyDirWait correlates device key directory replies to their requests.
+	// Keyed by request ID because several queries can be outstanding at once —
+	// one per peer whose keys we want. See keydir.go.
+	keyDirWait map[uint32]chan keyDirReply
 
 	// signKP is this device's room-message signing key, and peerSignKeys caches
 	// the signing keys each peer publishes. Guarded by e2eeMu.
@@ -436,6 +440,8 @@ func (c *Client) handleSNAC(frame wire.SNACFrame, body []byte) {
 		c.handleODir(frame, body)
 	case wire.Admin:
 		c.handleAdmin(frame, body)
+	case wire.BENCOKeyDir:
+		c.handleKeyDir(frame, body)
 	case wire.BART:
 		c.handleBART(frame, body)
 	}

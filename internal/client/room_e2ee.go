@@ -241,7 +241,7 @@ func (c *Client) RoomNonReaders(cookie string) []string {
 	if len(unknown) > 0 {
 		go func() {
 			for _, p := range unknown {
-				c.RequestUserInfo(p)
+				c.RefreshPeerKeys(p)
 			}
 		}()
 	}

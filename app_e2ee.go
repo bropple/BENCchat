@@ -122,11 +122,15 @@ func (a *App) publishAfterDeviceCheck() {
 		return
 	}
 
-	// Start from what we remember locally. The server only reports devices that
-	// are online right now — it keeps a BUCP client's profile on the live
-	// session and drops it at sign-off — so a machine that's currently off would
-	// otherwise be silently dropped from the list and stop being able to read
-	// anything sent while it was away.
+	// Start from what we remember locally.
+	//
+	// This mattered enormously under the profile scheme, where the server only
+	// reported devices that were ONLINE — it kept the profile on the live session
+	// and dropped it at sign-off — so a machine that happened to be off would be
+	// silently dropped from the list and stop being able to read anything sent
+	// while it was away. The key directory has no such gap, since it answers from
+	// storage. The local record is still merged in as a belt-and-braces measure
+	// for the fallback path and for a directory query that times out.
 	remembered, err := trust.LoadDevices(a.currentAccount())
 	if err != nil {
 		slog.Default().Warn("could not read remembered device keys", "err", err)
@@ -138,7 +142,7 @@ func (a *App) publishAfterDeviceCheck() {
 	// none of which is ours, means we're the new machine and somebody has to
 	// approve us — which the user otherwise has no way of knowing, since the
 	// approval happens on the other device entirely.
-	published, has, ok := a.client.FetchOwnPublishedKeys(5 * time.Second)
+	published, has, ok := a.ownPublishedKeys()
 	if ok && has {
 		known := false
 		for _, k := range published {
@@ -187,7 +191,7 @@ func (a *App) publishAfterDeviceCheck() {
 		strings.Split(e2ee.EncodeKeys(devices), ","), seen); err != nil {
 		slog.Default().Warn("could not remember device keys", "err", err)
 	}
-	a.publishProfile()
+	a.publishDevices(devices)
 	// Say hello to any other session on this account, so a new machine can be
 	// linked without typing codes.
 	a.announceDevice()
@@ -215,11 +219,20 @@ func (a *App) ForgetOtherDevices() string {
 	if !a.e2eeHasKey {
 		return "Encryption is not set up on this device."
 	}
+	var gone [][32]byte
+	for _, k := range a.deviceKeys() {
+		if k != a.e2eePub {
+			gone = append(gone, k)
+		}
+	}
 	a.setDeviceKeys([][32]byte{a.e2eePub})
 	if err := trust.SaveDevices(a.currentAccount(), []string{e2ee.EncodeKey(a.e2eePub)}); err != nil {
 		return err.Error()
 	}
-	a.publishProfile()
+	// Revoke before republishing, so the account never briefly advertises a
+	// device that was just removed. See RemoveDevice.
+	a.revokeDevices(gone)
+	a.publishDevices([][32]byte{a.e2eePub})
 	a.store.Notify(state.NoticeInfo,
 		"Other devices removed. Your contacts will see your safety number change.")
 	return ""
@@ -554,7 +567,12 @@ func (a *App) RemoveDevice(keyB64 string) string {
 	if err := trust.SaveDevices(a.currentAccount(), strings.Split(e2ee.EncodeKeys(kept), ",")); err != nil {
 		return err.Error()
 	}
-	a.publishProfile()
+	// Revoke BEFORE republishing. The server refuses to accept a revoked key, so
+	// doing it the other way round would publish the device we are removing and
+	// then tombstone it, leaving the account briefly advertising a device the
+	// user just took away.
+	a.revokeDevices([][32]byte{target})
+	a.publishDevices(kept)
 	a.store.Notify(state.NoticeInfo,
 		"Device removed. Your contacts will see your safety number change.")
 	return ""

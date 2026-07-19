@@ -56,11 +56,21 @@ func liveTransport(t *testing.T) Transport {
 func TestLiveServerHello(t *testing.T) {
 	addr := liveAddr(t)
 
-	conn, err := Dial(context.Background(), addr, 0)
+	// Dial through the configured transport. Dialling plaintext into a TLS
+	// listener does NOT fail at connect — TLS defers its handshake to the first
+	// read — so the connection comes up fine and then the read below blocks
+	// forever. That is how this test used to hang for the full package timeout
+	// rather than failing.
+	conn, err := liveTransport(t).dial(context.Background(), addr, 0)
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", addr, err)
 	}
 	defer conn.Close()
+
+	// A deadline so a transport mismatch reports itself instead of hanging.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
 
 	sf, err := conn.ReadSignonFrame()
 	if err != nil {
@@ -155,7 +165,7 @@ func TestLiveRateParams(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -194,7 +204,7 @@ func TestLiveAddBuddy(t *testing.T) {
 	const target = "alice"
 
 	ctx := context.Background()
-	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -273,7 +283,7 @@ func TestLiveSetAway(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -333,7 +343,7 @@ func TestLiveAwayMessageFetch(t *testing.T) {
 	const target = "alice"
 
 	ctx := context.Background()
-	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -381,7 +391,7 @@ func TestLiveBlockUnblock(t *testing.T) {
 	const target = "alice"
 
 	ctx := context.Background()
-	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -464,7 +474,7 @@ func TestLiveSession(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw})
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -510,4 +520,163 @@ func TestLiveSession(t *testing.T) {
 	case <-runCtx.Done():
 		t.Log("session stayed up for the full watch window")
 	}
+}
+
+// TestLiveKeyDirectory exercises the BENCO device key directory (foodgroup
+// 0xBE00) against a real BENCoscar. It proves BENCchat's wire encoding
+// interoperates with the server's, which is the part most likely to be subtly
+// wrong — a mismatched length prefix shows up as a confusing disconnect, not an
+// error.
+//
+// Needs two accounts. The second exists to be OFFLINE while its keys are
+// fetched, which is the case the profile-marker scheme could not handle:
+//
+//	BENCCHAT_LIVE_SERVER=host:port BENCCHAT_LIVE_TLS=insecure \
+//	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
+//	BENCCHAT_LIVE_PEER=... BENCCHAT_LIVE_PEER_PASSWORD=... \
+//	go test ./internal/oscar/ -run TestLiveKeyDirectory -v
+func TestLiveKeyDirectory(t *testing.T) {
+	addr := liveAddr(t)
+	sn, pw := os.Getenv("BENCCHAT_LIVE_SCREENNAME"), os.Getenv("BENCCHAT_LIVE_PASSWORD")
+	peer, peerPw := os.Getenv("BENCCHAT_LIVE_PEER"), os.Getenv("BENCCHAT_LIVE_PEER_PASSWORD")
+	if sn == "" || pw == "" || peer == "" || peerPw == "" {
+		t.Skip("set BENCCHAT_LIVE_SCREENNAME/PASSWORD and BENCCHAT_LIVE_PEER/PEER_PASSWORD")
+	}
+	ctx := context.Background()
+
+	key := func(b byte) []byte {
+		k := make([]byte, 32)
+		for i := range k {
+			k[i] = b
+		}
+		return k
+	}
+
+	// signOn brings up a BOS session and collects key directory replies.
+	signOn := func(user, pass string) (*Session, chan wire.SNACFrame, chan []byte) {
+		res, err := Login(ctx, addr, Credentials{ScreenName: user, Password: pass}, liveTransport(t))
+		if err != nil {
+			t.Fatalf("Login(%s): %v", user, err)
+		}
+		s, err := SignOn(ctx, res)
+		if err != nil {
+			t.Fatalf("SignOn(%s): %v", user, err)
+		}
+		frames, bodies := make(chan wire.SNACFrame, 16), make(chan []byte, 16)
+		s.Handler = func(f wire.SNACFrame, b []byte) {
+			if f.FoodGroup == wire.BENCOKeyDir {
+				frames <- f
+				bodies <- append([]byte(nil), b...)
+			}
+		}
+		go func() { _ = s.Run(ctx) }()
+		return s, frames, bodies
+	}
+
+	await := func(frames chan wire.SNACFrame, bodies chan []byte, want uint16) []byte {
+		t.Helper()
+		for {
+			select {
+			case f := <-frames:
+				b := <-bodies
+				if f.SubGroup == want {
+					return b
+				}
+				if f.SubGroup == wire.BENCOKeyDirErr {
+					t.Fatalf("server returned a key directory error while awaiting subgroup 0x%04x", want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("timed out awaiting key directory subgroup 0x%04x", want)
+			}
+		}
+	}
+
+	alice, aFrames, aBodies := signOn(sn, pw)
+	defer alice.Close()
+
+	if !alice.SupportsKeyDir() {
+		t.Fatalf("server does not advertise the key directory; foodgroups=%v", alice.FoodGroups())
+	}
+	t.Log("server advertises the key directory (0xBE00)")
+
+	// The peer publishes, then disconnects, so its keys are fetched while offline.
+	bob, bFrames, bBodies := signOn(peer, peerPw)
+	if _, err := bob.PublishDeviceKeys([]wire.BENCODevice{{BoxKey: key(3)}}); err != nil {
+		t.Fatalf("peer publish: %v", err)
+	}
+	await(bFrames, bBodies, wire.BENCOKeyDirPublishReply)
+	_ = bob.Close()
+	t.Logf("%s published one device, then signed off", peer)
+
+	if _, err := alice.PublishDeviceKeys([]wire.BENCODevice{
+		{BoxKey: key(1), SignKey: key(0xA1)},
+		{BoxKey: key(2)},
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	pub, err := DecodeKeyDirPublishReply(await(aFrames, aBodies, wire.BENCOKeyDirPublishReply))
+	if err != nil {
+		t.Fatalf("decode publish reply: %v", err)
+	}
+	if pub.Accepted != 2 || len(pub.Refused) != 0 {
+		t.Fatalf("publish: accepted=%d refused=%d, want 2 and 0", pub.Accepted, len(pub.Refused))
+	}
+
+	// Our OWN devices. The Locate self-lookup took a branch where a session
+	// always exists, so this was impossible before.
+	if _, err := alice.QueryDeviceKeys(sn); err != nil {
+		t.Fatalf("self query: %v", err)
+	}
+	self, err := DecodeKeyDirQueryReply(await(aFrames, aBodies, wire.BENCOKeyDirQueryReply))
+	if err != nil {
+		t.Fatalf("decode self query: %v", err)
+	}
+	if len(self.Devices) != 2 {
+		t.Fatalf("self query returned %d devices, want 2", len(self.Devices))
+	}
+	if len(self.Devices[0].SignKey) != 32 {
+		t.Error("signing key did not survive the round trip")
+	}
+	t.Logf("read back %d of our own devices", len(self.Devices))
+
+	// The offline peer.
+	if _, err := alice.QueryDeviceKeys(peer); err != nil {
+		t.Fatalf("peer query: %v", err)
+	}
+	got, err := DecodeKeyDirQueryReply(await(aFrames, aBodies, wire.BENCOKeyDirQueryReply))
+	if err != nil {
+		t.Fatalf("decode peer query: %v", err)
+	}
+	if len(got.Devices) != 1 {
+		t.Fatalf("offline peer query returned %d devices, want 1", len(got.Devices))
+	}
+	t.Logf("fetched %d device(s) for OFFLINE %s", len(got.Devices), peer)
+
+	// Revoke, then try to republish it. The refusal is what makes removal stick.
+	if _, err := alice.RevokeDeviceKey(key(1)); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	rev, err := DecodeKeyDirRevokeReply(await(aFrames, aBodies, wire.BENCOKeyDirRevokeReply))
+	if err != nil {
+		t.Fatalf("decode revoke reply: %v", err)
+	}
+	if rev.Revoked != 1 {
+		t.Fatalf("revoke reported %d, want 1", rev.Revoked)
+	}
+
+	if _, err := alice.PublishDeviceKeys([]wire.BENCODevice{
+		{BoxKey: key(1), SignKey: key(0xA1)},
+		{BoxKey: key(2)},
+	}); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	again, err := DecodeKeyDirPublishReply(await(aFrames, aBodies, wire.BENCOKeyDirPublishReply))
+	if err != nil {
+		t.Fatalf("decode republish reply: %v", err)
+	}
+	if len(again.Refused) != 1 {
+		t.Fatalf("republishing a revoked key was accepted (refused=%d); removal is not durable",
+			len(again.Refused))
+	}
+	t.Logf("republishing the revoked device was refused, as it must be")
 }

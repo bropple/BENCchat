@@ -146,16 +146,16 @@ func (c *Client) decodeIncoming(from, body string) (text string, encrypted bool,
 	}
 	senderKeys, ourPriv, ok := c.openFrom(from)
 	if !ok {
-		go c.RequestUserInfo(from) // learn their keys, then retry via learnPeerKeys
+		go c.RefreshPeerKeys(from) // learn their keys, then retry via learnPeerKeys
 		return "🔒 [encrypted message — waiting for the sender's key…]", false, body
 	}
 	if plain, opened := openWithAny(body, senderKeys, ourPriv); opened {
 		return plain, true, ""
 	}
 	// Keep the envelope. This is also what a message sealed before the sender
-	// knew about this device looks like, and re-fetching their profile may add
-	// the sender key that opens it.
-	go c.RequestUserInfo(from)
+	// knew about this device looks like, and re-fetching their keys may add the
+	// sender key that opens it.
+	go c.RefreshPeerKeys(from)
 	return "🔒 [encrypted message — couldn't decrypt]", false, body
 }
 
