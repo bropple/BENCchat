@@ -175,9 +175,17 @@ func (c *Client) retryPendingDecrypts(screenName string) {
 		// invitation that arrived before we held the sender's key would
 		// otherwise be surfaced as text and never acted on — the invitation
 		// silently lost, with a wall of base64 shown to the user instead.
+		// Protocol traffic recovered late is still protocol traffic: act on it
+		// and drop the message entirely rather than leaving a placeholder where
+		// the user expects something a person said. An empty result tells the
+		// store to remove it.
 		if e2ee.IsRoomInvite(plain) {
 			c.handleRoomInvite(screenName, plain)
-			return "🔒 [encrypted room invitation]", true
+			return "", true
+		}
+		if e2ee.IsCatchup(plain) {
+			c.handleCatchup(screenName, plain)
+			return "", true
 		}
 		return plain, true
 	})

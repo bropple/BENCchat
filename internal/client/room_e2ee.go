@@ -443,10 +443,36 @@ func (c *Client) InviteToRoom(screenName, roomName string, key e2ee.RoomKey) err
 	if !c.CanEncryptTo(screenName) {
 		return errors.New("client: can't invite them privately — no encryption key for that person yet")
 	}
-	return c.SendMessage(screenName, e2ee.EncodeRoomInvite(e2ee.RoomInvite{
+	return c.sendProtocolMessage(screenName, e2ee.EncodeRoomInvite(e2ee.RoomInvite{
 		Room: roomName,
 		Key:  key,
 	}))
+}
+
+// sendProtocolMessage sends machine-to-machine traffic — room invitations, the
+// group key, catch-up requests and their answers — over the encrypted 1:1
+// channel WITHOUT recording it as a conversation message.
+//
+// These ride the same transport as chat, but they are not something a person
+// said. SendMessage stores what it sends so the user sees their own words, and
+// that is exactly wrong here: it puts base64 protocol frames in the chat window.
+func (c *Client) sendProtocolMessage(to, body string) error {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return errors.New("client: not signed on")
+	}
+	peerKeys, ourPriv, ok := c.sealFor(to)
+	if !ok {
+		return errors.New("client: no encryption key for that person yet")
+	}
+	env, err := e2ee.SealFor(body, peerKeys, ourPriv)
+	if err != nil {
+		return err
+	}
+	_, err = session.SendMessage(to, env, false)
+	return err
 }
 
 // --- Room catch-up ----------------------------------------------------------
@@ -483,7 +509,7 @@ func (c *Client) RequestCatchup(peer, roomName string, since time.Time) error {
 	if !c.CanEncryptTo(peer) {
 		return errors.New("client: can't ask them privately — no encryption key for that person yet")
 	}
-	return c.SendMessage(peer, e2ee.EncodeCatchupRequest(e2ee.CatchupRequest{
+	return c.sendProtocolMessage(peer, e2ee.EncodeCatchupRequest(e2ee.CatchupRequest{
 		Room:  roomName,
 		Since: since,
 	}))
@@ -498,7 +524,7 @@ func (c *Client) SendCatchup(peer string, res e2ee.CatchupResponse) error {
 	if err != nil {
 		return err
 	}
-	return c.SendMessage(peer, body)
+	return c.sendProtocolMessage(peer, body)
 }
 
 // RoomHistorySince returns this room's messages after a point in time, for

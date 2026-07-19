@@ -251,12 +251,20 @@ func TestLateRoomInviteIsStillHonored(t *testing.T) {
 	if got.Room != "secret-room" || got.Key != roomKey {
 		t.Fatalf("late invite was not acted on: %+v", got)
 	}
+	// The invitation is protocol traffic, not something a person said, so once
+	// it has been acted on the message must be GONE — not left as a placeholder
+	// sitting in the conversation.
 	convo, _ := bob.store.Conversation("alice")
-	if len(convo.Messages) != 1 {
-		t.Fatalf("expected one message, got %d", len(convo.Messages))
+	for _, m := range convo.Messages {
+		if strings.Contains(m.Text, "BENCO-ROOMINV") {
+			t.Error("raw invite protocol text was shown to the user")
+		}
+		if strings.Contains(m.Text, "room invitation") {
+			t.Error("a placeholder was left in the conversation for a recovered invitation")
+		}
 	}
-	if strings.Contains(convo.Messages[0].Text, "BENCO-ROOMINV") {
-		t.Error("raw invite protocol text was shown to the user")
+	if len(convo.Messages) != 0 {
+		t.Errorf("expected the invitation to be removed, %d message(s) remain", len(convo.Messages))
 	}
 }
 
@@ -744,5 +752,35 @@ func TestCatchupDoesNotRelayForgeries(t *testing.T) {
 	}
 	if history[0].Env != "genuineenvelope" {
 		t.Error("the forged message was relayed onward")
+	}
+}
+
+// TestProtocolTrafficIsNotStoredAsAMessage: invitations, group keys and
+// catch-up frames ride the same channel as chat, but they are not something a
+// person said. Storing them puts base64 protocol frames in the chat window —
+// which is exactly what happened in testing.
+func TestProtocolTrafficIsNotStoredAsAMessage(t *testing.T) {
+	c, _ := newE2EEClient(t)
+	store := c.store
+	store.SetSelf("alice")
+	_, bobPub := newE2EEClient(t)
+	c.learnPeerKeys("bob", [][32]byte{bobPub})
+
+	// No session, so the send fails at the wire — but the point is that nothing
+	// is recorded in the conversation either way.
+	key, _ := e2ee.GenerateRoomKey()
+	_ = c.InviteToRoom("bob", "secret-room", key)
+	_ = c.RequestCatchup("bob", "secret-room", time.Now())
+	_ = c.SendCatchup("bob", e2ee.CatchupResponse{Room: "secret-room"})
+
+	if convo, ok := store.Conversation("bob"); ok && len(convo.Messages) > 0 {
+		t.Fatalf("protocol traffic was stored as %d chat message(s): %q",
+			len(convo.Messages), convo.Messages[0].Text)
+	}
+
+	// An ordinary message still is stored, so the guard isn't over-broad.
+	store.AddMessage(state.Message{From: "alice", To: "bob", Text: "hello", Outgoing: true, At: time.Now()})
+	if convo, _ := store.Conversation("bob"); len(convo.Messages) != 1 {
+		t.Error("an ordinary message was not stored")
 	}
 }

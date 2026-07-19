@@ -652,18 +652,27 @@ func (s *Store) DecryptPending(screenName string, open func(cipher string) (stri
 		return false
 	}
 	changed := false
+	kept := c.Messages[:0]
 	for i := range c.Messages {
-		m := &c.Messages[i]
-		if m.Cipher == "" {
-			continue
+		m := c.Messages[i]
+		plain, got := "", false
+		if m.Cipher != "" {
+			plain, got = opened[m.Cipher]
 		}
-		plain, got := opened[m.Cipher]
-		if !got {
-			continue
+		switch {
+		case !got:
+			kept = append(kept, m)
+		case plain == "":
+			// Recovered as protocol traffic rather than something a person
+			// said — drop it instead of showing a placeholder.
+			changed = true
+		default:
+			m.Text, m.Encrypted, m.Cipher = plain, true, ""
+			kept = append(kept, m)
+			changed = true
 		}
-		m.Text, m.Encrypted, m.Cipher = plain, true, ""
-		changed = true
 	}
+	c.Messages = kept
 	s.mu.Unlock()
 
 	if changed {

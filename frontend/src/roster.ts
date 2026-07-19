@@ -439,14 +439,15 @@ export function renderRoster(
         const auto = m.autoResponse
           ? `<span class="chat__auto benco-caption">auto-reply</span>`
           : "";
-        // Three states, not two: encrypted-and-attributable, encrypted but not
-        // attributable (sender's signing key not known yet, or an older
-        // client), and a signature that actively failed — which means someone
-        // in the room is impersonating a member and must not look ordinary.
+        // Signatures are a ROOM feature. A 1:1 message is already authenticated
+        // by its encryption — NaCl box proves who sealed it — so there is
+        // nothing unattributable about one, and showing a warning there would
+        // be noise on every message the user ever receives.
+        const roomMsg = activeRoom !== null;
         const lock = m.forged
           ? `<span class="chat__lock chat__lock--forged benco-caption" title="This message is NOT signed by the person it claims to be from — someone in the room may be impersonating them">⚠</span>`
-          : m.encrypted && m.senderVerified
-            ? `<span class="chat__lock benco-caption" title="Encrypted, and signed by the sender">🔒</span>`
+          : m.encrypted && (m.senderVerified || !roomMsg)
+            ? `<span class="chat__lock benco-caption" title="End-to-end encrypted">🔒</span>`
             : m.encrypted
               ? `<span class="chat__lock chat__lock--unsigned benco-caption" title="Encrypted, but not signed — authorship can't be confirmed">🔒<span class="chat__lock-warn">⚠</span></span>`
               : "";
