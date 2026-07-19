@@ -64,3 +64,28 @@ sudo systemctl stop open-oscar-server
 sudo ./purge-rooms.sh /path/to/oscar.sqlite --private
 sudo systemctl start open-oscar-server
 ```
+
+## `build-desktop.sh`
+
+The one script here that isn't server-side: builds the **client** for Linux
+(native) and Windows (cross-compiled), into `build/bin/`.
+
+macOS is not included. Wails needs Cocoa through CGO and refuses to
+cross-compile to it, so a `.app` requires a real macOS machine — that is what
+the `macos-latest` runner in `.github/workflows/build.yml` is for.
+
+```bash
+./scripts/build-desktop.sh
+```
+
+By default the binaries contain **no server address**: `DefaultAuthHost` stays
+empty and you enter the address on the sign-on screen. That is the build to give
+to anyone else. For a personal build that already knows where to connect:
+
+```bash
+AUTH_HOST=chat.example.com ./scripts/build-desktop.sh
+```
+
+The host is passed through `-ldflags` and never written to a file, so it can't
+reach git by accident. Don't use it for anything you publish — the value lands
+in the binary as a plain string, so `strings` recovers it immediately.

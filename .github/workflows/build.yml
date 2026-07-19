@@ -1,0 +1,181 @@
+name: Build
+
+# Artifacts from this workflow are PUBLIC. They are built with
+# config.DefaultAuthHost left empty on purpose, so a downloaded binary knows
+# nothing about where any particular BENCO server lives — you type the address
+# on the sign-on screen. Do NOT add -ldflags to bake a host in here: a public
+# artifact can be `strings`-grepped, so a "secret" host in a build flag is not
+# secret. Pre-filled builds stay local (see DEPLOYMENT.local.md).
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WAILS_VERSION: v2.10.1
+
+jobs:
+  # Cheap gate: if the protocol layer or the frontend is broken there is no
+  # point spending three runners on packaging it.
+  check:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Go tests
+        run: go test ./...
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend typecheck
+        working-directory: frontend
+        run: npx tsc --noEmit
+
+  build:
+    name: ${{ matrix.name }}
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing shouldn't deny you the artifacts for the others —
+      # a broken macOS build is no reason to withhold a working Windows one.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (amd64)
+            runner: ubuntu-latest
+            platform: linux/amd64
+            # ubuntu-latest ships webkit2gtk 4.1 only; without this tag the
+            # build fails looking for the 4.0 pkg-config file.
+            tags: webkit2_41
+            artifact: BENCchat-linux-amd64
+            path: build/bin/BENCchat
+
+          - name: Windows (amd64)
+            runner: windows-latest
+            platform: windows/amd64
+            tags: ""
+            artifact: BENCchat-windows-amd64
+            path: build/bin/BENCchat.exe
+
+          # Wails cannot cross-compile to macOS (it needs Cocoa via CGO), so
+          # this has to run on a real macOS runner. darwin/universal produces a
+          # single .app that runs on both Apple Silicon and Intel.
+          - name: macOS (universal)
+            runner: macos-latest
+            platform: darwin/universal
+            tags: ""
+            artifact: BENCchat-macos-universal
+            # The tarball the packaging step below produces, not the .app.
+            path: build/bin/BENCchat-macos-universal.tar.gz
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.tags }}" ]; then
+            wails build -platform ${{ matrix.platform }} -tags ${{ matrix.tags }} -clean
+          else
+            wails build -platform ${{ matrix.platform }} -clean
+          fi
+
+      # The .app is a directory, so tar it to preserve the bundle structure and
+      # the executable bit — upload-artifact would otherwise flatten it into
+      # loose files that macOS won't launch.
+      - name: Package macOS bundle
+        if: runner.os == 'macOS'
+        working-directory: build/bin
+        run: tar czf BENCchat-macos-universal.tar.gz BENCchat.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Release
+    # Only for tags. Pushes to master still produce artifacts above; they just
+    # don't become a public release anyone can stumble into.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect files
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          draft: true
+          generate_release_notes: true
+          body: |
+            Builds of BENCchat for Linux, Windows and macOS.
+
+            These are **unsigned**. On macOS, Gatekeeper will refuse the first
+            launch: right-click the app and choose Open, or run
+            `xattr -dr com.apple.quarantine BENCchat.app`. On Windows,
+            SmartScreen shows "unrecognized app" — choose More info → Run anyway.
+
+            No server address is baked into these binaries. Enter the address of
+            the OSCAR server you're connecting to on the sign-on screen.
