@@ -130,6 +130,14 @@ export interface DeviceInfo {
   thisDevice: boolean;
 }
 
+/** Whether THIS device is still waiting to be approved from another one.
+ *  `fingerprint` is this device's own code, which the approving machine shows
+ *  and asks the user to compare against. */
+export interface DeviceLinkState {
+  pending: boolean;
+  fingerprint: string;
+}
+
 export interface Preferences {
   theme: Theme;
   soundEnabled: boolean;
@@ -242,6 +250,8 @@ interface AppBindings {
   ListDevices(): Promise<DeviceInfo[] | null>;
   RemoveDevice(key: string): Promise<string>;
   ApproveDevice(key: string): Promise<string>;
+  DeclineDevice(key: string): Promise<string>;
+  GetDeviceLinkState(): Promise<DeviceLinkState>;
   SetCustomSound(key: string, data: string): Promise<string>;
   GetCustomSounds(): Promise<Record<string, string>>;
   ClearCustomSound(key: string): Promise<string>;
@@ -355,8 +365,14 @@ export const Bridge = {
   listDevices: () => app().ListDevices(),
   removeDevice: (key: string) => app().RemoveDevice(key),
   approveDevice: (key: string) => app().ApproveDevice(key),
+  declineDevice: (key: string) => app().DeclineDevice(key),
+  getDeviceLinkState: () => app().GetDeviceLinkState(),
 
   /** A new machine on this account is asking to be linked. */
+  onDeviceLinkState(cb: (s: DeviceLinkState) => void): void {
+    window.runtime?.EventsOn("device:link-state", (data) => cb(data as DeviceLinkState));
+  },
+
   onDeviceLinkRequest(cb: (req: { key: string; fingerprint: string }) => void): void {
     window.runtime?.EventsOn("device:link-request", (data) =>
       cb(data as { key: string; fingerprint: string }),

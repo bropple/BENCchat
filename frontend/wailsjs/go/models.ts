@@ -35,6 +35,20 @@ export namespace main {
 	        this.thisDevice = source["thisDevice"];
 	    }
 	}
+	export class DeviceLinkState {
+	    pending: boolean;
+	    fingerprint: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DeviceLinkState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pending = source["pending"];
+	        this.fingerprint = source["fingerprint"];
+	    }
+	}
 	export class Preferences {
 	    theme: config.Theme;
 	    soundEnabled: boolean;

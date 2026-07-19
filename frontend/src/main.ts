@@ -65,17 +65,34 @@ window.addEventListener("DOMContentLoaded", () => {
   // deliberately manual: the request only proves whoever sent it knows the
   // account password, which must not by itself grant the ability to read
   // everything encrypted to this account.
+  // A device is only ever asked about once. The backend already suppresses a
+  // repeat announcement, but a dialog is async: two requests arriving before
+  // the first is answered would otherwise stack, and answering both approves
+  // the same device twice.
+  const askingAbout = new Set<string>();
+
   Bridge.onDeviceLinkRequest((req) => {
+    if (askingAbout.has(req.key)) return;
+    askingAbout.add(req.key);
     void (async () => {
-      const ok = await confirmDialog(
-        `A new device wants to link to your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
-          `Check that this matches the code shown on that device. If it doesn't — or you're ` +
-          `not setting up a device right now — decline: approving lets it read your encrypted messages.`,
-        { title: "Link a new device?", okLabel: "Approve", cancelLabel: "Decline", danger: true },
-      );
-      if (!ok) return;
-      const err = await Bridge.approveDevice(req.key);
-      if (err) void alertDialog(err, { title: "Could not link device" });
+      try {
+        const ok = await confirmDialog(
+          `A new device wants to link to your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
+            `Check that this matches the code shown on that device. If it doesn't — or you're ` +
+            `not setting up a device right now — decline: approving lets it read your encrypted messages.`,
+          { title: "Link a new device?", okLabel: "Approve", cancelLabel: "Decline", danger: true },
+        );
+        if (!ok) {
+          // Tell the backend, so the same device announcing again this session
+          // doesn't re-ask something already answered.
+          void Bridge.declineDevice(req.key);
+          return;
+        }
+        const err = await Bridge.approveDevice(req.key);
+        if (err) void alertDialog(err, { title: "Could not link device" });
+      } finally {
+        askingAbout.delete(req.key);
+      }
     })();
   });
 

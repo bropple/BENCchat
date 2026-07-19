@@ -60,6 +60,20 @@ type App struct {
 	trustMu sync.Mutex
 	trust   trust.Store
 
+	// Device-linking state, guarded by linkMu. linkPrompted records keys we've
+	// already put in front of the user this session and linkDeclined those they
+	// said no to, so a device that announces more than once — a sibling
+	// reconnecting, an auto-login racing a manual one — asks once rather than
+	// stacking a dialog per announcement.
+	//
+	// linkPending is the other side of the same conversation: true when THIS
+	// device has announced itself to an account that already has devices and is
+	// waiting to be approved from one of them.
+	linkMu       sync.Mutex
+	linkPrompted map[[32]byte]bool
+	linkDeclined map[[32]byte]bool
+	linkPending  bool
+
 	// System tray. Icons are injected from main (embedded assets). quitting
 	// distinguishes a real quit (tray "Quit") from a window close, which hides to
 	// the tray instead of exiting.

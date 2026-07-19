@@ -33,6 +33,8 @@ export function ConversationEncrypted(arg1:string):Promise<boolean>;
 
 export function CreateEncryptedRoom(arg1:string):Promise<string>;
 
+export function DeclineDevice(arg1:string):Promise<string>;
+
 export function DeclineRoomInvite(arg1:string):Promise<void>;
 
 export function DeviceCount():Promise<number>;
@@ -52,6 +54,8 @@ export function GetConversation(arg1:string):Promise<state.Conversation>;
 export function GetConversations():Promise<Array<state.Conversation>>;
 
 export function GetCustomSounds():Promise<Record<string, string>>;
+
+export function GetDeviceLinkState():Promise<main.DeviceLinkState>;
 
 export function GetGroups():Promise<Array<string>>;
 

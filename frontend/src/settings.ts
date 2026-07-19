@@ -225,6 +225,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <p class="benco-caption settings__hint"><strong>On by default.</strong> TLS protects everything end-to-end encryption can't: your login handshake, buddy list, presence, profiles, chat rooms, and who you talk to. There is no fallback: with this on, sign-on <strong>fails</strong> rather than connecting in the clear, which is what stops an attacker steering you onto the plaintext port. The server needs a TLS listener, usually on its own port — if a server only speaks plaintext, sign-on will fail until you turn this off. Skipping the certificate check defeats the point of TLS — it accepts any server claiming to be this one — so use it only against a self-signed test server. <strong>Takes effect on your next sign-on.</strong></p>
 
                 <div class="benco-caption settings__group-label">Your devices</div>
+                <div class="settings__link-pending" id="linkPending" hidden></div>
                 <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. Remove one you no longer use — senders will stop encrypting to it.</p>
                 <div class="settings__devices" id="deviceList"></div>
 
@@ -469,6 +470,27 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
 
     // Device list. Rendered on open and after any removal.
     const deviceListEl = overlay.querySelector<HTMLDivElement>("#deviceList")!;
+    // Until another device approves this one, it can't read anything encrypted
+    // to the account. The user has no way to discover that otherwise — the
+    // approval happens entirely on the other machine — so say it here, with
+    // this device's code, which is what the approving dialog asks them to
+    // compare against.
+    const linkPendingEl = overlay.querySelector<HTMLDivElement>("#linkPending")!;
+    const renderLinkState = (st: { pending: boolean; fingerprint: string }): void => {
+      linkPendingEl.hidden = !st.pending;
+      if (!st.pending) return;
+      linkPendingEl.innerHTML = `
+        <strong>This device isn't linked yet.</strong>
+        It can't read messages encrypted to your other devices until one of them
+        approves it. Sign in on a device you already use, and approve this code:
+        <span class="settings__link-code">${escapeHTML(st.fingerprint)}</span>`;
+    };
+    void Bridge.getDeviceLinkState().then(renderLinkState).catch(() => {});
+    Bridge.onDeviceLinkState((st) => {
+      renderLinkState(st);
+      void renderDevices();
+    });
+
     const renderDevices = async (): Promise<void> => {
       let devices: Awaited<ReturnType<typeof Bridge.listDevices>> = [];
       try {

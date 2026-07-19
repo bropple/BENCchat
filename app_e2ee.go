@@ -73,6 +73,10 @@ func (a *App) setupE2EE(screenName string) {
 	a.trust = t
 	a.trustMu.Unlock()
 
+	// Fresh session, fresh linking memory: a device the user declined last time
+	// gets to ask again rather than being ignored forever.
+	a.resetLinkState()
+
 	a.client.SetPeerKeyHandler(a.notePeerKey)
 	a.client.SetDeviceMessageHandler(a.handleDeviceMessage)
 	a.client.SetRoomInviteHandler(a.handleRoomInvite)
@@ -110,7 +114,22 @@ func (a *App) publishAfterDeviceCheck() {
 	}
 	merged := e2ee.DecodeKeys(strings.Join(remembered, ","))
 
+	// Whether this device is already part of the account, judged BEFORE we add
+	// ourselves to the list below. An account that already advertises devices,
+	// none of which is ours, means we're the new machine and somebody has to
+	// approve us — which the user otherwise has no way of knowing, since the
+	// approval happens on the other device entirely.
 	if published, has, ok := a.client.FetchOwnPublishedKeys(5 * time.Second); ok && has {
+		known := false
+		for _, k := range published {
+			if k == a.e2eePub {
+				known = true
+				break
+			}
+		}
+		if !known && len(published) > 0 {
+			a.setLinkPending()
+		}
 		merged = append(merged, published...)
 	} else if !ok {
 		slog.Default().Warn("could not read the published device set; using the remembered one")
@@ -518,6 +537,13 @@ func (a *App) handleDeviceMessage(kind string, keys [][32]byte) {
 			a.shareDeviceList()
 			return
 		}
+		// Ask once per device per session. A sibling that announces again —
+		// reconnecting, or an auto-login racing a manual sign-on — must not
+		// stack a second dialog on top of the one already open, which is how
+		// the same device ended up being approved twice.
+		if !a.markLinkPrompted(newKey) {
+			return
+		}
 		// Otherwise the user has to approve it. Password knowledge alone must not
 		// be enough to silently join an account and read everything.
 		runtime.EventsEmit(a.ctx, "device:link-request", map[string]string{
@@ -536,7 +562,115 @@ func (a *App) handleDeviceMessage(kind string, keys [][32]byte) {
 			slog.Default().Warn("could not save merged device list", "err", err)
 		}
 		a.publishProfile()
+
+		// A list that includes our own key is somebody answering the approval
+		// we were waiting on: we're linked now, so stop saying otherwise.
+		for _, k := range keys {
+			if k == a.e2eePub {
+				a.clearLinkPending()
+				break
+			}
+		}
 	}
+}
+
+// markLinkPrompted records that a key has been shown to the user, returning
+// false when it already had been (or was declined) and should not be shown
+// again this session.
+func (a *App) markLinkPrompted(k [32]byte) bool {
+	a.linkMu.Lock()
+	defer a.linkMu.Unlock()
+	if a.linkPrompted[k] || a.linkDeclined[k] {
+		return false
+	}
+	if a.linkPrompted == nil {
+		a.linkPrompted = map[[32]byte]bool{}
+	}
+	a.linkPrompted[k] = true
+	return true
+}
+
+// resetLinkState clears per-session linking memory. Called on sign-on so a new
+// session re-asks about a device the user previously declined, rather than
+// silently ignoring it forever.
+func (a *App) resetLinkState() {
+	a.linkMu.Lock()
+	a.linkPrompted = map[[32]byte]bool{}
+	a.linkDeclined = map[[32]byte]bool{}
+	a.linkPending = false
+	a.linkMu.Unlock()
+}
+
+// setLinkPending records that this device is waiting to be approved elsewhere,
+// and tells the user how — including this device's own code, which the
+// approving machine asks them to compare against.
+func (a *App) setLinkPending() {
+	a.linkMu.Lock()
+	already := a.linkPending
+	a.linkPending = true
+	a.linkMu.Unlock()
+	if already {
+		return
+	}
+	a.emitLinkState()
+	a.store.Notify(state.NoticeWarn, fmt.Sprintf(
+		"This device isn't linked yet, so it can't read messages encrypted to your "+
+			"other devices. Approve it from a device that's already signed in — its "+
+			"code is %s.", e2ee.Fingerprint(a.e2eePub)))
+}
+
+func (a *App) clearLinkPending() {
+	a.linkMu.Lock()
+	was := a.linkPending
+	a.linkPending = false
+	a.linkMu.Unlock()
+	if !was {
+		return
+	}
+	a.emitLinkState()
+	a.store.Notify(state.NoticeInfo, "This device is now linked to your account.")
+}
+
+// DeviceLinkState reports whether this device is still waiting to be approved,
+// and its own code so the user can compare it with the approving device.
+type DeviceLinkState struct {
+	Pending     bool   `json:"pending"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// GetDeviceLinkState is read by the settings panel to show the pending banner.
+func (a *App) GetDeviceLinkState() DeviceLinkState {
+	a.linkMu.Lock()
+	pending := a.linkPending
+	a.linkMu.Unlock()
+	fp := ""
+	if a.e2eeHasKey {
+		fp = e2ee.Fingerprint(a.e2eePub)
+	}
+	return DeviceLinkState{Pending: pending, Fingerprint: fp}
+}
+
+func (a *App) emitLinkState() {
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "device:link-state", a.GetDeviceLinkState())
+}
+
+// DeclineDevice records that the user refused a link request, so the same
+// device announcing again doesn't re-ask for the rest of this session.
+func (a *App) DeclineDevice(keyB64 string) string {
+	key, err := e2ee.DecodeKey(keyB64)
+	if err != nil {
+		return "That doesn't look like a device key."
+	}
+	a.linkMu.Lock()
+	if a.linkDeclined == nil {
+		a.linkDeclined = map[[32]byte]bool{}
+	}
+	a.linkDeclined[key] = true
+	a.linkMu.Unlock()
+	return ""
 }
 
 func (a *App) knowsDevice(k [32]byte) bool {
@@ -565,6 +699,13 @@ func (a *App) ApproveDevice(keyB64 string) string {
 	newKey, err := e2ee.DecodeKey(keyB64)
 	if err != nil {
 		return "That doesn't look like a device key."
+	}
+	// Approving something already linked is a no-op, not a second link. Worth
+	// being explicit: two dialogs for one device used to be reachable, and
+	// re-running the whole publish/share/notify sequence made it look like two
+	// devices had joined.
+	if a.knowsDevice(newKey) {
+		return ""
 	}
 	merged := append(a.deviceKeys(), newKey, a.e2eePub)
 	a.setDeviceKeys(merged)

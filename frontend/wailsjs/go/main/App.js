@@ -62,6 +62,10 @@ export function CreateEncryptedRoom(arg1) {
   return window['go']['main']['App']['CreateEncryptedRoom'](arg1);
 }
 
+export function DeclineDevice(arg1) {
+  return window['go']['main']['App']['DeclineDevice'](arg1);
+}
+
 export function DeclineRoomInvite(arg1) {
   return window['go']['main']['App']['DeclineRoomInvite'](arg1);
 }
@@ -100,6 +104,10 @@ export function GetConversations() {
 
 export function GetCustomSounds() {
   return window['go']['main']['App']['GetCustomSounds']();
+}
+
+export function GetDeviceLinkState() {
+  return window['go']['main']['App']['GetDeviceLinkState']();
 }
 
 export function GetGroups() {

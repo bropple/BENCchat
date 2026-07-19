@@ -520,3 +520,29 @@
   font-size: 11px;
   padding: 4px 10px;
 }
+
+/* "This device isn't linked yet" — shown until another device approves it.
+   Amber rather than red: it's a step not yet taken, not something broken. */
+.settings__link-pending {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--benco-amber);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel-2);
+  color: var(--benco-phosphor);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The code the approving device asks the user to compare against, so it has to
+   be readable digit by digit — and selectable, to read it out or paste it. */
+.settings__link-code {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--benco-amber);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  letter-spacing: 1px;
+  user-select: text;
+  cursor: text;
+}
