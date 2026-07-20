@@ -1,9 +1,11 @@
 # Key directory v2: cross-signing on the wire
 
-**Status: proposal.** Nothing here is built. It exists to be argued with before
-it becomes a server change you have to live with, because `0xBE00` is BENCchat's
-own foodgroup and BENCoscar is the only implementation — which makes it easy to
-change now and annoying to change once accounts depend on it.
+**Status: proposal, fully specified.** Nothing here is built, but every question
+it opened has been answered — see §9 for the decisions and the reasoning behind
+each. It exists to be argued with before it becomes a server change you have to
+live with, because `0xBE00` is BENCchat's own foodgroup and BENCoscar is the only
+implementation — which makes it easy to change now and annoying to change once
+accounts depend on it.
 
 Read [`how-it-works-today.md`](how-it-works-today.md) for what exists.
 [`trust-model.md`](trust-model.md) is the argument that led here; this document
@@ -29,6 +31,10 @@ supersedes its wire-level sketch in one respect, flagged in §3.
 - **The recovery key is shown exactly once**, and that is a consequence of
   transient custody rather than a policy. The backup can be re-keyed later, but
   only while the user is proving they still hold the current key. See §10.
+- **First run takes the whole window** and cannot be left until the key has been
+  copied or saved. See §12.
+- **Possession is never re-confirmed afterwards**, accepting that a lost key may
+  go unnoticed for years. See §13.
 
 ## 2. What v1 looks like now
 
@@ -444,9 +450,65 @@ only the suppression of device-list *changes* (it cannot forge, insert, or roll
 back), and the deployment's operator is the person reading this. Worth
 revisiting if that ever stops being true.
 
-## 12. Still open
+## 12. The first-run screen
 
-- **The first-run screen's actual design** — copy, layout, and how hard to make
-  the acknowledgement. The flow is settled above; the UI is not.
-- **How often, if ever, to re-confirm that a user still has their recovery key**,
-  given the slow failure described in §10.
+**Full window, and no way past it until the key has been copied.**
+
+Not a dialog over the roster, not a dismissible panel — the whole window, with
+no other affordance. This is the only screen in BENCchat where dismissing it
+without reading costs the user something unrecoverable, and it is the one moment
+where blocking is proportionate. Sign-on has already happened at this point; the
+account is unusable until the identity exists anyway, so nothing is being held
+hostage that would otherwise work.
+
+Requirements:
+
+- The key rendered large and unambiguous, as ten hyphen-separated words.
+- A copy button. **Continuing is disabled until it has been used.**
+- Text stating plainly that it will not be shown again — which is true, not a
+  policy (§10), and should be phrased as a fact about the system rather than a
+  warning about behaviour.
+- No "remind me later", no close button, no escape key.
+
+### Two things the gate does not achieve, worth knowing
+
+**Copied is not saved.** The clipboard is the strongest signal available
+client-side, and it is still only proof that a button was pressed. A user can
+copy and never paste. The gate forces a deliberate action, which is worth
+having, but it should not be described — internally or in the copy — as
+confirming the key is safe.
+
+**The clipboard is not a private place.** Clipboard managers keep history, and
+some sync it across machines or to a phone. Putting a ~110-bit account secret
+there is a real if minor exposure, and on a compromised machine it is a
+significant one. This is an accepted cost of making the gate an action the user
+can actually perform, but it argues for also offering **save to a file** as an
+equally valid way to satisfy the gate: it persists (unlike a clipboard that gets
+overwritten), and it skips the clipboard entirely for users who would rather it
+did.
+
+### If the clipboard is unavailable
+
+Some environments have no clipboard access at all. A gate that cannot be
+satisfied would leave the account permanently unusable, which is a worse outcome
+than any it prevents — so the save-to-file path above doubles as the escape
+hatch, and at least one of the two must always be available.
+
+## 13. Recovery-key possession is never re-confirmed
+
+**Decided: never.** No periodic prompt, no nag, no "can you still find your
+recovery key?" check.
+
+Recording the cost, because it is real and was accepted deliberately rather than
+overlooked. Combined with the slow failure in §10 — devices keep working, only
+the ability to change the device list is lost — this means a user can lose their
+recovery key and not discover it for years. The discovery moment becomes the day
+they replace a laptop and cannot link the new one, which is both the worst time
+to find out and long past when anything could have been done about it.
+
+The counter-argument for a periodic check is that it converts a silent loss into
+a noticed one while re-keying is still possible (§10). The argument against, and
+the one that won: a prompt that fires when nothing is wrong is a prompt people
+learn to dismiss, and this project has already established — with safety-number
+churn — that an alert which fires during normal use is not there when it
+matters.
