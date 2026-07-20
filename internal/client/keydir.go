@@ -1,7 +1,6 @@
 package client
 
 import (
-	"crypto/ed25519"
 	"time"
 
 	"github.com/benco-holdings/benchat/internal/e2ee"
@@ -15,21 +14,93 @@ import (
 // only place they live. If the server does not advertise the foodgroup,
 // SupportsKeyDir is false and there is nowhere left to publish or read keys —
 // callers report that rather than silently degrading to plaintext.
+//
+// In v2 the unit of exchange is a signed MANIFEST, not a device list, and this
+// layer never opens one. Manifest bytes go out exactly as the signer produced
+// them and come back exactly as received; deciding whether a manifest is
+// trustworthy is internal/e2ee's job, reached through the verifier hook below.
+// Re-encoding a manifest anywhere on this path would invalidate its signature.
 
 // keyDirTimeout bounds a directory round trip.
 //
 // A timeout must never be read as "this peer has no keys" — that would make a
 // sender fall back to plaintext because the network hiccuped. Callers get a
-// distinct ok=false for it.
+// distinct ok=false for it, separate from a reply that legitimately says the
+// account has published nothing.
 const keyDirTimeout = 5 * time.Second
 
+// SignedManifest is a manifest exactly as the directory returned it.
+//
+// Manifest and Signature are carried together and untouched because they are
+// only meaningful as a pair: the signature covers those bytes and no
+// re-serialization of them. Present is false for an account that has published
+// nothing, which is a real answer rather than a failure.
+type SignedManifest struct {
+	ScreenName string
+	Present    bool
+	Manifest   []byte
+	SigAlg     uint8
+	Signature  []byte
+}
+
+// IdentityBackup is the encrypted account identity key as stored on the server.
+//
+// The KDF parameters travel with the blob rather than being assumed, so the
+// work factor can be raised later without stranding backups made under the old
+// one. Present is false for an account that has never bootstrapped an identity
+// — which is how a client tells a first run from a new device being linked.
+type IdentityBackup struct {
+	Present bool
+	KDF     uint8
+	Params  []byte
+	Salt    []byte
+	Blob    []byte
+}
+
+// ManifestVerifier checks a manifest's signature over the bytes AS RECEIVED and
+// returns the devices it names.
+//
+// It is a function type so that this package never links against signature
+// code: the plumbing carries bytes, internal/e2ee decides whether they are
+// worth believing. An implementation is expected to be built on
+// e2ee.VerifyManifest, which is where the actual signature check lives — a hook
+// rather than a direct call because choosing WHICH identity key to verify
+// against is a trust-store question, and the trust store is not down here.
+//
+// An implementation must verify before decoding, and must
+// apply the counter rule (never accept a counter below the highest already seen
+// for that account) — this layer cannot do either, because it holds no trust
+// store and no notion of what a peer's identity is supposed to be.
+//
+// Returning ok=false means the manifest is not to be believed at all, and no
+// keys are learned from it.
+type ManifestVerifier func(sm SignedManifest) (devices []e2ee.Device, ok bool)
+
+// SetManifestVerifier installs the hook that decides whether a received
+// manifest is trustworthy. Until it is set, no inbound manifest teaches this
+// client anything.
+func (c *Client) SetManifestVerifier(v ManifestVerifier) {
+	c.e2eeMu.Lock()
+	c.verifyManifest = v
+	c.e2eeMu.Unlock()
+}
+
 // keyDirReply is one decoded directory response.
+//
+// It is a union across the four reply subgroups rather than four channels,
+// because correlation is by request ID and a waiter already knows which kind of
+// answer it asked for.
 type keyDirReply struct {
-	devices  []e2ee.Device
-	refused  []e2ee.Device
-	accepted int
-	revoked  bool
-	restored bool
+	manifest SignedManifest
+
+	// Publish. counter is what the server holds after the call, which is what
+	// makes a lost race actionable: a client refused as stale learns the value
+	// it has to beat instead of having to re-query for it.
+	accepted bool
+	counter  uint64
+
+	stored bool
+	backup IdentityBackup
 }
 
 // SupportsKeyDir reports whether the connected server offers the key directory.
@@ -70,82 +141,77 @@ func (c *Client) deliverKeyDir(reqID uint32, reply keyDirReply) {
 	}
 }
 
-// QueryDevices fetches an account's published devices from the directory.
+// QueryManifest fetches an account's signed manifest from the directory.
 //
 // ok is false when the directory is unavailable or the reply does not arrive.
-// That is deliberately distinct from an empty device list, which is a real
-// answer meaning the account publishes no keys: treating a timeout as "no keys"
-// would silently downgrade a conversation to plaintext.
-func (c *Client) QueryDevices(screenName string) (devices []e2ee.Device, ok bool) {
+// That is deliberately distinct from a reply whose Present is false, which is a
+// real answer meaning the account has published nothing: treating a timeout as
+// "no keys" would silently downgrade a conversation to plaintext.
+//
+// The returned bytes are unverified. Callers must run them past a
+// ManifestVerifier before believing anything in them.
+func (c *Client) QueryManifest(screenName string) (SignedManifest, bool) {
 	c.mu.Lock()
 	sess := c.session
 	c.mu.Unlock()
 	if sess == nil || !sess.SupportsKeyDir() {
-		return nil, false
+		return SignedManifest{}, false
 	}
 
-	reqID, err := sess.QueryDeviceKeys(screenName)
+	reqID, err := sess.QueryManifest(screenName)
 	if err != nil {
 		c.log.Warn("key directory query failed to send", "screen_name", screenName, "err", err)
-		return nil, false
+		return SignedManifest{}, false
 	}
 	ch, done := c.waitKeyDir(reqID)
 	defer done()
 
 	select {
 	case r := <-ch:
-		return r.devices, true
+		return r.manifest, true
 	case <-time.After(keyDirTimeout):
 		c.log.Warn("key directory query timed out", "screen_name", screenName)
-		return nil, false
+		return SignedManifest{}, false
 	}
 }
 
-// PublishDevices publishes this account's complete device set.
+// PublishManifest publishes this account's signed device manifest.
 //
-// refused carries devices the server declined because they were revoked — a
-// machine the user removed announcing itself again. The caller is expected to
-// put those in front of the user rather than retrying.
-func (c *Client) PublishDevices(devices []e2ee.Device) (accepted int, refused []e2ee.Device, ok bool) {
+// manifest must be the exact bytes that were signed. accepted is false when the
+// server refused it — most usefully because the counter did not advance, which
+// means another device published first; counter then carries what the server
+// holds, so the caller can re-sign above it rather than guess.
+func (c *Client) PublishManifest(manifest []byte, sigAlg uint8, signature []byte) (accepted bool, counter uint64, ok bool) {
 	c.mu.Lock()
 	sess := c.session
 	c.mu.Unlock()
 	if sess == nil || !sess.SupportsKeyDir() {
-		return 0, nil, false
+		return false, 0, false
 	}
 
-	wireDevices := make([]wire.BENCODevice, 0, len(devices))
-	for _, d := range devices {
-		box := d.Box
-		wireDevices = append(wireDevices, wire.BENCODevice{
-			BoxKey:  box[:],
-			SignKey: []byte(d.Sign),
-		})
-	}
-
-	reqID, err := sess.PublishDeviceKeys(wireDevices)
+	reqID, err := sess.PublishManifest(manifest, sigAlg, signature)
 	if err != nil {
 		c.log.Warn("key directory publish failed to send", "err", err)
-		return 0, nil, false
+		return false, 0, false
 	}
 	ch, done := c.waitKeyDir(reqID)
 	defer done()
 
 	select {
 	case r := <-ch:
-		return r.accepted, r.refused, true
+		return r.accepted, r.counter, true
 	case <-time.After(keyDirTimeout):
 		c.log.Warn("key directory publish timed out")
-		return 0, nil, false
+		return false, 0, false
 	}
 }
 
-// RevokeDevice removes one of this account's own devices from the directory.
+// PutIdentityBackup stores this account's encrypted identity key.
 //
-// The server tombstones the key, so the removed machine cannot republish itself
-// on next sign-on. changed is false when the key was not active, which is not an
-// error.
-func (c *Client) RevokeDevice(box [32]byte) (changed bool, ok bool) {
+// The blob is opaque here: this layer neither derives the wrapping key nor
+// checks that the parameters are sane, because it cannot — the recovery phrase
+// never reaches it, and neither does the server's.
+func (c *Client) PutIdentityBackup(kdf uint8, params, salt, blob []byte) (stored bool, ok bool) {
 	c.mu.Lock()
 	sess := c.session
 	c.mu.Unlock()
@@ -153,9 +219,9 @@ func (c *Client) RevokeDevice(box [32]byte) (changed bool, ok bool) {
 		return false, false
 	}
 
-	reqID, err := sess.RevokeDeviceKey(box[:])
+	reqID, err := sess.PutIdentityBackup(kdf, params, salt, blob)
 	if err != nil {
-		c.log.Warn("key directory revoke failed to send", "err", err)
+		c.log.Warn("identity backup store failed to send", "err", err)
 		return false, false
 	}
 	ch, done := c.waitKeyDir(reqID)
@@ -163,10 +229,42 @@ func (c *Client) RevokeDevice(box [32]byte) (changed bool, ok bool) {
 
 	select {
 	case r := <-ch:
-		return r.revoked, true
+		return r.stored, true
 	case <-time.After(keyDirTimeout):
-		c.log.Warn("key directory revoke timed out")
+		c.log.Warn("identity backup store timed out")
 		return false, false
+	}
+}
+
+// GetIdentityBackup fetches this account's encrypted identity key.
+//
+// ok=false is a failed round trip, and must not be confused with a successful
+// reply whose Present is false. The second means "this account has never
+// bootstrapped an identity" and drives the first-run flow; acting on the first
+// as if it were the second would generate a fresh identity and orphan every
+// device already trusting the old one.
+func (c *Client) GetIdentityBackup() (IdentityBackup, bool) {
+	c.mu.Lock()
+	sess := c.session
+	c.mu.Unlock()
+	if sess == nil || !sess.SupportsKeyDir() {
+		return IdentityBackup{}, false
+	}
+
+	reqID, err := sess.GetIdentityBackup()
+	if err != nil {
+		c.log.Warn("identity backup fetch failed to send", "err", err)
+		return IdentityBackup{}, false
+	}
+	ch, done := c.waitKeyDir(reqID)
+	defer done()
+
+	select {
+	case r := <-ch:
+		return r.backup, true
+	case <-time.After(keyDirTimeout):
+		c.log.Warn("identity backup fetch timed out")
+		return IdentityBackup{}, false
 	}
 }
 
@@ -182,42 +280,13 @@ func (c *Client) RevokeDevice(box [32]byte) (changed bool, ok bool) {
 // it in a goroutine.
 func (c *Client) RefreshPeerKeys(screenName string) {
 	if c.SupportsKeyDir() {
-		if devices, ok := c.QueryDevices(screenName); ok && len(devices) > 0 {
-			// handleKeyDir already cached these; nothing further to do.
+		if sm, ok := c.QueryManifest(screenName); ok && sm.Present {
+			// handleKeyDir already verified and cached these if a verifier is
+			// installed; nothing further to do.
 			return
 		}
 	}
 	c.RequestUserInfo(screenName)
-}
-
-// RestoreDevice lifts a revocation so a removed device can publish again.
-//
-// This is the exit from what would otherwise be a dead end: a tombstoned device
-// republishes on every sign-on, is refused, and the user is told to approve it
-// from another machine — which does nothing unless that approval can reach here.
-func (c *Client) RestoreDevice(box [32]byte) (changed bool, ok bool) {
-	c.mu.Lock()
-	sess := c.session
-	c.mu.Unlock()
-	if sess == nil || !sess.SupportsKeyDir() {
-		return false, false
-	}
-
-	reqID, err := sess.RestoreDeviceKey(box[:])
-	if err != nil {
-		c.log.Warn("key directory restore failed to send", "err", err)
-		return false, false
-	}
-	ch, done := c.waitKeyDir(reqID)
-	defer done()
-
-	select {
-	case r := <-ch:
-		return r.restored, true
-	case <-time.After(keyDirTimeout):
-		c.log.Warn("key directory restore timed out")
-		return false, false
-	}
 }
 
 // handleKeyDir dispatches an inbound key directory SNAC.
@@ -229,16 +298,15 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 			c.log.Warn("bad key directory query reply", "err", err)
 			return
 		}
-		devices := devicesFromWire(reply.Devices)
-
-		// Learn the peer's keys here as well as handing them to the waiter, so a
-		// query issued for any reason keeps the send-side cache warm — the same
-		// thing the profile path does on a locate reply.
-		if !c.isSelf(reply.ScreenName) && len(devices) > 0 {
-			c.learnPeerKeys(reply.ScreenName, e2ee.BoxKeysOf(devices))
-			c.learnPeerSigningKeys(reply.ScreenName, e2ee.SigningKeysOf(devices))
+		sm := SignedManifest{
+			ScreenName: reply.ScreenName,
+			Present:    reply.Present != 0,
+			Manifest:   reply.Manifest,
+			SigAlg:     reply.SigAlg,
+			Signature:  reply.Signature,
 		}
-		c.deliverKeyDir(frame.RequestID, keyDirReply{devices: devices})
+		c.learnFromManifest(sm)
+		c.deliverKeyDir(frame.RequestID, keyDirReply{manifest: sm})
 
 	case wire.BENCOKeyDirPublishReply:
 		reply, err := oscar.DecodeKeyDirPublishReply(body)
@@ -246,30 +314,38 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 			c.log.Warn("bad key directory publish reply", "err", err)
 			return
 		}
-		refused := devicesFromWire(reply.Refused)
-		if len(refused) > 0 {
-			c.log.Info("server refused revoked device keys", "count", len(refused))
+		if reply.Accepted == 0 {
+			// Worth logging rather than only returning: the usual cause is
+			// another device of ours having published at a higher counter, and
+			// that is a fact about the account, not about this call.
+			c.log.Info("key directory refused a manifest", "server_counter", reply.Counter)
 		}
 		c.deliverKeyDir(frame.RequestID, keyDirReply{
-			accepted: int(reply.Accepted),
-			refused:  refused,
+			accepted: reply.Accepted != 0,
+			counter:  reply.Counter,
 		})
 
-	case wire.BENCOKeyDirRevokeReply:
-		reply, err := oscar.DecodeKeyDirRevokeReply(body)
+	case wire.BENCOKeyDirPutBackupReply:
+		reply, err := oscar.DecodeKeyDirPutBackupReply(body)
 		if err != nil {
-			c.log.Warn("bad key directory revoke reply", "err", err)
+			c.log.Warn("bad identity backup store reply", "err", err)
 			return
 		}
-		c.deliverKeyDir(frame.RequestID, keyDirReply{revoked: reply.Revoked != 0})
+		c.deliverKeyDir(frame.RequestID, keyDirReply{stored: reply.Stored != 0})
 
-	case wire.BENCOKeyDirRestoreReply:
-		reply, err := oscar.DecodeKeyDirRestoreReply(body)
+	case wire.BENCOKeyDirGetBackupReply:
+		reply, err := oscar.DecodeKeyDirGetBackupReply(body)
 		if err != nil {
-			c.log.Warn("bad key directory restore reply", "err", err)
+			c.log.Warn("bad identity backup fetch reply", "err", err)
 			return
 		}
-		c.deliverKeyDir(frame.RequestID, keyDirReply{restored: reply.Restored != 0})
+		c.deliverKeyDir(frame.RequestID, keyDirReply{backup: IdentityBackup{
+			Present: reply.Present != 0,
+			KDF:     reply.KDF,
+			Params:  reply.Params,
+			Salt:    reply.Salt,
+			Blob:    reply.Blob,
+		}})
 
 	case wire.BENCOKeyDirErr:
 		// Deliver an empty reply so a waiter fails fast rather than sitting out
@@ -279,25 +355,40 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 	}
 }
 
-// devicesFromWire converts wire devices, skipping any with a wrong-length key.
+// learnFromManifest caches a peer's device keys off a query reply.
 //
-// The server validates lengths, so a bad one here means a version mismatch or a
-// corrupt frame. Dropping it beats copying into a [32]byte and panicking, or
-// worse, silently truncating a key and producing undecryptable messages.
-func devicesFromWire(in []wire.BENCODevice) []e2ee.Device {
-	out := make([]e2ee.Device, 0, len(in))
-	for _, d := range in {
-		if len(d.BoxKey) != 32 {
-			continue
-		}
-		var box [32]byte
-		copy(box[:], d.BoxKey)
-
-		var sign ed25519.PublicKey
-		if len(d.SignKey) == ed25519.PublicKeySize {
-			sign = ed25519.PublicKey(append([]byte(nil), d.SignKey...))
-		}
-		out = append(out, e2ee.Device{Box: box, Sign: sign})
+// This runs on every query, not just ones a caller is waiting on, so that a
+// lookup made for any reason keeps the send-side cache warm — the same thing the
+// profile path used to do on a locate reply.
+//
+// It goes through the verifier and does nothing without one. A manifest that
+// has not been checked is exactly as good as one the server invented, and the
+// whole point of v2 is that the server does not get to decide who our peers'
+// devices are.
+func (c *Client) learnFromManifest(sm SignedManifest) {
+	if !sm.Present {
+		return
 	}
-	return out
+	c.e2eeMu.Lock()
+	verify := c.verifyManifest
+	c.e2eeMu.Unlock()
+	if verify == nil {
+		c.log.Warn("dropping a manifest: no verifier installed", "screen_name", sm.ScreenName)
+		return
+	}
+	devices, ok := verify(sm)
+	if !ok {
+		c.log.Warn("manifest failed verification", "screen_name", sm.ScreenName)
+		return
+	}
+
+	// Our own screen name is deliberately not filed as a peer. A self-query
+	// answers with our own account, and treating that like anyone else's would
+	// record a trust entry against ourselves and then warn us that our own key
+	// had changed the moment a second device published.
+	if c.isSelf(sm.ScreenName) || len(devices) == 0 {
+		return
+	}
+	c.learnPeerKeys(sm.ScreenName, e2ee.BoxKeysOf(devices))
+	c.learnPeerSigningKeys(sm.ScreenName, e2ee.SigningKeysOf(devices))
 }

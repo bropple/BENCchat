@@ -72,6 +72,13 @@ type Client struct {
 	// Keyed by request ID because several queries can be outstanding at once —
 	// one per peer whose keys we want. See keydir.go.
 	keyDirWait map[uint32]chan keyDirReply
+	// verifyManifest checks a signed manifest and returns the devices it names.
+	// It is a hook rather than a call because verification is internal/e2ee's
+	// job and this package must not decide what to trust. Nil means no verifier
+	// has been installed, in which case no manifest is ever learned from —
+	// fail closed, since an unverified device set is exactly what v2 exists to
+	// refuse. See SetManifestVerifier.
+	verifyManifest ManifestVerifier
 
 	// signKP is this device's room-message signing key, and peerSignKeys caches
 	// the signing keys each peer publishes. Guarded by e2eeMu.

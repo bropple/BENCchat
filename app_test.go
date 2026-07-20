@@ -9,7 +9,6 @@ import (
 
 	"github.com/zalando/go-keyring"
 
-	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/history"
 	"github.com/benco-holdings/benchat/internal/secret"
 	"github.com/benco-holdings/benchat/internal/state"
@@ -236,66 +235,5 @@ func TestTransportHint(t *testing.T) {
 	// them disabling verification when the address was the actual problem.
 	if h := transportHint(badCert, true); strings.Contains(h, "doesn't speak TLS") {
 		t.Errorf("certificate failure misreported as a port problem: %q", h)
-	}
-}
-
-// A device that announces more than once — a sibling reconnecting, an
-// auto-login racing a manual sign-on — must be asked about once. Two dialogs
-// for one device is how the same machine got approved twice.
-func TestLinkPromptAsksOncePerDevice(t *testing.T) {
-	var key [32]byte
-	key[0] = 1
-	var other [32]byte
-	other[0] = 2
-
-	a := &App{}
-	a.resetLinkState()
-
-	if !a.markLinkPrompted(key) {
-		t.Fatal("the first announcement must prompt")
-	}
-	if a.markLinkPrompted(key) {
-		t.Error("a repeat announcement from the same device must not prompt again")
-	}
-	if !a.markLinkPrompted(other) {
-		t.Error("a different device must still get its own prompt")
-	}
-
-	// Declining is an answer too: the same device asking again in this session
-	// must not re-open the dialog the user just dismissed.
-	var declined [32]byte
-	declined[0] = 3
-	if msg := a.DeclineDevice(e2ee.EncodeKey(declined)); msg != "" {
-		t.Fatalf("DeclineDevice: %s", msg)
-	}
-	if a.markLinkPrompted(declined) {
-		t.Error("a declined device must not re-prompt in the same session")
-	}
-
-	// A new session starts fresh, so a device declined earlier can ask again
-	// rather than being ignored forever.
-	a.resetLinkState()
-	if !a.markLinkPrompted(declined) {
-		t.Error("after a new sign-on a previously declined device must be able to ask again")
-	}
-}
-
-// The pending flag is what tells the new machine it can't read anything yet.
-// It must survive being set twice and clear exactly once.
-func TestLinkPendingState(t *testing.T) {
-	a := &App{store: state.NewStore()}
-	a.resetLinkState()
-
-	if a.GetDeviceLinkState().Pending {
-		t.Error("a fresh session must not start out pending")
-	}
-	a.setLinkPending()
-	if !a.GetDeviceLinkState().Pending {
-		t.Fatal("setLinkPending did not take effect")
-	}
-	a.setLinkPending() // idempotent: must not notify twice
-	a.clearLinkPending()
-	if a.GetDeviceLinkState().Pending {
-		t.Error("clearLinkPending did not clear the flag")
 	}
 }

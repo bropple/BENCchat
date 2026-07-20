@@ -530,52 +530,44 @@ func TestLiveSession(t *testing.T) {
 // wrong — a mismatched length prefix shows up as a confusing disconnect, not an
 // error.
 //
-// Needs two accounts. The second exists to be OFFLINE while its keys are
-// fetched, which is the case the profile-marker scheme could not handle:
+// It covers only the two requests that carry no signature, because v2 publishes
+// are rejected outright unless the manifest verifies, and building a signed
+// manifest belongs to internal/e2ee. Publish coverage arrives with that layer.
+// The v1 tests that lived here (round-tripping a device list, and proving
+// revocation was durable and reversible) were deleted rather than ported:
+// tombstones no longer exist, and there is nothing left in v1 to test.
 //
 //	BENCCHAT_LIVE_SERVER=host:port BENCCHAT_LIVE_TLS=insecure \
 //	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
-//	BENCCHAT_LIVE_PEER=... BENCCHAT_LIVE_PEER_PASSWORD=... \
 //	go test ./internal/oscar/ -run TestLiveKeyDirectory -v
 func TestLiveKeyDirectory(t *testing.T) {
 	addr := liveAddr(t)
 	sn, pw := os.Getenv("BENCCHAT_LIVE_SCREENNAME"), os.Getenv("BENCCHAT_LIVE_PASSWORD")
-	peer, peerPw := os.Getenv("BENCCHAT_LIVE_PEER"), os.Getenv("BENCCHAT_LIVE_PEER_PASSWORD")
-	if sn == "" || pw == "" || peer == "" || peerPw == "" {
-		t.Skip("set BENCCHAT_LIVE_SCREENNAME/PASSWORD and BENCCHAT_LIVE_PEER/PEER_PASSWORD")
+	if sn == "" || pw == "" {
+		t.Skip("set BENCCHAT_LIVE_SCREENNAME and BENCCHAT_LIVE_PASSWORD")
 	}
 	ctx := context.Background()
 
-	key := func(b byte) []byte {
-		k := make([]byte, 32)
-		for i := range k {
-			k[i] = b
-		}
-		return k
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
+	if err != nil {
+		t.Fatalf("Login: %v", err)
 	}
-
-	// signOn brings up a BOS session and collects key directory replies.
-	signOn := func(user, pass string) (*Session, chan wire.SNACFrame, chan []byte) {
-		res, err := Login(ctx, addr, Credentials{ScreenName: user, Password: pass}, liveTransport(t))
-		if err != nil {
-			t.Fatalf("Login(%s): %v", user, err)
-		}
-		s, err := SignOn(ctx, res)
-		if err != nil {
-			t.Fatalf("SignOn(%s): %v", user, err)
-		}
-		frames, bodies := make(chan wire.SNACFrame, 16), make(chan []byte, 16)
-		s.Handler = func(f wire.SNACFrame, b []byte) {
-			if f.FoodGroup == wire.BENCOKeyDir {
-				frames <- f
-				bodies <- append([]byte(nil), b...)
-			}
-		}
-		go func() { _ = s.Run(ctx) }()
-		return s, frames, bodies
+	s, err := SignOn(ctx, res)
+	if err != nil {
+		t.Fatalf("SignOn: %v", err)
 	}
+	defer s.Close()
 
-	await := func(frames chan wire.SNACFrame, bodies chan []byte, want uint16) []byte {
+	frames, bodies := make(chan wire.SNACFrame, 16), make(chan []byte, 16)
+	s.Handler = func(f wire.SNACFrame, b []byte) {
+		if f.FoodGroup == wire.BENCOKeyDir {
+			frames <- f
+			bodies <- append([]byte(nil), b...)
+		}
+	}
+	go func() { _ = s.Run(ctx) }()
+
+	await := func(want uint16) []byte {
 		t.Helper()
 		for {
 			select {
@@ -593,266 +585,43 @@ func TestLiveKeyDirectory(t *testing.T) {
 		}
 	}
 
-	alice, aFrames, aBodies := signOn(sn, pw)
-	defer alice.Close()
-
-	if !alice.SupportsKeyDir() {
-		t.Fatalf("server does not advertise the key directory; foodgroups=%v", alice.FoodGroups())
+	if !s.SupportsKeyDir() {
+		t.Fatalf("server does not advertise the key directory; foodgroups=%v", s.FoodGroups())
 	}
 	t.Log("server advertises the key directory (0xBE00)")
 
-	// The peer publishes, then disconnects, so its keys are fetched while offline.
-	bob, bFrames, bBodies := signOn(peer, peerPw)
-	if _, err := bob.PublishDeviceKeys([]wire.BENCODevice{{BoxKey: key(3)}}); err != nil {
-		t.Fatalf("peer publish: %v", err)
-	}
-	await(bFrames, bBodies, wire.BENCOKeyDirPublishReply)
-	_ = bob.Close()
-	t.Logf("%s published one device, then signed off", peer)
-
-	if _, err := alice.PublishDeviceKeys([]wire.BENCODevice{
-		{BoxKey: key(1), SignKey: key(0xA1)},
-		{BoxKey: key(2)},
-	}); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	pub, err := DecodeKeyDirPublishReply(await(aFrames, aBodies, wire.BENCOKeyDirPublishReply))
-	if err != nil {
-		t.Fatalf("decode publish reply: %v", err)
-	}
-	if pub.Accepted != 2 || len(pub.Refused) != 0 {
-		t.Fatalf("publish: accepted=%d refused=%d, want 2 and 0", pub.Accepted, len(pub.Refused))
-	}
-
-	// Our OWN devices. The Locate self-lookup took a branch where a session
-	// always exists, so this was impossible before.
-	if _, err := alice.QueryDeviceKeys(sn); err != nil {
+	// Our OWN manifest. The Locate self-lookup took a branch where a session
+	// always exists, so asking about ourselves was impossible before.
+	if _, err := s.QueryManifest(sn); err != nil {
 		t.Fatalf("self query: %v", err)
 	}
-	self, err := DecodeKeyDirQueryReply(await(aFrames, aBodies, wire.BENCOKeyDirQueryReply))
+	self, err := DecodeKeyDirQueryReply(await(wire.BENCOKeyDirQueryReply))
 	if err != nil {
 		t.Fatalf("decode self query: %v", err)
 	}
-	if len(self.Devices) != 2 {
-		t.Fatalf("self query returned %d devices, want 2", len(self.Devices))
+	if !strings.EqualFold(self.ScreenName, sn) {
+		t.Errorf("query reply is for %q, want %q", self.ScreenName, sn)
 	}
-	if len(self.Devices[0].SignKey) != 32 {
-		t.Error("signing key did not survive the round trip")
+	if self.Present == 0 && len(self.Manifest) != 0 {
+		t.Errorf("Present=0 but a manifest of %d bytes came back", len(self.Manifest))
 	}
-	t.Logf("read back %d of our own devices", len(self.Devices))
+	t.Logf("self query: present=%d manifest=%d bytes sig=%d bytes",
+		self.Present, len(self.Manifest), len(self.Signature))
 
-	// The offline peer.
-	if _, err := alice.QueryDeviceKeys(peer); err != nil {
-		t.Fatalf("peer query: %v", err)
+	// The identity backup. Present=0 for an account that never bootstrapped is
+	// the expected answer here, and is what a first run keys off.
+	if _, err := s.GetIdentityBackup(); err != nil {
+		t.Fatalf("get identity backup: %v", err)
 	}
-	got, err := DecodeKeyDirQueryReply(await(aFrames, aBodies, wire.BENCOKeyDirQueryReply))
+	backup, err := DecodeKeyDirGetBackupReply(await(wire.BENCOKeyDirGetBackupReply))
 	if err != nil {
-		t.Fatalf("decode peer query: %v", err)
+		t.Fatalf("decode get backup reply: %v", err)
 	}
-	if len(got.Devices) != 1 {
-		t.Fatalf("offline peer query returned %d devices, want 1", len(got.Devices))
+	if backup.Present == 0 && len(backup.Blob) != 0 {
+		t.Errorf("Present=0 but a blob of %d bytes came back", len(backup.Blob))
 	}
-	t.Logf("fetched %d device(s) for OFFLINE %s", len(got.Devices), peer)
-
-	// Revoke, then try to republish it. The refusal is what makes removal stick.
-	if _, err := alice.RevokeDeviceKey(key(1)); err != nil {
-		t.Fatalf("revoke: %v", err)
-	}
-	rev, err := DecodeKeyDirRevokeReply(await(aFrames, aBodies, wire.BENCOKeyDirRevokeReply))
-	if err != nil {
-		t.Fatalf("decode revoke reply: %v", err)
-	}
-	if rev.Revoked != 1 {
-		t.Fatalf("revoke reported %d, want 1", rev.Revoked)
-	}
-
-	if _, err := alice.PublishDeviceKeys([]wire.BENCODevice{
-		{BoxKey: key(1), SignKey: key(0xA1)},
-		{BoxKey: key(2)},
-	}); err != nil {
-		t.Fatalf("republish: %v", err)
-	}
-	again, err := DecodeKeyDirPublishReply(await(aFrames, aBodies, wire.BENCOKeyDirPublishReply))
-	if err != nil {
-		t.Fatalf("decode republish reply: %v", err)
-	}
-	if len(again.Refused) != 1 {
-		t.Fatalf("republishing a revoked key was accepted (refused=%d); removal is not durable",
-			len(again.Refused))
-	}
-	t.Logf("republishing the revoked device was refused, as it must be")
-
-	// The exit from the dead end. Before Restore existed a tombstone was
-	// permanent: the device republished on every sign-on, was refused, and the
-	// client told the user to approve it from another machine — which could not
-	// help, because nothing could lift the revocation. The only escape was
-	// wiping both machines.
-	if _, err := alice.RestoreDeviceKey(key(1)); err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	res, err := DecodeKeyDirRestoreReply(await(aFrames, aBodies, wire.BENCOKeyDirRestoreReply))
-	if err != nil {
-		t.Fatalf("decode restore reply: %v", err)
-	}
-	if res.Restored != 1 {
-		t.Fatalf("restore reported %d, want 1", res.Restored)
-	}
-
-	if _, err := alice.PublishDeviceKeys([]wire.BENCODevice{
-		{BoxKey: key(1), SignKey: key(0xA1)},
-		{BoxKey: key(2)},
-	}); err != nil {
-		t.Fatalf("publish after restore: %v", err)
-	}
-	back, err := DecodeKeyDirPublishReply(await(aFrames, aBodies, wire.BENCOKeyDirPublishReply))
-	if err != nil {
-		t.Fatalf("decode publish reply: %v", err)
-	}
-	if len(back.Refused) != 0 {
-		t.Fatalf("a restored device was still refused (%d), so removal is still irreversible",
-			len(back.Refused))
-	}
-	if back.Accepted != 2 {
-		t.Fatalf("accepted=%d after restore, want 2", back.Accepted)
-	}
-	t.Logf("restored device published again — removal is reversible")
-}
-
-// TestLiveKeyDirIsAccountScoped answers the question left open when the profile
-// key path was removed: does a SECOND device on the same account see what the
-// first one published?
-//
-// This used to be answered for profiles, and the answer was no — a self-directed
-// Locate reply came from the asking instance, so device 2 could not see device 1
-// (see TestLiveSelfLookupIsInstanceScoped, now skipped). wire/keydir.go
-// describes the directory as account-scoped storage instead, but nothing had
-// verified that against a real server, and multi-device is built on it being
-// true.
-//
-// The two devices are sequential, not simultaneous, so this holds whether or not
-// the server permits concurrent sessions for one account.
-//
-//	BENCCHAT_LIVE_SERVER=host:port BENCCHAT_LIVE_TLS=1 \
-//	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
-//	go test ./internal/oscar/ -run TestLiveKeyDirIsAccountScoped -v
-func TestLiveKeyDirIsAccountScoped(t *testing.T) {
-	addr := liveAddr(t)
-	sn, pw := os.Getenv("BENCCHAT_LIVE_SCREENNAME"), os.Getenv("BENCCHAT_LIVE_PASSWORD")
-	if sn == "" || pw == "" {
-		t.Skip("set BENCCHAT_LIVE_SCREENNAME and BENCCHAT_LIVE_PASSWORD")
-	}
-	ctx := context.Background()
-
-	deviceKey := func(b byte) []byte {
-		k := make([]byte, 32)
-		for i := range k {
-			k[i] = b
-		}
-		return k
-	}
-
-	// signOn brings up one "device": a fresh BOS session on the same account.
-	signOn := func(label string) (*Session, chan wire.SNACFrame, chan []byte) {
-		res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
-		if err != nil {
-			t.Fatalf("Login(%s): %v", label, err)
-		}
-		s, err := SignOn(ctx, res)
-		if err != nil {
-			t.Fatalf("SignOn(%s): %v", label, err)
-		}
-		frames, bodies := make(chan wire.SNACFrame, 16), make(chan []byte, 16)
-		s.Handler = func(f wire.SNACFrame, b []byte) {
-			if f.FoodGroup == wire.BENCOKeyDir {
-				frames <- f
-				bodies <- append([]byte(nil), b...)
-			}
-		}
-		go func() { _ = s.Run(ctx) }()
-		return s, frames, bodies
-	}
-
-	await := func(frames chan wire.SNACFrame, bodies chan []byte, want uint16) []byte {
-		t.Helper()
-		for {
-			select {
-			case f := <-frames:
-				b := <-bodies
-				if f.SubGroup == want {
-					return b
-				}
-				if f.SubGroup == wire.BENCOKeyDirErr {
-					t.Fatalf("server returned a key directory error awaiting subgroup 0x%04x", want)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatalf("timed out awaiting key directory subgroup 0x%04x", want)
-			}
-		}
-	}
-
-	// Device one publishes and signs off.
-	one, oneFrames, oneBodies := signOn("device one")
-	if !one.SupportsKeyDir() {
-		_ = one.Close()
-		t.Fatalf("server does not advertise the key directory; foodgroups=%v", one.FoodGroups())
-	}
-	if _, err := one.PublishDeviceKeys([]wire.BENCODevice{
-		{BoxKey: deviceKey(0x11), SignKey: deviceKey(0xB1)},
-	}); err != nil {
-		t.Fatalf("device one publish: %v", err)
-	}
-	pub, err := DecodeKeyDirPublishReply(await(oneFrames, oneBodies, wire.BENCOKeyDirPublishReply))
-	if err != nil {
-		t.Fatalf("decode device one publish reply: %v", err)
-	}
-	if pub.Accepted != 1 {
-		t.Fatalf("device one publish: accepted=%d, want 1", pub.Accepted)
-	}
-	_ = one.Close()
-	t.Log("device one published its key and signed off")
-
-	// Device two: a different session on the same account, querying its own
-	// screen name. It deliberately does NOT publish first — publication is a full
-	// replace, so publishing before reading would destroy exactly what we are
-	// checking for, which is also why the app reads before it writes.
-	two, twoFrames, twoBodies := signOn("device two")
-	defer two.Close()
-
-	if _, err := two.QueryDeviceKeys(sn); err != nil {
-		t.Fatalf("device two self query: %v", err)
-	}
-	got, err := DecodeKeyDirQueryReply(await(twoFrames, twoBodies, wire.BENCOKeyDirQueryReply))
-	if err != nil {
-		t.Fatalf("decode device two self query: %v", err)
-	}
-
-	var found *wire.BENCODevice
-	for i := range got.Devices {
-		if bytes.Equal(got.Devices[i].BoxKey, deviceKey(0x11)) {
-			found = &got.Devices[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("device two saw %d device(s) but not the one device one published: "+
-			"the directory is instance-scoped, not account-scoped, and multi-device "+
-			"cannot work on top of it", len(got.Devices))
-	}
-	if !bytes.Equal(found.SignKey, deviceKey(0xB1)) {
-		t.Errorf("signing key did not survive: got %x", found.SignKey)
-	}
-	t.Logf("device two read back device one's key — the directory is account-scoped")
-
-	// Leave the account as we found it.
-	if _, err := two.RevokeDeviceKey(deviceKey(0x11)); err != nil {
-		t.Logf("cleanup: revoke failed: %v", err)
-		return
-	}
-	await(twoFrames, twoBodies, wire.BENCOKeyDirRevokeReply)
-	if _, err := two.RestoreDeviceKey(deviceKey(0x11)); err == nil {
-		await(twoFrames, twoBodies, wire.BENCOKeyDirRestoreReply)
-	}
-	t.Log("cleanup: test key revoked and its tombstone lifted")
+	t.Logf("identity backup: present=%d kdf=%d blob=%d bytes",
+		backup.Present, backup.KDF, len(backup.Blob))
 }
 
 // TestLiveICBMSizeCeiling measures how large a message body this server will

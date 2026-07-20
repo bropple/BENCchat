@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/benco-holdings/benchat/internal/oscar"
 	"github.com/benco-holdings/benchat/internal/secret"
 	"github.com/benco-holdings/benchat/internal/state"
+	"github.com/benco-holdings/benchat/internal/wire"
 )
 
 // Live tests talk to a real OSCAR server and are opt-in:
@@ -64,6 +66,222 @@ func liveTransport(t *testing.T) []oscar.Transport {
 	default:
 		return nil
 	}
+}
+
+// publishSelfDevices puts this driver's keys in the directory, as a signed v2
+// manifest, and installs the verifier without which the same client would learn
+// nothing back.
+//
+// Both halves are needed and it is easy to notice only the first: with no
+// verifier installed, every inbound manifest is dropped and RefreshPeerKeys
+// quietly learns nothing, so a driver would sit in a polling loop that can never
+// succeed and report it as the peer not being ready.
+//
+// # Where the identity key comes from
+//
+// Publishing requires the account's identity key, and under transient custody
+// (proposal §5) that means the recovery key, every time — there is no cached
+// copy for a test to reuse and inventing one would be inventing the property the
+// design exists to provide. So:
+//
+//	BENCCHAT_LIVE_RECOVERY_KEY set     use the account's real identity
+//	no backup on the server            bootstrap one, and log the recovery key
+//	backup present, no key supplied    skip
+//
+// The last case skips rather than generating a fresh identity, because doing
+// that would REPLACE the account's identity: every contact would see the safety
+// number change and every other device would be cut off. A test driver must not
+// be able to do that as a side effect of running.
+func publishSelfDevices(t *testing.T, c *Client, devices ...e2ee.Device) {
+	t.Helper()
+	installLiveVerifier(t, c)
+
+	if !c.SupportsKeyDir() {
+		t.Skip("this server has no key directory, so device keys cannot be published")
+	}
+	backup, ok := c.GetIdentityBackup()
+	if !ok {
+		t.Fatal("could not reach the key directory to look for an identity backup")
+	}
+
+	var kp e2ee.IdentityKey
+	switch {
+	case os.Getenv("BENCCHAT_LIVE_RECOVERY_KEY") != "":
+		if !backup.Present {
+			t.Fatal("BENCCHAT_LIVE_RECOVERY_KEY is set but this account has no identity backup")
+		}
+		rk, err := e2ee.ParseRecoveryKey(os.Getenv("BENCCHAT_LIVE_RECOVERY_KEY"))
+		if err != nil {
+			t.Fatalf("BENCCHAT_LIVE_RECOVERY_KEY: %v", err)
+		}
+		params, err := e2ee.DecodeBackupParams(backup.Params)
+		if err != nil {
+			t.Fatalf("decode backup params: %v", err)
+		}
+		kp, err = e2ee.OpenIdentityBackup(e2ee.IdentityBackup{
+			Params: params, Salt: backup.Salt, Blob: backup.Blob,
+		}, rk)
+		if err != nil {
+			t.Fatalf("open identity backup: %v", err)
+		}
+
+	case !backup.Present:
+		// A fresh test account: bootstrap it properly, in §12's order — the
+		// recovery key is generated and reported before anything is uploaded.
+		rk, err := e2ee.GenerateRecoveryKey()
+		if err != nil {
+			t.Fatalf("GenerateRecoveryKey: %v", err)
+		}
+		kp, err = e2ee.GenerateIdentityKey()
+		if err != nil {
+			t.Fatalf("GenerateIdentityKey: %v", err)
+		}
+		t.Logf("bootstrapped an identity for this account. RECOVERY KEY: %s", rk)
+		sealed, err := e2ee.SealIdentityBackup(kp, rk)
+		if err != nil {
+			t.Fatalf("SealIdentityBackup: %v", err)
+		}
+		stored, ok := c.PutIdentityBackup(wire.BENCOKDFArgon2id,
+			sealed.Params.Encode(), sealed.Salt, sealed.Blob)
+		if !ok || !stored {
+			t.Fatalf("PutIdentityBackup: stored=%v ok=%v", stored, ok)
+		}
+
+	default:
+		t.Skip("this account has an identity backup; set BENCCHAT_LIVE_RECOVERY_KEY to " +
+			"publish under it (generating a new identity would cut off every other device)")
+	}
+	defer kp.Zero()
+
+	// The counter has to beat what the server holds, so read it rather than
+	// assuming. A refusal carries the value to beat, which is the retry below.
+	counter := liveManifestCounter(t, c) + 1
+	for attempt := 0; attempt < 2; attempt++ {
+		manifest := liveBuildManifest(t, c, kp.Public, counter, devices)
+		sig, err := e2ee.SignManifest(kp, manifest)
+		if err != nil {
+			t.Fatalf("SignManifest: %v", err)
+		}
+		accepted, serverCounter, ok := c.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
+		if !ok {
+			t.Fatal("the key directory did not answer a publish")
+		}
+		if accepted {
+			t.Logf("published %d device(s) at counter %d", len(devices), counter)
+			return
+		}
+		counter = serverCounter + 1
+	}
+	t.Fatal("the key directory refused our manifest twice")
+}
+
+// liveManifestCounter reads the counter the server currently holds for us, or 0.
+func liveManifestCounter(t *testing.T, c *Client) uint64 {
+	t.Helper()
+	sm, ok := c.QueryManifest(c.store.Self().ScreenName)
+	if !ok {
+		t.Fatal("could not read our own manifest from the directory")
+	}
+	if !sm.Present {
+		return 0
+	}
+	m, err := wire.DecodeManifest(sm.Manifest)
+	if err != nil {
+		t.Fatalf("decode our own manifest: %v", err)
+	}
+	return m.Counter
+}
+
+func liveBuildManifest(t *testing.T, c *Client, identity ed25519.PublicKey, counter uint64, devices []e2ee.Device) []byte {
+	t.Helper()
+	m := wire.BENCOManifest{
+		Version:    wire.BENCOKeyDirVersion,
+		ScreenName: c.store.Self().ScreenName,
+		Counter:    counter,
+		IssuedAt:   uint64(time.Now().UTC().Unix()),
+		Identity:   wire.BENCOKey{Alg: wire.BENCOAlgEd25519, Key: identity},
+	}
+	for _, d := range devices {
+		dev := wire.BENCODeviceV2{Box: wire.BENCOKey{Alg: wire.BENCOAlgX25519, Key: d.Box[:]}}
+		if len(d.Sign) == ed25519.PublicKeySize {
+			dev.Sign = wire.BENCOKey{Alg: wire.BENCOAlgEd25519, Key: d.Sign}
+		}
+		m.Devices = append(m.Devices, dev)
+	}
+	b, err := wire.EncodeManifest(m)
+	if err != nil {
+		t.Fatalf("EncodeManifest: %v", err)
+	}
+	return b
+}
+
+// installLiveVerifier gives a driver the same trust rules the app layer applies:
+// check the signature over the bytes as received, pin the identity on first
+// sight, and refuse a counter at or below the highest already seen from it.
+//
+// The pin is in memory only, which is the one difference from the real thing —
+// a driver is one session, so there is nothing for it to remember across runs.
+func installLiveVerifier(t *testing.T, c *Client) {
+	t.Helper()
+	var mu sync.Mutex
+	type pin struct {
+		identity string
+		counter  uint64
+	}
+	pins := map[string]pin{}
+
+	c.SetManifestVerifier(func(sm SignedManifest) ([]e2ee.Device, bool) {
+		if !sm.Present || sm.SigAlg != wire.BENCOAlgEd25519 {
+			return nil, false
+		}
+		m, err := wire.DecodeManifest(sm.Manifest)
+		if err != nil {
+			t.Logf("verifier: undecodable manifest for %s: %v", sm.ScreenName, err)
+			return nil, false
+		}
+		if m.Identity.Alg != wire.BENCOAlgEd25519 || len(m.Identity.Key) != wire.BENCOEd25519KeyLen {
+			return nil, false
+		}
+		if err := e2ee.VerifyManifest(m.Identity.Key, sm.Manifest, sm.Signature); err != nil {
+			t.Logf("verifier: bad signature for %s: %v", sm.ScreenName, err)
+			return nil, false
+		}
+		if !strings.EqualFold(m.ScreenName, sm.ScreenName) || m.Counter == 0 {
+			return nil, false
+		}
+
+		key := strings.ToLower(strings.ReplaceAll(sm.ScreenName, " ", ""))
+		identity := e2ee.EncodeIdentityPublic(m.Identity.Key)
+		mu.Lock()
+		have := pins[key]
+		// Strictly below, where the app layer refuses at-or-below: a driver
+		// verifies the same reply more than once in a run, and without a digest
+		// to recognise the repeat by, at-or-below would reject the manifest it
+		// had just accepted. The app layer keeps a digest and can be stricter.
+		if have.identity == identity && m.Counter < have.counter {
+			mu.Unlock()
+			t.Logf("verifier: refusing a stale manifest for %s (%d <= %d)",
+				sm.ScreenName, m.Counter, have.counter)
+			return nil, false
+		}
+		pins[key] = pin{identity: identity, counter: m.Counter}
+		mu.Unlock()
+
+		out := make([]e2ee.Device, 0, len(m.Devices))
+		for _, d := range m.Devices {
+			if d.Box.Alg != wire.BENCOAlgX25519 || len(d.Box.Key) != wire.BENCOX25519KeyLen {
+				continue
+			}
+			var b [32]byte
+			copy(b[:], d.Box.Key)
+			dev := e2ee.Device{Box: b}
+			if d.Sign.Alg == wire.BENCOAlgEd25519 && len(d.Sign.Key) == wire.BENCOEd25519KeyLen {
+				dev.Sign = ed25519.PublicKey(d.Sign.Key)
+			}
+			out = append(out, dev)
+		}
+		return out, true
+	})
 }
 
 // TestLiveChatRoom exercises the entire multi-connection chat-room path against
@@ -425,9 +643,7 @@ func TestLiveE2EEDriver(t *testing.T) {
 	if err := c.SetProfile("bob, BENCO coworker."); err != nil {
 		t.Fatalf("SetProfile: %v", err)
 	}
-	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: kp.Public}}); !ok {
-		t.Fatal("could not publish our device key to the key directory")
-	}
+	publishSelfDevices(t, c, e2ee.Device{Box: kp.Public})
 	t.Logf("our public key: %s", e2ee.EncodeKey(kp.Public))
 	// Re-request on a slow loop for a minute rather than polling once: the human
 	// on the other end may still be turning encryption on, which is what
@@ -1056,9 +1272,7 @@ func TestLiveRoomDriver(t *testing.T) {
 	if err := c.SetProfile("bob, BENCO coworker."); err != nil {
 		t.Fatalf("SetProfile: %v", err)
 	}
-	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: kp.Public}}); !ok {
-		t.Fatal("publishing our key to the key directory failed")
-	}
+	publishSelfDevices(t, c, e2ee.Device{Box: kp.Public})
 	target := os.Getenv("BENCCHAT_LIVE_TARGET")
 	if target == "" {
 		t.Skip("set BENCCHAT_LIVE_TARGET to the screen name to talk to")
@@ -1354,9 +1568,7 @@ func TestLiveRoomHost(t *testing.T) {
 	if err := c.SetProfile("bob, BENCO coworker."); err != nil {
 		t.Fatalf("SetProfile: %v", err)
 	}
-	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: boxKP.Public, Sign: signKP.Public}}); !ok {
-		t.Fatal("publishing our keys to the key directory failed")
-	}
+	publishSelfDevices(t, c, e2ee.Device{Box: boxKP.Public, Sign: signKP.Public})
 	t.Logf("published signing key, signer id %s", e2ee.SignerID(signKP.Public))
 
 	// Learn the target's encryption key — the invitation travels as an
@@ -1517,9 +1729,7 @@ func TestLiveDeviceWatch(t *testing.T) {
 	if err := c.SetProfile("cmaximus, BENCO coworker."); err != nil {
 		t.Fatalf("SetProfile: %v", err)
 	}
-	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: kp.Public}}); !ok {
-		t.Fatal("could not publish our device key to the key directory")
-	}
+	publishSelfDevices(t, c, e2ee.Device{Box: kp.Public})
 	ours := [][32]byte{kp.Public}
 
 	// Learn the target's keys BEFORE the opening DM. SendMessage falls back to

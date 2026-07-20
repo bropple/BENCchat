@@ -65,33 +65,41 @@ type App struct {
 	signPub    ed25519.PublicKey
 	hasSignKey bool
 
-	// trust holds the signed-on account's manually-verified peer keys, loaded on
+	// trust holds the signed-on account's peer records — verified identities,
+	// last-seen device sets and manifest counter high-water marks — loaded on
 	// sign-on. Guarded by trustMu since UI calls read/write it off the main loop.
+	//
+	// trustMu also guards the key-directory session state below it. One lock
+	// because the verifier touches all of it in a single pass, and because a
+	// counter and the identity it belongs to must never be read apart.
 	trustMu sync.Mutex
 	trust   trust.Store
+	// selfIdentity is this account's own identity pin (public key + counter
+	// high-water mark), lazily loaded — selfIdentityLoaded distinguishes "not
+	// read yet" from "read, and this account has none".
+	selfIdentity       trust.Identity
+	selfIdentityLoaded bool
+	// manifestSeen memoizes the last manifest verified per account, so that
+	// verifying the same bytes twice is not mistaken for a rollback.
+	manifestSeen map[string]manifestMemo
+	// manifestIssuedAt is when our own current manifest was signed. Advisory:
+	// nothing rejects a manifest on it (proposal §4).
+	manifestIssuedAt uint64
+	// linked is whether this device appears in the account's current signed
+	// manifest. Losing it, having had it, is a removal (proposal §6).
+	linked bool
+	// identityFlow is which first-run flow the UI should be showing; see
+	// IdentityState.
+	identityFlow string
 
-	// Device-linking state, guarded by linkMu. linkPrompted records keys we've
-	// already put in front of the user this session and linkDeclined those they
-	// said no to, so a device that announces more than once — a sibling
-	// reconnecting, an auto-login racing a manual one — asks once rather than
-	// stacking a dialog per announcement.
-	//
-	// linkPending is the other side of the same conversation: true when THIS
-	// device has announced itself to an account that already has devices and is
-	// waiting to be approved from one of them.
-	linkMu       sync.Mutex
-	linkPrompted map[[32]byte]bool
-	linkDeclined map[[32]byte]bool
-	linkPending  bool
-	// knownDevices are devices this account has linked before, so one that
-	// returns after removal is not announced as brand new.
-	knownDevices map[[32]byte]bool
-	// announcedDevices maps a device's displayed code to its key, for linking
-	// by code — a fingerprint is a hash and cannot be reversed.
-	announcedDevices map[string][32]byte
-	// linkNoticeShown ensures ONE explanation per sign-on for why this device
-	// cannot read encrypted messages; "new" and "removed" describe one state.
-	linkNoticeShown bool
+	// pending is a first run that has been generated but deliberately NOT
+	// persisted: the identity keypair and recovery key exist here, in memory
+	// only, between being shown to the user and being acknowledged. Proposal
+	// §12's ordering depends on this never reaching disk or the server before
+	// the acknowledgement. Guarded by identityMu, which is never held across a
+	// network call.
+	identityMu sync.Mutex
+	pending    *pendingIdentity
 
 	// System tray. Icons are injected from main (embedded assets). quitting
 	// distinguishes a real quit (tray "Quit") from a window close, which hides to
@@ -474,6 +482,12 @@ func (a *App) SignOff() {
 	// An explicit sign-off forgets the saved password so we don't auto-login next
 	// launch — the "unless they explicitly log out" contract.
 	a.forgetRemembered()
+	// Anything generated for a first run that never completed goes with the
+	// session, key and all. It was never written anywhere (proposal §12), so
+	// dropping it costs nothing and leaving it would keep an identity private
+	// key alive in a process that has no account to use it on.
+	a.CancelIdentitySetup()
+	a.setIdentityFlow("unavailable")
 	_ = a.client.SignOff()
 	a.emitStatus(SessionStatus{State: "offline", Message: "Signed off."})
 }

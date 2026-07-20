@@ -93,62 +93,55 @@ func TestLoadLegacyFormat(t *testing.T) {
 	}
 }
 
-// Device timestamps have to survive a round trip, and a file written before
-// they existed must not read back as "every key is infinitely stale" — that
-// would evict a whole device set at once on first upgrade.
-func TestDeviceSeenRoundTripAndMigration(t *testing.T) {
+// The counter high-water mark is the rollback defence, so it has to survive
+// both a round trip and the unrelated writes that happen constantly around it.
+// A peer save that quietly reset the identity pin would re-arm every replay the
+// pin exists to refuse, and nothing would look wrong until it was exploited.
+func TestIdentityPinsSurviveUnrelatedWrites(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	const acct = "alice"
 
-	// A v1-shaped file: devices, no timestamps.
-	if err := SaveDevices(acct, []string{"aaa", "bbb"}); err != nil {
-		t.Fatalf("SaveDevices: %v", err)
+	if err := SaveSelfIdentity(acct, Identity{Key: "self-key", Counter: 7}); err != nil {
+		t.Fatalf("SaveSelfIdentity: %v", err)
 	}
-	seen, err := LoadDeviceSeen(acct, 5000)
-	if err != nil {
-		t.Fatalf("LoadDeviceSeen: %v", err)
-	}
-	for _, k := range []string{"aaa", "bbb"} {
-		if seen[k] != 5000 {
-			t.Errorf("migrated key %q has timestamp %d, want the supplied now (5000)", k, seen[k])
-		}
-	}
-
-	// Real timestamps round-trip.
-	if err := SaveDevicesSeen(acct, []string{"aaa", "bbb"}, map[string]int64{"aaa": 111, "bbb": 222}); err != nil {
-		t.Fatalf("SaveDevicesSeen: %v", err)
-	}
-	seen, err = LoadDeviceSeen(acct, 5000)
-	if err != nil {
-		t.Fatalf("LoadDeviceSeen: %v", err)
-	}
-	if seen["aaa"] != 111 || seen["bbb"] != 222 {
-		t.Errorf("timestamps did not round-trip: %v", seen)
-	}
-
-	// A key that leaves the set takes its timestamp with it, so the map can't
-	// grow without bound as devices come and go.
-	if err := SaveDevicesSeen(acct, []string{"aaa"}, map[string]int64{"aaa": 111, "bbb": 222}); err != nil {
-		t.Fatalf("SaveDevicesSeen: %v", err)
-	}
-	seen, _ = LoadDeviceSeen(acct, 5000)
-	if _, ok := seen["bbb"]; ok {
-		t.Error("timestamp for a removed device was retained")
-	}
-
-	// Peer trust must survive all of this.
-	if err := Save(acct, Store{"bob": Entry{Verified: "k", Seen: "k"}}); err != nil {
+	// A peer verification lands afterwards, through the other write path.
+	if err := Save(acct, Store{"bob": Entry{
+		Verified: "bob-identity",
+		Seen:     "bob-dev1,bob-dev2",
+		Identity: Identity{Key: "bob-identity", Counter: 3},
+	}}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+
+	self, err := LoadSelfIdentity(acct)
+	if err != nil {
+		t.Fatalf("LoadSelfIdentity: %v", err)
+	}
+	if self.Key != "self-key" || self.Counter != 7 {
+		t.Errorf("self identity pin = %+v, want it preserved across a peer save", self)
+	}
+
 	f, err := LoadFile(acct)
 	if err != nil {
 		t.Fatalf("LoadFile: %v", err)
 	}
-	if f.Peers["bob"].Verified != "k" {
-		t.Error("peer trust was lost")
+	if got := f.Peers["bob"].Identity; got.Key != "bob-identity" || got.Counter != 3 {
+		t.Errorf("peer identity pin = %+v, want it round-tripped", got)
 	}
-	if len(f.Devices) != 1 {
-		t.Errorf("device list = %v, want it preserved across a peer save", f.Devices)
+	if f.Peers["bob"].Seen != "bob-dev1,bob-dev2" {
+		t.Error("the peer's device set was lost")
+	}
+
+	// And the self pin write must not flatten the peers it doesn't touch.
+	if err := SaveSelfIdentity(acct, Identity{Key: "self-key", Counter: 8}); err != nil {
+		t.Fatalf("SaveSelfIdentity: %v", err)
+	}
+	f, _ = LoadFile(acct)
+	if f.Peers["bob"].Identity.Counter != 3 {
+		t.Error("peer trust was lost when the self identity pin advanced")
+	}
+	if f.Self.Counter != 8 {
+		t.Errorf("self counter = %d, want 8", f.Self.Counter)
 	}
 }

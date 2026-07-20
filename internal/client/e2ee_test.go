@@ -194,19 +194,71 @@ func locateReplyBody(t *testing.T, screenName, profile string) []byte {
 	return buf.Bytes()
 }
 
-// keyDirQueryReplyBody builds a key directory query reply carrying a device set.
+// keyDirQueryReplyBody builds a key directory query reply carrying a manifest
+// that names the given device keys.
+//
+// The signature is a placeholder: these tests are about how a verified device
+// set is routed, not about verification, so they pair this with
+// useTestManifestVerifier below.
 func keyDirQueryReplyBody(t *testing.T, screenName string, keys ...[32]byte) []byte {
 	t.Helper()
-	reply := wire.SNAC_0xBE00_0x0005_BENCOKeyDirQueryReply{ScreenName: screenName}
+	m := wire.BENCOManifest{
+		Version:    wire.BENCOKeyDirVersion,
+		ScreenName: screenName,
+		Counter:    1,
+		IssuedAt:   1_700_000_000,
+		Identity:   wire.BENCOKey{Alg: wire.BENCOAlgEd25519, Key: bytes.Repeat([]byte{0x99}, 32)},
+	}
 	for _, k := range keys {
 		key := k
-		reply.Devices = append(reply.Devices, wire.BENCODevice{BoxKey: key[:]})
+		m.Devices = append(m.Devices, wire.BENCODeviceV2{
+			Box:  wire.BENCOKey{Alg: wire.BENCOAlgX25519, Key: key[:]},
+			Sign: wire.BENCOKey{Alg: wire.BENCOAlgEd25519},
+		})
+	}
+	manifest, err := wire.EncodeManifest(m)
+	if err != nil {
+		t.Fatalf("encode manifest: %v", err)
+	}
+	reply := wire.SNAC_0xBE00_0x0005_BENCOKeyDirQueryReply{
+		ScreenName: screenName,
+		Present:    1,
+		Manifest:   manifest,
+		SigAlg:     wire.BENCOAlgEd25519,
+		Signature:  bytes.Repeat([]byte{0xAB}, 64),
 	}
 	var buf bytes.Buffer
 	if err := wire.MarshalBE(reply, &buf); err != nil {
 		t.Fatalf("marshal key directory reply: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// useTestManifestVerifier installs a verifier that accepts any manifest.
+//
+// Real verification lives in internal/e2ee; the client package only carries the
+// bytes to it. Stubbing it here keeps these tests on the question they are
+// actually asking — whether a manifest's devices end up filed against the right
+// account — rather than dragging signing into every one of them.
+func useTestManifestVerifier(t *testing.T, c *Client) {
+	t.Helper()
+	c.SetManifestVerifier(func(sm SignedManifest) ([]e2ee.Device, bool) {
+		m, err := wire.DecodeManifest(sm.Manifest)
+		if err != nil {
+			t.Errorf("test verifier could not decode a manifest: %v", err)
+			return nil, false
+		}
+		var out []e2ee.Device
+		for _, d := range m.Devices {
+			if len(d.Box.Key) != 32 {
+				continue
+			}
+			var box [32]byte
+			copy(box[:], d.Box.Key)
+			out = append(out, e2ee.Device{Box: box})
+		}
+		return out, true
+	})
 }
 
 // TestSelfKeysAreNotTreatedAsAPeer is the guard on multi-device detection.
@@ -219,6 +271,7 @@ func keyDirQueryReplyBody(t *testing.T, screenName string, keys ...[32]byte) []b
 func TestSelfKeysAreNotTreatedAsAPeer(t *testing.T) {
 	c, store := newTestClient(t)
 	store.SetSelf("alice")
+	useTestManifestVerifier(t, c)
 
 	var warned []string
 	c.SetPeerKeyHandler(func(screenName string, _, _ [][32]byte) {
@@ -248,6 +301,7 @@ func TestPeerKeysAreLearnedFromTheDirectory(t *testing.T) {
 	c, store := newTestClient(t)
 	store.SetSelf("alice")
 	store.ReplaceBuddyList([]state.Buddy{{ScreenName: "bob", Key: "bob", Group: "BENCO"}}, []string{"BENCO"})
+	useTestManifestVerifier(t, c)
 
 	peer, err := e2ee.GenerateKeyPair()
 	if err != nil {
@@ -366,6 +420,7 @@ func TestMultiDeviceDirectoryReplyPreservesOthers(t *testing.T) {
 	c, store := newTestClient(t)
 	store.SetSelf("alice")
 	store.ReplaceBuddyList([]state.Buddy{{ScreenName: "bob", Key: "bob", Group: "BENCO"}}, []string{"BENCO"})
+	useTestManifestVerifier(t, c)
 
 	one, _ := e2ee.GenerateKeyPair()
 	two, _ := e2ee.GenerateKeyPair()

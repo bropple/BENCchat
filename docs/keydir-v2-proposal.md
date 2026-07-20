@@ -175,13 +175,17 @@ type SNAC_0xBE00_0x0005_QueryReplyV2 struct {
 
 ### Identity backup
 
-Two new subgroups:
+Two new subgroups. **Corrected:** this document originally placed them at
+`0x000A`–`0x000D`, assuming v1 would keep `0x0006`–`0x0009` through a
+coexistence period. §8 removed that coexistence, so v1's numbers are free and
+the implementation reuses them. Following the original numbering would route a
+put-backup to where the old revoke handler lived.
 
 ```go
-BENCOKeyDirPutBackupRequest  uint16 = 0x000A
-BENCOKeyDirPutBackupReply    uint16 = 0x000B
-BENCOKeyDirGetBackupRequest  uint16 = 0x000C
-BENCOKeyDirGetBackupReply    uint16 = 0x000D
+BENCOKeyDirPutBackupRequest  uint16 = 0x0006
+BENCOKeyDirPutBackupReply    uint16 = 0x0007
+BENCOKeyDirGetBackupRequest  uint16 = 0x0008
+BENCOKeyDirGetBackupReply    uint16 = 0x0009
 
 type SNAC_0xBE00_0x000A_PutBackupRequest struct {
     Version uint16
