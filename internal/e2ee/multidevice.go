@@ -33,10 +33,20 @@ import (
 // copy of the message. Group chat needs exactly this shape, so it's shared.
 
 const (
-	// maxDevices bounds the device list. Far above any real use; it exists so a
-	// malformed or hostile profile can't make us allocate unboundedly, and so
-	// the count fits in one byte on the wire.
-	maxDevices = 32
+	// maxDevices is the POLICY ceiling on how many devices this account keeps.
+	// Five covers a desktop, a laptop, and room to spare; past that a list is
+	// more likely to be accumulated cruft than machines anyone still uses, and
+	// every extra device is another copy of the account's readable history.
+	maxDevices = 5
+
+	// maxRecipients bounds a single envelope's recipient list. This is a
+	// different number on purpose: it is a sanity bound on UNTRUSTED input, not
+	// a policy. Sealing to a peer must honour whatever THEY publish — a peer
+	// still on the old cap has more than five devices, and truncating their set
+	// to our policy would silently leave their other machines unable to read.
+	// It also has to stay wide enough that an envelope written before the policy
+	// changed still decodes.
+	maxRecipients = 32
 
 	// The v2 and v3 profile markers are no longer written — see StripMarkerAll.
 	// They remain here only so an old bio can be recognized and stripped.
@@ -121,8 +131,10 @@ func dedupeKeys(keys [][32]byte) [][32]byte {
 			out = append(out, k)
 		}
 	}
-	if len(out) > maxDevices {
-		out = out[:maxDevices]
+	// Bounded by maxRecipients, not the policy cap: this runs over peers' sets
+	// too, and clamping those to our own policy would drop their machines.
+	if len(out) > maxRecipients {
+		out = out[:maxRecipients]
 	}
 	return out
 }
@@ -201,7 +213,7 @@ func OpenAny(envelope string, senderPub, ourPriv [32]byte) (string, error) {
 	var bodyNonce [24]byte
 	copy(bodyNonce[:], raw[1:25])
 	count := int(raw[25])
-	if count == 0 || count > maxDevices {
+	if count == 0 || count > maxRecipients {
 		return "", errors.New("e2ee: implausible recipient count")
 	}
 	slotLen := 24 + wrappedKeyLen

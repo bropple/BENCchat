@@ -235,8 +235,10 @@ func (a *App) publishAfterDeviceCheck() {
 				"encrypted to all of them.", n))
 	}
 	// Warn while there is still room to act, not once the cap is already
-	// evicting things.
-	if n := len(devices); n >= e2ee.MaxDevices*3/4 && n < e2ee.MaxDevices {
+	// evicting things — but only with one slot left. A fraction of the cap was
+	// right when it was 32; at 5 it fires on an ordinary desktop-plus-laptop
+	// pair, and a warning that normal use triggers is one people learn to ignore.
+	if n := len(devices); n == e2ee.MaxDevices-1 {
 		a.store.Notify(state.NoticeWarn, fmt.Sprintf(
 			"This account has %d device keys, close to the limit of %d. Old keys are not "+
 				"removed automatically — prune ones you no longer use in Privacy & Security.",

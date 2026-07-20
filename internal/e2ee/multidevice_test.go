@@ -338,16 +338,19 @@ func TestPickDevicesUnderCapKeepsEverything(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Sized off the cap rather than a literal, so changing the policy doesn't
+	// make this fail for a reason that has nothing to do with what it tests.
+	want := MaxDevices - 1
 	keys := [][32]byte{ours.Public}
-	for i := 0; i < 5; i++ {
+	for i := 0; i < want-1; i++ {
 		kp, err := GenerateKeyPair()
 		if err != nil {
 			t.Fatal(err)
 		}
 		keys = append(keys, kp.Public)
 	}
-	if got := PickDevices(ours.Public, keys, nil); len(got) != 6 {
-		t.Errorf("kept %d of 6 devices while under the cap", len(got))
+	if got := PickDevices(ours.Public, keys, nil); len(got) != want {
+		t.Errorf("kept %d of %d devices while under the cap", len(got), want)
 	}
 }
 
