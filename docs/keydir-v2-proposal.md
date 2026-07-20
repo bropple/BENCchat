@@ -22,6 +22,10 @@ supersedes its wire-level sketch in one respect, flagged in §3.
   strong."
 - **An algorithm identifier on every key and signature**, so a later
   post-quantum migration is a version bump rather than a second flag day.
+- **The identity key is transient** — fetched from the backup, used to sign a
+  device, discarded. Linking a device costs the recovery key every time. See §5.
+- **An identity change is always loud**, never silently accepted, and a device
+  that has been cut off detects it itself and says so. See §6.
 
 ## 2. What v1 looks like now
 
@@ -114,7 +118,8 @@ default and let the user fill it in.
 type BENCOManifest struct {
     Version    uint16
     ScreenName string   `oscar:"len_prefix=uint8"` // binds the list to an account
-    Counter    uint64                              // monotonic, never reused
+    Counter    uint64                              // monotonic within an identity
+    IssuedAt   uint64                              // Unix seconds, UTC
     Identity   BENCOKey                            // the account identity public key
     Devices    []BENCODeviceV2 `oscar:"count_prefix=uint16"`
 }
@@ -122,6 +127,16 @@ type BENCOManifest struct {
 
 `ScreenName` is inside the signature deliberately: without it, a manifest lifted
 from one account could be replayed onto another.
+
+**`Counter` and `IssuedAt` do different jobs and only one of them is
+authoritative.** The counter orders manifests and is the rollback defence — it
+is the only field a client may use to reject a manifest as stale. `IssuedAt` is
+advisory: it bounds how old a served manifest can plausibly be and gives the UI
+something to show ("this device list is three months old"), but a client must
+**never** reject a manifest on timestamp alone. A wrong clock on either side is
+far more likely than an attack, and a client that hard-rejects on time would
+brick a conversation over a dead CMOS battery. Always UTC seconds; never local
+time, never a formatted string.
 
 ### Publish and query
 
@@ -177,9 +192,12 @@ type SNAC_0xBE00_0x000D_GetBackupReply struct {
 The KDF parameters travel with the blob so they can be raised later without
 stranding existing backups.
 
-## 5. The decision I can't make for you
+## 5. Identity-key custody
 
-**Who holds the identity private key, and for how long?**
+**Who holds the identity private key, and for how long?** **Decided: (b),
+transient.** The reasoning is kept in full because this is the decision that
+determines whether cross-signing delivers anything, and a future reader
+proposing (a) on convenience grounds needs to see why it was refused.
 
 This determines whether cross-signing actually delivers the blast-radius
 property you chose it for, and it is not a detail.
@@ -212,7 +230,66 @@ scale and more machinery than a deployment this size needs.
 If (b) proves annoying in practice, (c) is a clean upgrade later; (a) is not
 something you can walk back, because by then the key is on every machine.
 
-## 6. What the server still cannot do
+## 6. Identity change, and telling a device it is out
+
+Two of the open questions turned out to be the same mechanism, so they are
+answered together here.
+
+### The counter is scoped to an identity
+
+A client's high-water mark is keyed on **`(identity key, counter)`**, not on the
+counter alone. A new identity starts at `1` without that looking like a
+rollback, and a manifest signed by the identity you already know still cannot go
+backwards.
+
+### An identity change is loud, and cryptographically ambiguous
+
+When a client fetches a manifest signed by an identity key it does not
+recognise, that is one of exactly two things:
+
+- the account holder lost everything and bootstrapped a new identity, or
+- someone with the password cleared the identity and installed their own.
+
+**These are indistinguishable, and no amount of protocol design makes them
+distinguishable.** That is not a gap — it is the property `trust-model.md`
+argued for, stated as a positive: an operator can *destroy* or *replace* an
+identity, but cannot *become* someone without everyone finding out.
+
+So the rule is: an unrecognised identity is **never** accepted silently. It is
+surfaced to the human, and the copy must not reassure. "This may be normal" is
+the wrong message; the honest one names both possibilities and says the only way
+to tell them apart is to ask the person out of band.
+
+This is also the one event that moves a safety number now, which is what makes
+it worth reacting to.
+
+### A device can tell it has been cut off — and should say so
+
+A device that is no longer accepted can detect it *itself*, from signed data,
+by querying its own account. Two distinct cases, deserving different words:
+
+| What the device sees | What happened | What it should say |
+|---|---|---|
+| Manifest signed by the identity I know, and my device key is **not in it** | Removed by another device | "This device was removed from your account. It can't read new messages. Approve it again from a device that's still linked." |
+| Manifest signed by an identity I **don't** know | The account's identity was replaced | "This account's identity was replaced. This device is no longer part of it, and everything it holds is now unreadable to the account." |
+
+This is a real improvement on the existing `DeviceDeny` message, which its own
+comment calls "a courtesy, not a boundary" — an unencrypted instant message that
+could be dropped, spoofed, or simply missed while offline. Detection here is
+derived from a signed manifest the device fetched itself, so it is reliable,
+survives being offline, and cannot be forged by the server or by anyone holding
+the password.
+
+It remains a courtesy in the sense that nothing *forces* the device to act. But
+it changes the failure mode from "messages silently stop being readable and
+nobody knows why" to a specific, correct explanation, which is the whole reason
+to bother.
+
+**Follow the existing precedent for what happens next**: `DeviceDeny` signs the
+device out and clears its saved password, so the next launch does not walk
+straight back into the same state. Removal detected this way should do the same.
+
+## 7. What the server still cannot do
 
 Worth restating, because it is easy to read a signature-bearing protocol as
 making the server trustworthy:
@@ -228,7 +305,7 @@ making the server trustworthy:
   them is harmless defence in depth, but they are no longer load-bearing and
   should not be treated as a security boundary.
 
-## 7. Migration
+## 8. Migration
 
 A flag day, as `trust-model.md` concluded. At a handful of accounts, carrying
 both formats is more risk than the cutover it avoids.
@@ -247,22 +324,38 @@ generation has to happen at first v2 sign-on, before anything can be published.
 That makes it the first thing a user sees after updating, which is the correct
 place for it and worth designing rather than bolting on.
 
-## 8. Open questions
+## 9. Resolved
 
-- **Counter persistence across an identity reset.** If an account clears its
-  identity and bootstraps a new one, does the counter restart? It must, or the
-  new identity inherits the old one's numbering — but clients remembering the
-  old high-water mark would then reject the new manifest. Probably: the counter
-  is scoped to an identity key, and a new identity resets it, with clients
-  keying their high-water mark on `(identity, counter)` rather than counter
-  alone. Needs to be settled before implementation, not after.
-- **Does the label belong on the wire at all?** It is genuinely useful and
-  genuinely metadata. An alternative is keeping labels purely local, which costs
-  nothing on the wire but means each device names the others separately.
-- **Should the manifest carry a timestamp** as well as a counter? A counter
-  detects rollback; a timestamp would additionally bound how stale a served
-  manifest can be. Cheap to include now, awkward to add later.
-- **What happens to a device signed by an identity that is later replaced?**
-  Nothing automatic — its signature no longer verifies under the new identity,
-  so it simply stops being accepted. Worth confirming that reads as intended
-  rather than as a bug.
+The questions this document opened, and how they were settled.
+
+- **Identity-key custody → (b), transient.** Fetched from the backup, used to
+  sign, discarded. Linking a device costs the recovery key every time. A stolen
+  laptop yields that device's key and nothing more, which is the property
+  cross-signing was chosen for; (a) would have handed it back, and (c) is a
+  clean upgrade later if the friction proves unreasonable.
+- **Counter across an identity reset → scoped to the identity.** High-water mark
+  keyed on `(identity, counter)`. See §6.
+- **Label on the wire → yes.** Accepting that it is metadata the server can
+  read. It is inside the signed manifest so it cannot be forged, and shipping it
+  empty by default keeps the choice with the user.
+- **Timestamp → yes, alongside the counter, UTC seconds.** The counter stays
+  authoritative for ordering and rejection; the timestamp is advisory only. See
+  the note in §4.
+- **A device signed by a replaced identity → stops being accepted, and is told.**
+  It detects this itself from the signed manifest. See §6.
+
+## 10. Still open
+
+- **What the first-run recovery-key screen looks like.** Step 2 of the migration
+  cannot publish anything until an identity exists, which means recovery-key
+  generation is the first thing a user meets after updating. That is the right
+  place for it, but it is a UI design problem and nothing above solves it.
+- **Whether the identity backup should be re-encryptable** without generating a
+  new recovery key — for raising argon2id parameters later, or letting someone
+  who suspects their written-down key was seen replace it. The wire format
+  allows it (`PutBackup` simply overwrites), but the client flow and what it
+  means for devices already signed is unspecified.
+- **Whether a manifest should be re-published periodically** so `IssuedAt` stays
+  fresh and a long-idle account is distinguishable from a server withholding
+  updates. Cheap, but it is a policy decision about traffic rather than a
+  correctness one.
