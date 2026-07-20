@@ -175,9 +175,14 @@ func (a *App) setupIdentity() {
 	// error and not an alarm — it is what every second device looks like before
 	// it is linked.
 	a.setIdentityFlow("link")
+	// Do not name a place to go. The Settings affordance this used to point at
+	// was removed with the approval UI, and the link screen is raised from the
+	// identity:state event rather than found by navigating. A notice that sends
+	// someone hunting through Settings for a control that is not there is worse
+	// than one that just says what is true.
 	a.store.Notify(state.NoticeWarn,
 		"This device isn't part of your account's encryption yet, so it can't read "+
-			"encrypted messages. Link it with your recovery key in Privacy & Security.")
+			"encrypted messages. Link it with your recovery key to fix that.")
 }
 
 // --- First run (proposal §12) ----------------------------------------------
@@ -318,8 +323,22 @@ func (a *App) CancelIdentitySetup() {
 	}
 }
 
+// SaveRecoveryKeyCancelled is returned by SaveRecoveryKeyToFile when the user
+// dismissed the save dialog without choosing a file.
+//
+// It exists because "" already means success, and the two must not be confused:
+// §12's gate opens on a saved key and has to stay shut on a cancelled dialog.
+// Returning "" for both — as this method first did — let the gate be opened by
+// opening a file picker and pressing Escape, which saves nothing. It is a
+// sentinel rather than a message: the UI recognises it and shows nothing, since
+// a user who just cancelled a dialog does not need to be told they did.
+const SaveRecoveryKeyCancelled = "cancelled"
+
 // SaveRecoveryKeyToFile writes the pending recovery key to a file the user
 // picks, as the other way to satisfy §12's gate.
+//
+// Returns "" when the file was written, SaveRecoveryKeyCancelled when the user
+// backed out, and any other non-empty string as an error to show.
 //
 // The file is plain text on purpose. Encrypting it would either replace a
 // generated ~110-bit secret with a human-chosen password — moving the weakest
@@ -349,7 +368,9 @@ func (a *App) SaveRecoveryKeyToFile() string {
 		return err.Error()
 	}
 	if path == "" {
-		return "" // the user cancelled; not an error, and the gate stays shut
+		// Not an error, and the gate stays shut — but the caller has to be able
+		// to tell this apart from a successful write to keep it shut.
+		return SaveRecoveryKeyCancelled
 	}
 
 	body := strings.Join([]string{
@@ -390,7 +411,7 @@ func (a *App) LinkDevice(recoveryKey string) string {
 	}
 	rk, err := e2ee.ParseRecoveryKey(recoveryKey)
 	if err != nil {
-		return err.Error()
+		return recoveryKeyMessage(err)
 	}
 
 	backup, ok := a.client.GetIdentityBackup()
@@ -514,7 +535,7 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 	}
 	rk, err := e2ee.ParseRecoveryKey(recoveryKey)
 	if err != nil {
-		return err.Error()
+		return recoveryKeyMessage(err)
 	}
 
 	backup, ok := a.client.GetIdentityBackup()
@@ -564,4 +585,24 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 		"Device %s removed. It can no longer read messages sent to this account.",
 		e2ee.Fingerprint(target)))
 	return ""
+}
+
+// recoveryKeyMessage turns a parse failure into something worth showing a
+// person mid-transcription.
+//
+// The package prefix is stripped because this string goes straight into a form
+// under an input box, where "e2ee:" is noise from a layer the user has no idea
+// exists. What survives is the part that helps: the wordlist has unique
+// four-character prefixes precisely so a mistyped word is locatable, and
+// "word 7 isn't a valid word" beats "wrong recovery key" when someone is
+// reading ten words off a piece of paper.
+func recoveryKeyMessage(err error) string {
+	msg := err.Error()
+	if rest, ok := strings.CutPrefix(msg, "e2ee: "); ok {
+		msg = rest
+	}
+	if msg == "" {
+		return "That doesn't look like a recovery key."
+	}
+	return strings.ToUpper(msg[:1]) + msg[1:] + "."
 }

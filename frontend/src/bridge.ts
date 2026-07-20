@@ -141,12 +141,32 @@ export interface DeviceInfo {
   thisDevice: boolean;
 }
 
-/** Whether THIS device is still waiting to be approved from another one.
- *  `fingerprint` is this device's own code, which the approving machine shows
- *  and asks the user to compare against. */
-export interface DeviceLinkState {
-  pending: boolean;
+/** Which account-identity flow this device is in. Mirrors app.IdentityState. */
+export interface IdentityState {
+  /** "unavailable" — not signed on, encryption off, or no key directory.
+   *  "setup"       — no identity exists: first run, show the recovery key.
+   *  "link"        — an identity exists but this device is not in it.
+   *  "ready"       — this device is signed into the account's manifest. */
+  flow: "unavailable" | "setup" | "link" | "ready";
+  /** This device's own short code. */
   fingerprint: string;
+  /** How many machines the current manifest names. */
+  devices: number;
+  /** When the current manifest was signed, Unix seconds UTC, or 0. Advisory
+   *  only — nothing rejects a manifest for being old. */
+  issuedAt: number;
+  /** How many words a recovery key has, so copy can say the right number. */
+  recoveryWords: number;
+}
+
+/** The one and only showing of a recovery key. Mirrors app.RecoveryKeyInfo.
+ *
+ *  `recoveryKey` cannot be re-fetched: nothing retains it, so there is nothing
+ *  to ask for again. That is a property of the design, not a policy this file
+ *  enforces. */
+export interface RecoveryKeyInfo {
+  recoveryKey: string;
+  error: string;
 }
 
 export interface Preferences {
@@ -259,11 +279,13 @@ interface AppBindings {
   SetSoundPack(name: string): Promise<string>;
   SetSoundMuted(key: string, muted: boolean): Promise<string>;
   ListDevices(): Promise<DeviceInfo[] | null>;
-  RemoveDevice(key: string): Promise<string>;
-  ApproveDevice(key: string): Promise<string>;
-  ApproveDeviceByCode(code: string): Promise<string>;
-  DeclineDevice(key: string): Promise<string>;
-  GetDeviceLinkState(): Promise<DeviceLinkState>;
+  RemoveDevice(key: string, recoveryKey: string): Promise<string>;
+  GetIdentityState(): Promise<IdentityState>;
+  BeginIdentitySetup(): Promise<RecoveryKeyInfo>;
+  ConfirmIdentitySetup(): Promise<string>;
+  CancelIdentitySetup(): Promise<void>;
+  SaveRecoveryKeyToFile(): Promise<string>;
+  LinkDevice(recoveryKey: string): Promise<string>;
   SetCustomSound(key: string, data: string): Promise<string>;
   GetCustomSounds(): Promise<Record<string, string>>;
   ClearCustomSound(key: string): Promise<string>;
@@ -375,23 +397,24 @@ export const Bridge = {
   setTLS: (on: boolean, insecure: boolean) => app().SetTLS(on, insecure),
   connectionSecure: () => app().ConnectionSecure(),
   listDevices: () => app().ListDevices(),
-  removeDevice: (key: string) => app().RemoveDevice(key),
-  approveDevice: (key: string) => app().ApproveDevice(key),
-  approveDeviceByCode: (code: string) => app().ApproveDeviceByCode(code),
-  declineDevice: (key: string) => app().DeclineDevice(key),
-  getDeviceLinkState: () => app().GetDeviceLinkState(),
+  /** Removing a device rewrites the account's signed device list, so it costs
+   *  the recovery key — the same key linking one costs. */
+  removeDevice: (key: string, recoveryKey: string) => app().RemoveDevice(key, recoveryKey),
 
-  /** A new machine on this account is asking to be linked. */
-  onDeviceLinkState(cb: (s: DeviceLinkState) => void): void {
-    window.runtime?.EventsOn("device:link-state", (data) => cb(data as DeviceLinkState));
-  },
+  getIdentityState: () => app().GetIdentityState(),
+  /** Generates an identity and a recovery key IN MEMORY. Writes nothing, on the
+   *  server or on disk — that is what makes a crash before the user has the key
+   *  harmless. Persistence happens in confirmIdentitySetup and nowhere else. */
+  beginIdentitySetup: () => app().BeginIdentitySetup(),
+  confirmIdentitySetup: () => app().ConfirmIdentitySetup(),
+  cancelIdentitySetup: () => app().CancelIdentitySetup(),
+  saveRecoveryKeyToFile: () => app().SaveRecoveryKeyToFile(),
+  linkDevice: (recoveryKey: string) => app().LinkDevice(recoveryKey),
 
-  onDeviceLinkRequest(
-    cb: (req: { key: string; fingerprint: string; returning?: string }) => void,
-  ): void {
-    window.runtime?.EventsOn("device:link-request", (data) =>
-      cb(data as { key: string; fingerprint: string; returning?: string }),
-    );
+  /** Which identity flow this device is in changed — first run finished, a link
+   *  succeeded, or the session went away. */
+  onIdentityState(cb: (s: IdentityState) => void): void {
+    window.runtime?.EventsOn("identity:state", (data) => cb(data as IdentityState));
   },
   setCustomSound: (key: string, data: string) => app().SetCustomSound(key, data),
   getCustomSounds: () => app().GetCustomSounds(),

@@ -4,14 +4,15 @@ import "./roster.css";
 import "./settings.css";
 import "./dialog.css";
 import "./titlebar.css";
+import "./identity.css";
 
-import { Bridge, type SessionStatus } from "./bridge";
+import { Bridge, type IdentityState, type SessionStatus } from "./bridge";
 import { renderSignOn, showSignOnStatus } from "./signon";
 import { renderRoster, type RosterHandle } from "./roster";
+import { renderIdentity, type IdentityHandle } from "./identity";
 import { loadAndApplyTheme } from "./theme";
 import { setSoundEnabled, setSoundPack, setMutedSounds, loadCustomSounds } from "./sound";
 import { mountTitlebar } from "./titlebar";
-import { alertDialog, confirmDialog } from "./dialog";
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -19,23 +20,70 @@ function el<T extends HTMLElement>(id: string): T {
   return node as T;
 }
 
-/** The two screens this app has. */
-type Screen = "signon" | "roster";
+/** The three screens this app has.
+ *
+ *  "identity" is a full screen rather than a dialog over the roster because
+ *  proposal §12 asks for the whole window on first run: it is the one place
+ *  where dismissing something unread costs an account outright. */
+type Screen = "signon" | "roster" | "identity";
 
 let current: Screen = "signon";
 let roster: RosterHandle | null = null;
+let identity: IdentityHandle | null = null;
+
+/** Which identity flow the backend last reported, so `show` knows which of the
+ *  two identity screens to render. */
+let identityFlow: IdentityState["flow"] = "unavailable";
+/** The user chose "Not now" on the link screen. Honoured for the rest of the
+ *  session and never re-raised: §13 is explicit that nothing nags, and a prompt
+ *  people learn to dismiss is not there when it matters. Cleared on sign-off,
+ *  since the next sign-on is a fresh decision. */
+let linkDeferred = false;
 
 function show(root: HTMLElement, screen: Screen): void {
-  if (screen === current && screen === "roster") return;
+  // Re-showing the screen we're already on would rebuild it — which for the
+  // identity screen means discarding a key the user is part-way through saving.
+  // Sign-on is exempt: it re-renders to surface a new error.
+  if (screen === current && screen !== "signon") return;
   current = screen;
 
   roster?.destroy();
   roster = null;
+  identity?.destroy();
+  identity = null;
 
   if (screen === "roster") {
     roster = renderRoster(root, () => show(root, "signon"));
+  } else if (screen === "identity") {
+    identity = renderIdentity(
+      root,
+      identityFlow === "link" ? "link" : "setup",
+      () => show(root, "roster"),
+      () => {
+        linkDeferred = true;
+        show(root, "roster");
+      },
+    );
   } else {
     renderSignOn(root, () => show(root, "roster"));
+  }
+}
+
+/** Routes an identity state to a screen.
+ *
+ *  "setup" takes the window unconditionally — the account cannot send or read
+ *  encrypted messages until it has an identity, so there is nothing being held
+ *  back. "link" offers itself once and accepts being deferred. Anything else
+ *  means the identity screen has no business being up. */
+function applyIdentityState(root: HTMLElement, st: IdentityState): void {
+  identityFlow = st.flow;
+  if (st.flow === "setup") {
+    linkDeferred = false;
+    show(root, "identity");
+  } else if (st.flow === "link") {
+    if (!linkDeferred) show(root, "identity");
+  } else if (current === "identity") {
+    show(root, "roster");
   }
 }
 
@@ -45,11 +93,15 @@ function handleStatus(root: HTMLElement, status: SessionStatus): void {
       show(root, "roster");
       break;
     case "offline":
+      identityFlow = "unavailable";
+      linkDeferred = false;
       show(root, "signon");
       break;
     case "error":
       // A mid-session fault drops us back to sign-on with the reason shown,
       // rather than leaving a dead roster on screen.
+      identityFlow = "unavailable";
+      linkDeferred = false;
       show(root, "signon");
       showSignOnStatus(status);
       break;
@@ -61,54 +113,12 @@ window.addEventListener("DOMContentLoaded", () => {
 
   Bridge.onSessionStatus((status) => handleStatus(root, status));
 
-  // A new machine signing in to this account asks to be linked. Approval is
-  // deliberately manual: the request only proves whoever sent it knows the
-  // account password, which must not by itself grant the ability to read
-  // everything encrypted to this account.
-  // A device is only ever asked about once. The backend already suppresses a
-  // repeat announcement, but a dialog is async: two requests arriving before
-  // the first is answered would otherwise stack, and answering both approves
-  // the same device twice.
-  const askingAbout = new Set<string>();
-
-  Bridge.onDeviceLinkRequest((req) => {
-    if (askingAbout.has(req.key)) return;
-    askingAbout.add(req.key);
-    void (async () => {
-      try {
-        // A device that was removed and is coming back is a different event
-        // from one appearing for the first time. Calling a machine you have used
-        // for weeks "new" invites approving it without checking the code, which
-        // is the one moment that check actually matters.
-        const returning = req.returning === "1";
-        const ok = await confirmDialog(
-          (returning
-            ? `A device you previously removed is asking to rejoin your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
-              `Approving it undoes the removal. Check the code matches the one shown on that device — ` +
-              `if it doesn't, or you didn't just sign in there, decline.`
-            : `A new device wants to link to your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
-              `Check that this matches the code shown on that device. If it doesn't — or you're ` +
-              `not setting up a device right now — decline: approving lets it read your encrypted messages.`),
-          {
-            title: returning ? "Rejoin this device?" : "Link a new device?",
-            okLabel: returning ? "Restore" : "Approve",
-            cancelLabel: "Decline",
-            danger: true,
-          },
-        );
-        if (!ok) {
-          // Tell the backend, so the same device announcing again this session
-          // doesn't re-ask something already answered.
-          void Bridge.declineDevice(req.key);
-          return;
-        }
-        const err = await Bridge.approveDevice(req.key);
-        if (err) void alertDialog(err, { title: "Could not link device" });
-      } finally {
-        askingAbout.delete(req.key);
-      }
-    })();
-  });
+  // Which identity flow this device is in is decided by the backend at sign-on
+  // and whenever it changes — a first run completing, a link succeeding, the
+  // session going away. Approval-from-another-device is gone: a device is no
+  // longer let in by someone clicking Approve, but by being signed into the
+  // account's manifest with the recovery key.
+  Bridge.onIdentityState((st) => applyIdentityState(root, st));
 
   // Load the sound preferences up front so the first event honors them, and
   // mount the custom titlebar if the frameless window frame is enabled.
@@ -132,6 +142,13 @@ window.addEventListener("DOMContentLoaded", () => {
     Bridge.signedOn()
       .then((on) => {
         show(root, on ? "roster" : "signon");
+        // A webview reload doesn't re-run sign-on, so the identity:state event
+        // that routed us the first time has already been and gone. Ask.
+        if (on) {
+          void Bridge.getIdentityState()
+            .then((st) => applyIdentityState(root, st))
+            .catch(() => {});
+        }
         // If we're not already signed on, try a remembered password. On success
         // the "online" session-status event moves us to the roster; on failure
         // we simply stay on the sign-on screen.

@@ -1,0 +1,134 @@
+/*
+ * identity.css — the account identity screens: first run and device linking.
+ * Same spare panel-on-dark language as sign-on, but wider: the recovery key
+ * has to be readable across the room, not squeezed into a form column.
+ */
+
+.identity {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.identity__panel {
+  width: 560px;
+  max-width: 100%;
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  padding: 28px 26px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.identity__head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.identity__lead {
+  margin: 0;
+  color: var(--benco-phosphor);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* The key itself. Ten cells, wrapping — large, spaced and selectable, because
+   the likeliest thing done with it is reading it out or copying it by hand. */
+.identity__key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 14px 12px;
+  border: 1px solid var(--benco-green-deep);
+  border-radius: var(--benco-radius);
+  background: var(--benco-bg-deep);
+  min-height: 64px;
+  align-items: center;
+  user-select: text;
+  cursor: text;
+}
+
+.identity__word {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 9px;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel-2);
+}
+
+/* The position, dimmed. It is not part of the key, but it is what an error
+   message names when a word is mistyped, so it has to be visible. */
+.identity__word-n {
+  color: var(--benco-dim-2);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  min-width: 12px;
+  text-align: right;
+}
+
+.identity__word-t {
+  color: var(--benco-green);
+  font-family: var(--font-ui);
+  font-size: 19px;
+  letter-spacing: 1px;
+}
+
+.identity__working {
+  margin: 0;
+}
+
+/* "This is the only time these words exist." Amber: not an error, but the one
+   paragraph on the screen that costs an account if it goes unread. */
+.identity__fact {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--benco-amber);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel-2);
+  color: var(--benco-phosphor);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.identity__gate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.identity__gate-state {
+  color: var(--benco-green);
+}
+
+.identity__error {
+  line-height: 1.4;
+}
+
+.identity__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.identity__hint {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Multi-line so a key pasted with its line breaks intact stays legible; the
+   Go side normalises whitespace either way. */
+.identity__rk {
+  resize: vertical;
+  font-size: 15px;
+  letter-spacing: 0.5px;
+  line-height: 1.5;
+}

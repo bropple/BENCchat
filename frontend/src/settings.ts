@@ -30,7 +30,7 @@ import {
   setSoundMuted,
   type SoundKey,
 } from "./sound";
-import { alertDialog, confirmDialog } from "./dialog";
+import { alertDialog, confirmDialog, promptDialog } from "./dialog";
 
 /** Minimal HTML escape for values interpolated into this panel's markup.
  *  Device keys are base64 and fingerprints are digits, but neither is worth
@@ -212,19 +212,8 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <p class="benco-caption settings__hint"><strong>Always on, and not optional.</strong> The connection is TLS — sign-on <strong>fails</strong> rather than falling back to cleartext, which is what stops an attacker steering you onto a plaintext port. Messages between BENCchat users are additionally encrypted end-to-end (look for the 🔒); clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. TLS covers what end-to-end encryption can't — your login, buddy list, presence, profiles and who you talk to — though the server itself still sees that metadata. Your keys stay in this device's keychain. Group chats are <em>not</em> covered by end-to-end encryption.</p>
 
                 <div class="benco-caption settings__group-label">Your devices</div>
-                <div class="settings__link-pending" id="linkPending" hidden></div>
-                <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. Remove one you no longer use — senders will stop encrypting to it.</p>
+                <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. Removing one rewrites the signed list of devices on your account, so it asks for your recovery key — the same key that links a device.</p>
                 <div class="settings__devices" id="deviceList"></div>
-
-                <div class="settings__link-by-code">
-                  <label class="benco-caption" for="linkCodeInput">Link a device by its code</label>
-                  <div class="settings__link-by-code-row">
-                    <input type="text" id="linkCodeInput" class="benco-input"
-                           placeholder="00000 00000 00000 00000" autocomplete="off" spellcheck="false" />
-                    <button class="benco-button" id="linkCodeBtn">Link</button>
-                  </div>
-                  <p class="benco-caption settings__hint">The other device shows this code when it can't read encrypted messages. Use this when you missed its pop-up, or to <strong>restore a device you removed</strong> — approving it here undoes the removal. Compare the code on both screens before linking: it is what proves the device is yours.</p>
-                </div>
 
                 <p class="benco-caption settings__hint"><strong>On by default.</strong> Messages between BENCchat users are encrypted end-to-end automatically (look for the 🔒). Clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. Your keys stay in this device's keychain. Group chats are <em>not</em> covered. Metadata — who you talk to and when — is hidden from the network by TLS above, but is still visible to the server itself.</p>
               </section>
@@ -448,26 +437,6 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
 
     // Device list. Rendered on open and after any removal.
     const deviceListEl = overlay.querySelector<HTMLDivElement>("#deviceList")!;
-    // Until another device approves this one, it can't read anything encrypted
-    // to the account. The user has no way to discover that otherwise — the
-    // approval happens entirely on the other machine — so say it here, with
-    // this device's code, which is what the approving dialog asks them to
-    // compare against.
-    const linkPendingEl = overlay.querySelector<HTMLDivElement>("#linkPending")!;
-    const renderLinkState = (st: { pending: boolean; fingerprint: string }): void => {
-      linkPendingEl.hidden = !st.pending;
-      if (!st.pending) return;
-      linkPendingEl.innerHTML = `
-        <strong>This device isn't linked yet.</strong>
-        It can't read messages encrypted to your other devices until one of them
-        approves it. Sign in on a device you already use, and approve this code:
-        <span class="settings__link-code">${escapeHTML(st.fingerprint)}</span>`;
-    };
-    void Bridge.getDeviceLinkState().then(renderLinkState).catch(() => {});
-    Bridge.onDeviceLinkState((st) => {
-      renderLinkState(st);
-      void renderDevices();
-    });
 
     const renderDevices = async (): Promise<void> => {
       let devices: Awaited<ReturnType<typeof Bridge.listDevices>> = [];
@@ -496,46 +465,41 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
           </div>`,
         )
         .join("");
-      // Linking by code is the only route that does not depend on catching the
-      // other device's live announcement — which is exactly the case a user hits
-      // after dismissing the pop-up, or when re-approving a device they removed.
-      const linkInput = overlay.querySelector<HTMLInputElement>("#linkCodeInput");
-      const linkBtn = overlay.querySelector<HTMLButtonElement>("#linkCodeBtn");
-      if (linkInput && linkBtn && !linkBtn.dataset.wired) {
-        linkBtn.dataset.wired = "1";
-        const submit = async () => {
-          const code = linkInput.value.trim();
-          if (!code) return;
-          linkBtn.disabled = true;
-          try {
-            const err = await Bridge.approveDeviceByCode(code);
-            if (err) {
-              void alertDialog(err, { title: "Could not link that device" });
-              return;
-            }
-            linkInput.value = "";
-            void renderDevices();
-          } finally {
-            linkBtn.disabled = false;
-          }
-        };
-        linkBtn.addEventListener("click", () => void submit());
-        linkInput.addEventListener("keydown", (e) => {
-          if (e.key === "Enter") void submit();
-        });
-      }
 
       for (const btn of deviceListEl.querySelectorAll<HTMLButtonElement>(".settings__device-remove")) {
         btn.addEventListener("click", async () => {
-          const ok = await confirmDialog(
-            "Remove this device? It will no longer be able to read messages sent to you, " +
-              "and your contacts will see your safety number change.",
-            { title: "Remove device", okLabel: "Remove", danger: true },
+          // Removal is not a request to the server any more — it publishes a
+          // new, signed device list that simply doesn't name this machine.
+          // Signing needs the account's identity, and the only way to reach
+          // that is the recovery key, so ask for it here and say why: the cost
+          // is what makes the removal something the server cannot undo.
+          const key = await promptDialog(
+            "Removing this device publishes a new signed list of devices for your account " +
+              "without it. That's what makes the removal stick — the server can't put it " +
+              "back — and it's why it needs your recovery key.\n\n" +
+              "The device will no longer be able to read messages sent to you, and your " +
+              "contacts will see your safety number change.",
+            "",
+            {
+              title: "Remove device",
+              okLabel: "Remove",
+              placeholder: "Recovery key",
+            },
           );
-          if (!ok) return;
-          const err = await Bridge.removeDevice(btn.dataset.device!);
+          if (key === null) return;
+          if (!key.trim()) {
+            void alertDialog("Enter your recovery key to remove a device.", {
+              title: "Could not remove device",
+            });
+            return;
+          }
+          const err = await Bridge.removeDevice(btn.dataset.device!, key.trim());
           if (err) {
-            void alertDialog(err, { title: "Could not remove device" });
+            // Straight through, prefix aside: the useful failures here name the
+            // position of a mistyped word rather than saying "wrong key".
+            void alertDialog(err.replace(/^e2ee:\s*/, ""), {
+              title: "Could not remove device",
+            });
             return;
           }
           void renderDevices();
