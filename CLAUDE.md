@@ -133,16 +133,33 @@ silently overriding it.
   fields; if BENCchat needs something OSCAR can't express, that's a real
   design decision to surface, not something to sneak into a TLV.
 
+## How the client actually works
+
+[`docs/how-it-works-today.md`](docs/how-it-works-today.md) describes the program
+as it exists — layers, sign-on, messaging, rooms, the device/key model, and what
+is on disk — with `file:line` citations throughout. **Read this before the trust
+model.** It is the only document here that is purely descriptive; if it and the
+code disagree, the code wins and the doc is stale.
+
 ## Trust model
 
 The current model roots everything in the account password, which means anyone
 holding it owns the account outright — approval dialogs, device removal and any
-server-side policy are advisory on top of that. See
-[`docs/trust-model.md`](docs/trust-model.md) for why, and for the proposed fix
-(an account identity key that cross-signs device keys). That document is a
-proposal, not built; read it before designing anything else in this area,
-because most obvious ideas here have already been ruled out for reasons worth
-knowing.
+server-side policy are advisory on top of that, because publishing a device key
+is self-service and a session authenticates with a password, not a device key.
+
+[`docs/trust-model.md`](docs/trust-model.md) explains why, and proposes a fix (an
+account identity key that cross-signs device keys). **That document is a
+proposal. None of it is built**, and it describes a system that does not exist —
+do not read it as a description of the program. Read it before *designing*
+anything in this area, because most obvious ideas have already been ruled out
+for reasons worth knowing.
+
+Note that its central argument — constraining what a malicious operator can do —
+is weighted for a threat model this deployment may not have, since the operator
+is the person running the server. The argument that survives regardless is the
+secondary one: safety numbers churn on every device addition, which trains
+people to click through the warning meant to catch an attacker.
 
 ## Open questions to resolve early
 
