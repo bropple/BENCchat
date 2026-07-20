@@ -83,6 +83,28 @@ func (a *App) publishDevices(boxKeys [][32]byte) {
 	}
 }
 
+// publishedDeviceCount reports how many devices the SERVER actually holds.
+//
+// The local list is what we tried to publish, which is not the same thing once
+// the server starts refusing revoked keys. Announcing "this account has 3
+// devices" in the same breath as two of them being refused is worse than saying
+// nothing, so this asks rather than assumes. Falls back to the local count when
+// the directory is unavailable, where the local list IS the best answer.
+func (a *App) publishedDeviceCount(localCount int) int {
+	if !a.client.SupportsKeyDir() {
+		return localCount
+	}
+	self := a.store.Self().ScreenName
+	if self == "" {
+		return localCount
+	}
+	devices, ok := a.client.QueryDevices(self)
+	if !ok {
+		return localCount
+	}
+	return len(devices)
+}
+
 // onRevokedDeviceReturned handles a removed device reappearing.
 //
 // This is the case that only exists because revocation is durable. Under the old
@@ -92,6 +114,13 @@ func (a *App) onRevokedDeviceReturned(box [32]byte) {
 		// THIS machine is the one that was removed. Say so plainly: encryption
 		// will not work here until the user re-approves from another device, and
 		// without this the failure is invisible.
+		//
+		// This supersedes the generic "not linked yet" notice. Both describe the
+		// same state and firing both — as happened before — gives the user two
+		// different explanations at the same instant, one of which ("approve
+		// this new device") is the wrong mental model for a device that used to
+		// be linked and was removed.
+		a.suppressLinkPendingNotice()
 		a.store.Notify(state.NoticeWarn,
 			"This device was removed from your account, so it can no longer receive encrypted "+
 				"messages. Approve it again from another signed-in device to restore it.")

@@ -679,4 +679,39 @@ func TestLiveKeyDirectory(t *testing.T) {
 			len(again.Refused))
 	}
 	t.Logf("republishing the revoked device was refused, as it must be")
+
+	// The exit from the dead end. Before Restore existed a tombstone was
+	// permanent: the device republished on every sign-on, was refused, and the
+	// client told the user to approve it from another machine — which could not
+	// help, because nothing could lift the revocation. The only escape was
+	// wiping both machines.
+	if _, err := alice.RestoreDeviceKey(key(1)); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	res, err := DecodeKeyDirRestoreReply(await(aFrames, aBodies, wire.BENCOKeyDirRestoreReply))
+	if err != nil {
+		t.Fatalf("decode restore reply: %v", err)
+	}
+	if res.Restored != 1 {
+		t.Fatalf("restore reported %d, want 1", res.Restored)
+	}
+
+	if _, err := alice.PublishDeviceKeys([]wire.BENCODevice{
+		{BoxKey: key(1), SignKey: key(0xA1)},
+		{BoxKey: key(2)},
+	}); err != nil {
+		t.Fatalf("publish after restore: %v", err)
+	}
+	back, err := DecodeKeyDirPublishReply(await(aFrames, aBodies, wire.BENCOKeyDirPublishReply))
+	if err != nil {
+		t.Fatalf("decode publish reply: %v", err)
+	}
+	if len(back.Refused) != 0 {
+		t.Fatalf("a restored device was still refused (%d), so removal is still irreversible",
+			len(back.Refused))
+	}
+	if back.Accepted != 2 {
+		t.Fatalf("accepted=%d after restore, want 2", back.Accepted)
+	}
+	t.Logf("restored device published again — removal is reversible")
 }

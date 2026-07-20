@@ -25,9 +25,10 @@ const keyDirTimeout = 5 * time.Second
 
 // keyDirReply is one decoded directory response.
 type keyDirReply struct {
-	devices []e2ee.Device
-	refused []e2ee.Device
-	revoked bool
+	devices  []e2ee.Device
+	refused  []e2ee.Device
+	revoked  bool
+	restored bool
 }
 
 // SupportsKeyDir reports whether the connected server offers the key directory.
@@ -188,6 +189,36 @@ func (c *Client) RefreshPeerKeys(screenName string) {
 	c.RequestUserInfo(screenName)
 }
 
+// RestoreDevice lifts a revocation so a removed device can publish again.
+//
+// This is the exit from what would otherwise be a dead end: a tombstoned device
+// republishes on every sign-on, is refused, and the user is told to approve it
+// from another machine — which does nothing unless that approval can reach here.
+func (c *Client) RestoreDevice(box [32]byte) (changed bool, ok bool) {
+	c.mu.Lock()
+	sess := c.session
+	c.mu.Unlock()
+	if sess == nil || !sess.SupportsKeyDir() {
+		return false, false
+	}
+
+	reqID, err := sess.RestoreDeviceKey(box[:])
+	if err != nil {
+		c.log.Warn("key directory restore failed to send", "err", err)
+		return false, false
+	}
+	ch, done := c.waitKeyDir(reqID)
+	defer done()
+
+	select {
+	case r := <-ch:
+		return r.restored, true
+	case <-time.After(keyDirTimeout):
+		c.log.Warn("key directory restore timed out")
+		return false, false
+	}
+}
+
 // handleKeyDir dispatches an inbound key directory SNAC.
 func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 	switch frame.SubGroup {
@@ -227,6 +258,14 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 			return
 		}
 		c.deliverKeyDir(frame.RequestID, keyDirReply{revoked: reply.Revoked != 0})
+
+	case wire.BENCOKeyDirRestoreReply:
+		reply, err := oscar.DecodeKeyDirRestoreReply(body)
+		if err != nil {
+			c.log.Warn("bad key directory restore reply", "err", err)
+			return
+		}
+		c.deliverKeyDir(frame.RequestID, keyDirReply{restored: reply.Restored != 0})
 
 	case wire.BENCOKeyDirErr:
 		// Deliver an empty reply so a waiter fails fast rather than sitting out

@@ -73,6 +73,10 @@ type App struct {
 	linkPrompted map[[32]byte]bool
 	linkDeclined map[[32]byte]bool
 	linkPending  bool
+	// linkNoticeSuppressed drops the generic "not linked yet" notice when a
+	// more specific one has already explained the same state — being unlinked
+	// because you are NEW and because you were REMOVED look identical here.
+	linkNoticeSuppressed bool
 
 	// System tray. Icons are injected from main (embedded assets). quitting
 	// distinguishes a real quit (tray "Quit") from a window close, which hides to

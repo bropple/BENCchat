@@ -74,6 +74,28 @@ func (s *Session) RevokeDeviceKey(boxKey []byte) (uint32, error) {
 	return reqID, nil
 }
 
+// RestoreDeviceKey lifts a revocation on one of this account's own devices.
+func (s *Session) RestoreDeviceKey(boxKey []byte) (uint32, error) {
+	req := wire.SNAC_0xBE00_0x0008_BENCOKeyDirRestoreRequest{
+		Version: wire.BENCOKeyDirVersion,
+		BoxKey:  boxKey,
+	}
+	reqID, err := s.SendReq(wire.BENCOKeyDir, wire.BENCOKeyDirRestoreRequest, req)
+	if err != nil {
+		return 0, fmt.Errorf("oscar: restore device key: %w", err)
+	}
+	return reqID, nil
+}
+
+// DecodeKeyDirRestoreReply decodes a restore reply body.
+func DecodeKeyDirRestoreReply(body []byte) (wire.SNAC_0xBE00_0x0009_BENCOKeyDirRestoreReply, error) {
+	var reply wire.SNAC_0xBE00_0x0009_BENCOKeyDirRestoreReply
+	if err := wire.UnmarshalBE(&reply, bytes.NewReader(body)); err != nil {
+		return reply, fmt.Errorf("oscar: decode key directory restore reply: %w", err)
+	}
+	return reply, nil
+}
+
 // DecodeKeyDirQueryReply decodes a query reply body.
 func DecodeKeyDirQueryReply(body []byte) (wire.SNAC_0xBE00_0x0005_BENCOKeyDirQueryReply, error) {
 	var reply wire.SNAC_0xBE00_0x0005_BENCOKeyDirQueryReply

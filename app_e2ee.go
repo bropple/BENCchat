@@ -122,27 +122,46 @@ func (a *App) publishAfterDeviceCheck() {
 		return
 	}
 
-	// Start from what we remember locally.
-	//
-	// This mattered enormously under the profile scheme, where the server only
-	// reported devices that were ONLINE — it kept the profile on the live session
-	// and dropped it at sign-off — so a machine that happened to be off would be
-	// silently dropped from the list and stop being able to read anything sent
-	// while it was away. The key directory has no such gap, since it answers from
-	// storage. The local record is still merged in as a belt-and-braces measure
-	// for the fallback path and for a directory query that times out.
-	remembered, err := trust.LoadDevices(a.currentAccount())
-	if err != nil {
-		slog.Default().Warn("could not read remembered device keys", "err", err)
-	}
-	merged := e2ee.DecodeKeys(strings.Join(remembered, ","))
-
 	// Whether this device is already part of the account, judged BEFORE we add
 	// ourselves to the list below. An account that already advertises devices,
 	// none of which is ours, means we're the new machine and somebody has to
 	// approve us — which the user otherwise has no way of knowing, since the
 	// approval happens on the other device entirely.
 	published, has, ok := a.ownPublishedKeys()
+
+	// Where the device list comes from, and why it is NOT always a merge.
+	//
+	// The key directory is authoritative: it answers from server storage, so it
+	// lists every device including machines that are currently offline. Taking
+	// it as-is is what makes removal work across machines. Merging our own
+	// remembered list into it would republish devices another machine removed —
+	// each machine re-uploading its stale memory of the account, so a removal
+	// performed on one is undone by the next one to sign on.
+	//
+	// Under the profile scheme a merge was unavoidable: the server kept the
+	// profile on the live session and dropped it at sign-off, so it only ever
+	// reported devices that were online, and without merging, any machine that
+	// happened to be off was silently dropped and stopped being able to read
+	// anything sent while it was away. The directory has no such gap, so the
+	// workaround is retired with the thing it worked around.
+	var merged [][32]byte
+	authoritative := a.client.SupportsKeyDir() && ok
+
+	if !authoritative {
+		// Fallback path, or a directory query that failed. Here the server's
+		// answer really is incomplete, so the local record is all that keeps an
+		// offline machine in the list.
+		remembered, err := trust.LoadDevices(a.currentAccount())
+		if err != nil {
+			slog.Default().Warn("could not read remembered device keys", "err", err)
+		}
+		merged = e2ee.DecodeKeys(strings.Join(remembered, ","))
+		if !ok {
+			slog.Default().Warn("could not read the published device set; using the remembered one")
+			published = nil
+		}
+	}
+
 	if ok && has {
 		known := false
 		for _, k := range published {
@@ -155,9 +174,6 @@ func (a *App) publishAfterDeviceCheck() {
 			a.setLinkPending()
 		}
 		merged = append(merged, published...)
-	} else if !ok {
-		slog.Default().Warn("could not read the published device set; using the remembered one")
-		published = nil
 	}
 	merged = append(merged, a.e2eePub)
 
@@ -196,7 +212,10 @@ func (a *App) publishAfterDeviceCheck() {
 	// linked without typing codes.
 	a.announceDevice()
 
-	if n := len(devices); n > 1 {
+	// Count what the SERVER accepted, not what we hoped to publish. Reporting
+	// the local list meant announcing "3 devices" in the same breath as the
+	// server refusing two of them, which is worse than saying nothing.
+	if n := a.publishedDeviceCount(len(devices)); n > 1 {
 		a.store.Notify(state.NoticeInfo, fmt.Sprintf(
 			"This account has %d devices set up for encryption. Messages sent to you are "+
 				"encrypted to all of them.", n))
@@ -680,15 +699,36 @@ func (a *App) setLinkPending() {
 	a.linkMu.Lock()
 	already := a.linkPending
 	a.linkPending = true
+	quiet := a.linkNoticeSuppressed
 	a.linkMu.Unlock()
 	if already {
 		return
 	}
 	a.emitLinkState()
+	if quiet {
+		// A more specific notice has already explained this state — see
+		// suppressLinkPendingNotice. The pending flag still matters (the UI uses
+		// it), only the duplicate explanation is dropped.
+		return
+	}
 	a.store.Notify(state.NoticeWarn, fmt.Sprintf(
 		"This device isn't linked yet, so it can't read messages encrypted to your "+
 			"other devices. Approve it from a device that's already signed in — its "+
 			"code is %s.", e2ee.Fingerprint(a.e2eePub)))
+}
+
+// suppressLinkPendingNotice stops the next setLinkPending from emitting its
+// generic "isn't linked yet" text.
+//
+// Being unlinked because you are NEW and being unlinked because you were REMOVED
+// are the same state to the code and different situations to the user. Both
+// notices firing at the same instant — which is what happened — offers two
+// explanations at once, and the generic one is the wrong mental model for a
+// machine that used to be linked.
+func (a *App) suppressLinkPendingNotice() {
+	a.linkMu.Lock()
+	a.linkNoticeSuppressed = true
+	a.linkMu.Unlock()
 }
 
 func (a *App) clearLinkPending() {
@@ -779,13 +819,24 @@ func (a *App) ApproveDevice(keyB64 string) string {
 	if a.knowsDevice(newKey) {
 		return ""
 	}
+	// Lift any revocation FIRST. Approving a device the user previously removed
+	// is the whole reason the refusal notice tells them to come here, and
+	// publishing without clearing the tombstone would simply be refused again —
+	// leaving the user in a loop with no way out but wiping both machines.
+	if restored, ok := a.client.RestoreDevice(newKey); ok && restored {
+		a.store.Notify(state.NoticeInfo,
+			"That device had been removed from your account. Its removal has been undone.")
+	}
+
 	merged := append(a.deviceKeys(), newKey, a.e2eePub)
 	a.setDeviceKeys(merged)
 	if err := trust.SaveDevices(a.currentAccount(),
 		strings.Split(e2ee.EncodeKeys(a.deviceKeys()), ",")); err != nil {
 		return err.Error()
 	}
-	a.publishProfile()
+	// publishDevices, not publishProfile: approval has to reach the directory or
+	// the device stays unpublished and unreadable to everyone.
+	a.publishDevices(a.deviceKeys())
 	a.shareDeviceList()
 	a.store.Notify(state.NoticeInfo, "Device linked. Messages will now be encrypted to it as well.")
 	return ""

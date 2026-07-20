@@ -20,6 +20,8 @@ const (
 	BENCOKeyDirQueryReply     uint16 = 0x0005
 	BENCOKeyDirRevokeRequest  uint16 = 0x0006
 	BENCOKeyDirRevokeReply    uint16 = 0x0007
+	BENCOKeyDirRestoreRequest uint16 = 0x0008
+	BENCOKeyDirRestoreReply   uint16 = 0x0009
 )
 
 // BENCOKeyDirVersion is the payload version we send.
@@ -84,4 +86,21 @@ type SNAC_0xBE00_0x0006_BENCOKeyDirRevokeRequest struct {
 // Zero means the key was not active, which is not a failure.
 type SNAC_0xBE00_0x0007_BENCOKeyDirRevokeReply struct {
 	Revoked uint8
+}
+
+// SNAC_0xBE00_0x0008_BENCOKeyDirRestoreRequest lifts a revocation so a device
+// that was removed can publish again.
+//
+// Without this, removal is irreversible: the machine keeps its keypair, is
+// refused on every sign-on, and telling the user to "approve it from another
+// device" leads nowhere. This is what approval actually calls.
+type SNAC_0xBE00_0x0008_BENCOKeyDirRestoreRequest struct {
+	Version uint16
+	BoxKey  []byte `oscar:"len_prefix=uint16"`
+}
+
+// SNAC_0xBE00_0x0009_BENCOKeyDirRestoreReply reports whether a revocation was
+// lifted. Zero means there was no tombstone, which is not an error.
+type SNAC_0xBE00_0x0009_BENCOKeyDirRestoreReply struct {
+	Restored uint8
 }
