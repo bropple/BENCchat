@@ -264,11 +264,11 @@ func (a *App) acceptCounter(who, display string, identity ed25519.PublicKey, cou
 // onSelfManifest is how this device finds out what has happened to it.
 //
 // Both cases are derived from a signed statement the device fetched itself, so
-// unlike v1's DeviceDeny instant message they cannot be dropped, spoofed or
-// missed while offline. The response follows the DeviceDeny precedent — sign out
-// AND clear the saved password — because leaving the credential behind means the
-// next launch signs straight back into the same dead state, which looks like
-// nothing happened.
+// unlike the instant-message denial v1 relied on they cannot be dropped,
+// spoofed or missed while offline. The response is what that denial established
+// — sign out AND clear the saved password — because leaving the credential
+// behind means the next launch signs straight back into the same dead state,
+// which looks like nothing happened.
 func (a *App) onSelfManifest(identity ed25519.PublicKey, m wire.BENCOManifest, devices []e2ee.Device) {
 	encoded := e2ee.EncodeIdentityPublic(identity)
 	pinned := a.selfIdentityPin()

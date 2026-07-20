@@ -86,15 +86,3 @@ func (a *App) ClearCustomSound(key string) string {
 	}
 	return ""
 }
-
-// ClearCustomSounds removes every imported sound.
-func (a *App) ClearCustomSounds() string {
-	d, err := soundsDir()
-	if err != nil {
-		return err.Error()
-	}
-	for key := range soundEventKeys {
-		_ = os.Remove(filepath.Join(d, key+".snd"))
-	}
-	return ""
-}

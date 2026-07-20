@@ -10,7 +10,6 @@ package oscar
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -50,8 +49,11 @@ func (e *SignoffError) Error() string {
 
 func (e *SignoffError) Unwrap() error { return ErrSignedOff }
 
-// dialTimeout bounds the initial TCP connect. The OSCAR server is plain TCP
-// with no TLS handshake, so this only covers the socket itself.
+// dialTimeout bounds connection setup for both dial paths in Transport.dial.
+// For a plaintext dial that is the TCP connect alone; for a TLS one the
+// tls.Dialer applies it to the handshake as well, since the deployment is
+// TLS-only and a proxy that accepts the socket but never completes the
+// handshake would otherwise hang indefinitely.
 const dialTimeout = 20 * time.Second
 
 // Conn is a framed OSCAR connection: a TCP socket that reads and writes FLAP
@@ -71,22 +73,12 @@ type Conn struct {
 	closed    chan struct{}
 }
 
-// Dial opens a FLAP connection to addr ("host:port").
+// NewConn wraps an existing net.Conn. Split out from Transport.dial so tests
+// can drive the framing over a net.Pipe without a real server.
 //
 // startSeq seeds the client's FLAP sequence counter. OSCAR lets each side pick
 // its own starting value (the server opens at 100); the two directions are
 // independent counters.
-func Dial(ctx context.Context, addr string, startSeq uint16) (*Conn, error) {
-	d := net.Dialer{Timeout: dialTimeout}
-	c, err := d.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("oscar: dial %s: %w", addr, err)
-	}
-	return NewConn(c, startSeq), nil
-}
-
-// NewConn wraps an existing net.Conn. Split out from Dial so tests can drive
-// the framing over a net.Pipe without a real server.
 func NewConn(c net.Conn, startSeq uint16) *Conn {
 	return &Conn{
 		conn:   c,

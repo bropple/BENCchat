@@ -219,10 +219,11 @@ func VerifyManifest(pub ed25519.PublicKey, manifest, sig []byte) error {
 
 // --- Safety numbers derived from the identity key --------------------------
 //
-// SafetyNumberSet (multidevice.go) hashes both sides' device key SETS, so it
-// necessarily changes whenever anyone adds or removes a machine. That churn is
-// the reason people stop reading safety-number alerts, and the reason the alert
-// is not believed on the one occasion it means something.
+// BENCchat previously derived the safety number by hashing both sides' device
+// key SETS, which necessarily changed it whenever anyone added or removed a
+// machine. That churn is the reason people stop reading safety-number alerts,
+// and the reason the alert is not believed on the one occasion it means
+// something.
 //
 // Under cross-signing there is finally something stable underneath: the account
 // identity key. Devices come and go beneath it, all signed by the same
@@ -230,31 +231,21 @@ func VerifyManifest(pub ed25519.PublicKey, manifest, sig []byte) error {
 // being replaced. Which, per proposal §6, is the one event that genuinely is
 // either "they lost everything" or "someone took the account over", and is
 // worth interrupting a human for.
-//
-// The device-set functions are deliberately still here. The app layer calls
-// them today and a later pass switches it over; deleting them now would just
-// break the build in a package another agent is mid-port on.
 
-// identitySafetyDomain separates the identity digest from the device-set digest
-// (safetyDigest).
+// identitySafetyDomain domain-separates this digest, so it cannot collide with
+// a bare hash of two 32-byte key blobs.
 //
-// Without it, an account with exactly one device key would hash the same two
-// 32-byte blobs as an identity pair would, so a device-set number and an
-// identity number could in principle coincide and be compared against each
-// other as if they meant the same thing. They mean different things, and during
-// the transition BOTH are live, which is exactly when a cross-scheme comparison
-// could happen.
-//
-// The prefix is only on the new function: adding one to safetyDigest would
-// change every existing device-set number for no benefit, since that rendering
-// is on its way out.
+// The device-set rendering it originally guarded against is gone, but the
+// prefix stays: removing it would change every safety number already shown to
+// and recorded by users, which is precisely the churn this scheme exists to
+// prevent.
 const identitySafetyDomain = "BENCO-E2EE:identity-safety:v1\x00"
 
 // identitySafetyDigest is the value both identity-based renderings derive from.
 //
-// Ordered against itself rather than by role — the same trick safetyDigest uses
-// — so both parties compute the same digest without having to agree on who is
-// "first". Rendering the digits and the emoji from ONE digest is what makes
+// The two keys are ordered against each other rather than by role, so both
+// parties compute the same digest without having to agree on who is "first".
+// Rendering the digits and the emoji from ONE digest is what makes
 // them provably the same number shown two ways rather than two codes of
 // different strength.
 func identitySafetyDigest(ours, theirs ed25519.PublicKey) [32]byte {
@@ -272,7 +263,7 @@ func identitySafetyDigest(ours, theirs ed25519.PublicKey) [32]byte {
 }
 
 // IdentitySafetyNumber renders the identity-based safety number as digits, in
-// the same shape as SafetyNumberSet: six space-separated groups of five.
+// six space-separated groups of five.
 //
 // Returns "" when either key is missing — there is nothing to compare until
 // both sides have published an identity, and an empty string is easier for a UI

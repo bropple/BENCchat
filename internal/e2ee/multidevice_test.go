@@ -139,26 +139,6 @@ func TestStripMarkerAllHidesEveryVersion(t *testing.T) {
 	}
 }
 
-// TestSafetyNumberSetIsOrderIndependent: both parties must compute the same
-// number from opposite perspectives, or comparing them proves nothing.
-func TestSafetyNumberSetIsOrderIndependent(t *testing.T) {
-	ours := [][32]byte{mustKey(t).Public, mustKey(t).Public}
-	theirs := [][32]byte{mustKey(t).Public}
-
-	a := SafetyNumberSet(ours, theirs)
-	b := SafetyNumberSet(theirs, ours)
-	if a != b {
-		t.Errorf("safety number differs by perspective: %q vs %q", a, b)
-	}
-	if len(strings.Fields(a)) != 6 {
-		t.Errorf("safety number %q should be 6 groups", a)
-	}
-	// A different device set must produce a different number.
-	if SafetyNumberSet(ours, [][32]byte{mustKey(t).Public}) == a {
-		t.Error("an unrelated key set produced the same safety number")
-	}
-}
-
 // TestKeysOnlyAdded is what separates "they added a laptop" from "a key was
 // swapped out", which get very different treatment in the UI.
 func TestKeysOnlyAdded(t *testing.T) {
@@ -199,41 +179,6 @@ func TestMalformedEnvelopesAreRejected(t *testing.T) {
 	}
 }
 
-// TestDeviceMessageRoundTrip covers the linking wire format, including that
-// unknown kinds are rejected rather than half-parsed.
-func TestDeviceMessageRoundTrip(t *testing.T) {
-	a, b := mustKey(t).Public, mustKey(t).Public
-
-	body := EncodeDeviceMessage(DeviceAnnounce, [][32]byte{a})
-	if !IsDeviceMessage(body) {
-		t.Fatal("encoded device message is not recognized as one")
-	}
-	kind, keys, ok := DecodeDeviceMessage(body)
-	if !ok || kind != DeviceAnnounce || len(keys) != 1 || keys[0] != a {
-		t.Fatalf("announce round-trip failed: kind=%q keys=%d ok=%v", kind, len(keys), ok)
-	}
-
-	kind, keys, ok = DecodeDeviceMessage(EncodeDeviceMessage(DeviceShare, [][32]byte{a, b}))
-	if !ok || kind != DeviceShare || len(keys) != 2 {
-		t.Fatalf("share round-trip failed: kind=%q keys=%d ok=%v", kind, len(keys), ok)
-	}
-
-	for _, bad := range []string{
-		"hello, a normal message",
-		deviceMsgPrefix + "bogus:" + EncodeKey(a),
-		deviceMsgPrefix + "announce",
-		deviceMsgPrefix + "announce:not-base64!!",
-	} {
-		if _, _, ok := DecodeDeviceMessage(bad); ok {
-			t.Errorf("malformed device message accepted: %q", bad)
-		}
-	}
-	// A human message must never be mistaken for linking traffic.
-	if IsDeviceMessage("BENCO-DEVICE: is a cool prefix") {
-		t.Error("a plain message was treated as device-linking traffic")
-	}
-}
-
 // TestFingerprintDistinguishesKeys: the code the user compares when approving a
 // device has to actually differ between devices.
 func TestFingerprintDistinguishesKeys(t *testing.T) {
@@ -247,130 +192,5 @@ func TestFingerprintDistinguishesKeys(t *testing.T) {
 	}
 	if len(strings.Fields(fa)) != 4 {
 		t.Errorf("fingerprint %q should be 4 groups", fa)
-	}
-}
-
-// The cap used to truncate by key order. Public keys sort randomly, so that
-// evicted an arbitrary device — including possibly this one, which then could
-// not read messages sent to its own account.
-func TestPickDevicesNeverEvictsThisDevice(t *testing.T) {
-	ours, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys := [][32]byte{ours.Public}
-	seen := map[string]int64{}
-	for i := 0; i < MaxDevices*2; i++ {
-		kp, err := GenerateKeyPair()
-		if err != nil {
-			t.Fatal(err)
-		}
-		keys = append(keys, kp.Public)
-		seen[EncodeKey(kp.Public)] = int64(i) // later index == more recent
-	}
-	// Deliberately the STALEST entry, so recency alone would evict it. Only the
-	// "never drop ourselves" rule can save it.
-	seen[EncodeKey(ours.Public)] = -1
-
-	got := PickDevices(ours.Public, keys, seen)
-	if len(got) != MaxDevices {
-		t.Fatalf("kept %d devices, want the cap of %d", len(got), MaxDevices)
-	}
-	found := false
-	for _, k := range got {
-		if k == ours.Public {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("this device was evicted from its own key set — it could not read its own messages")
-	}
-}
-
-// What survives should be the machines still in use, not an arbitrary subset.
-func TestPickDevicesKeepsMostRecentlySeen(t *testing.T) {
-	ours, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	keys := [][32]byte{ours.Public}
-	seen := map[string]int64{EncodeKey(ours.Public): 1000}
-
-	var stale, fresh [32]byte
-	for i := 0; i < MaxDevices+5; i++ {
-		kp, err := GenerateKeyPair()
-		if err != nil {
-			t.Fatal(err)
-		}
-		keys = append(keys, kp.Public)
-		switch i {
-		case 0:
-			stale = kp.Public
-			seen[EncodeKey(kp.Public)] = 1 // ancient
-		case 1:
-			fresh = kp.Public
-			seen[EncodeKey(kp.Public)] = 9999 // just now
-		default:
-			seen[EncodeKey(kp.Public)] = 500
-		}
-	}
-
-	got := PickDevices(ours.Public, keys, seen)
-	has := func(want [32]byte) bool {
-		for _, k := range got {
-			if k == want {
-				return true
-			}
-		}
-		return false
-	}
-	if !has(fresh) {
-		t.Error("the most recently seen device was evicted")
-	}
-	if has(stale) {
-		t.Error("the least recently seen device survived; eviction is not by recency")
-	}
-}
-
-// Under the cap nothing is dropped, whatever the timestamps say.
-func TestPickDevicesUnderCapKeepsEverything(t *testing.T) {
-	ours, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Sized off the cap rather than a literal, so changing the policy doesn't
-	// make this fail for a reason that has nothing to do with what it tests.
-	want := MaxDevices - 1
-	keys := [][32]byte{ours.Public}
-	for i := 0; i < want-1; i++ {
-		kp, err := GenerateKeyPair()
-		if err != nil {
-			t.Fatal(err)
-		}
-		keys = append(keys, kp.Public)
-	}
-	if got := PickDevices(ours.Public, keys, nil); len(got) != want {
-		t.Errorf("kept %d of %d devices while under the cap", len(got), want)
-	}
-}
-
-// Every device-message kind must survive a round trip. DeviceDeny was defined
-// but missing from the decoder's whitelist, so denials decoded to nothing and
-// were dropped without a trace — the denied device simply stayed signed in.
-func TestDeviceMessageKindsRoundTrip(t *testing.T) {
-	key := [32]byte{1, 2, 3}
-	for _, kind := range []string{DeviceAnnounce, DeviceShare, DeviceDeny} {
-		body := EncodeDeviceMessage(kind, [][32]byte{key})
-		got, keys, ok := DecodeDeviceMessage(body)
-		if !ok {
-			t.Errorf("%s: did not decode", kind)
-			continue
-		}
-		if got != kind {
-			t.Errorf("kind = %q, want %q", got, kind)
-		}
-		if len(keys) != 1 || keys[0] != key {
-			t.Errorf("%s: keys did not survive", kind)
-		}
 	}
 }

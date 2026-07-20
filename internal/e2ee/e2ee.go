@@ -10,11 +10,8 @@
 package e2ee
 
 import (
-	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -66,30 +63,6 @@ func DecodeKey(s string) ([32]byte, error) {
 	}
 	copy(out[:], b)
 	return out, nil
-}
-
-// SafetyNumber derives a stable, human-comparable verification code from two
-// public keys. It defends against a man-in-the-middle on the (server-mediated,
-// trust-on-first-use) key exchange: both parties compute the SAME number, so if
-// they read it to each other out of band and it matches, no third key was
-// substituted in the middle.
-//
-// The input is order-independent — the keys are sorted first — so each side
-// produces the same string regardless of who is "self" and who is "peer". The
-// output is six space-separated groups of five decimal digits, derived from a
-// SHA-256 of the two keys.
-func SafetyNumber(a, b [32]byte) string {
-	x, y := a, b
-	if bytes.Compare(x[:], y[:]) > 0 {
-		x, y = y, x
-	}
-	sum := sha256.Sum256(append(x[:], y[:]...))
-	groups := make([]string, 6)
-	for i := range groups {
-		n := binary.BigEndian.Uint32(sum[i*4:i*4+4]) % 100000
-		groups[i] = fmt.Sprintf("%05d", n)
-	}
-	return strings.Join(groups, " ")
 }
 
 // envelopePrefix marks an encrypted message body. The leading ESC byte makes an

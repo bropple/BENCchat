@@ -203,9 +203,6 @@ const (
 	// typing. Typing is transient and intentionally not stored — it is only ever
 	// broadcast.
 	EventTyping = "typing"
-	// EventDisconnected means the session ended. Message carries nothing; the
-	// reason travels in ScreenName-free form via the bridge.
-	EventDisconnected = "disconnected"
 	// EventNotice is a transient message for the user (e.g. a warning result).
 	EventNotice = "notice"
 	// EventSearchResult delivers a user-search outcome.
@@ -1043,16 +1040,6 @@ func (s *Store) RemoveRoom(cookie string) {
 	delete(s.rooms, cookie)
 	s.mu.Unlock()
 	s.emit(Event{Kind: EventRoomChanged, RoomKey: cookie})
-}
-
-func containsFold(list []string, s string) bool {
-	n := NormalizeScreenName(s)
-	for _, x := range list {
-		if NormalizeScreenName(x) == n {
-			return true
-		}
-	}
-	return false
 }
 
 // Reset clears all state on sign-off.

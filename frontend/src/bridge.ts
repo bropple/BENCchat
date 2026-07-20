@@ -215,8 +215,7 @@ export type StateEventKind =
   | "directoryResult"
   | "conversationsChanged"
   | "roomChanged"
-  | "roomMessage"
-  | "disconnected";
+  | "roomMessage";
 
 /** One user-directory (ODir) search match. */
 export interface DirEntry {
@@ -251,8 +250,6 @@ export interface StateEvent {
 interface AppBindings {
   GetServerSettings(): Promise<ServerSettings>;
   SaveServerSettings(host: string, port: number): Promise<string>;
-  SetTLS(on: boolean, insecure: boolean): Promise<string>;
-  ConnectionSecure(): Promise<boolean>;
   SignIn(screenName: string, password: string, remember: boolean): Promise<string>;
   AutoSignIn(): Promise<void>;
   SignOff(): Promise<void>;
@@ -260,7 +257,6 @@ interface AppBindings {
   GetSelf(): Promise<Self>;
   GetBuddies(): Promise<Buddy[]>;
   GetBuddyIcon(screenName: string): Promise<string>;
-  GetGroups(): Promise<string[]>;
   GetConversation(screenName: string): Promise<Conversation>;
   GetConversations(): Promise<Conversation[]>;
   SendMessage(to: string, text: string): Promise<string>;
@@ -273,7 +269,6 @@ interface AppBindings {
   BlockBuddy(screenName: string): Promise<string>;
   UnblockBuddy(screenName: string): Promise<string>;
   SetAway(message: string): Promise<string>;
-  RequestAwayMessage(screenName: string): Promise<void>;
   RequestUserInfo(screenName: string): Promise<void>;
   SetProfile(text: string): Promise<string>;
   WarnUser(screenName: string, anonymous: boolean): Promise<string>;
@@ -316,11 +311,9 @@ interface AppBindings {
   SetCustomSound(key: string, data: string): Promise<string>;
   GetCustomSounds(): Promise<Record<string, string>>;
   ClearCustomSound(key: string): Promise<string>;
-  ClearCustomSounds(): Promise<string>;
   SetHistoryEnabled(enabled: boolean): Promise<string>;
   SetHistoryRetention(days: number): Promise<string>;
   ClearHistory(): Promise<string>;
-  SetE2EEEnabled(on: boolean): Promise<string>;
   SetTrayNotify(on: boolean): Promise<void>;
   ConversationEncrypted(screenName: string): Promise<boolean>;
   VerificationInfo(screenName: string): Promise<Verification>;
@@ -366,7 +359,6 @@ export const Bridge = {
   getSelf: () => app().GetSelf(),
   getBuddies: () => app().GetBuddies(),
   getBuddyIcon: (screenName: string) => app().GetBuddyIcon(screenName),
-  getGroups: () => app().GetGroups(),
   getConversation: (screenName: string) => app().GetConversation(screenName),
   getConversations: () => app().GetConversations(),
   sendMessage: (to: string, text: string) => app().SendMessage(to, text),
@@ -381,7 +373,6 @@ export const Bridge = {
   blockBuddy: (screenName: string) => app().BlockBuddy(screenName),
   unblockBuddy: (screenName: string) => app().UnblockBuddy(screenName),
   setAway: (message: string) => app().SetAway(message),
-  requestAwayMessage: (screenName: string) => app().RequestAwayMessage(screenName),
   requestUserInfo: (screenName: string) => app().RequestUserInfo(screenName),
   setProfile: (text: string) => app().SetProfile(text),
   warnUser: (screenName: string, anonymous: boolean) =>
@@ -421,8 +412,6 @@ export const Bridge = {
   setSoundEnabled: (enabled: boolean) => app().SetSoundEnabled(enabled),
   setSoundPack: (name: string) => app().SetSoundPack(name),
   setSoundMuted: (key: string, muted: boolean) => app().SetSoundMuted(key, muted),
-  setTLS: (on: boolean, insecure: boolean) => app().SetTLS(on, insecure),
-  connectionSecure: () => app().ConnectionSecure(),
   listDevices: () => app().ListDevices(),
   /** Removing a device rewrites the account's signed device list, so it costs
    *  the recovery key — the same key linking one costs. */
@@ -464,11 +453,9 @@ export const Bridge = {
   setCustomSound: (key: string, data: string) => app().SetCustomSound(key, data),
   getCustomSounds: () => app().GetCustomSounds(),
   clearCustomSound: (key: string) => app().ClearCustomSound(key),
-  clearCustomSounds: () => app().ClearCustomSounds(),
   setHistoryEnabled: (enabled: boolean) => app().SetHistoryEnabled(enabled),
   setHistoryRetention: (days: number) => app().SetHistoryRetention(days),
   clearHistory: () => app().ClearHistory(),
-  setE2EEEnabled: (on: boolean) => app().SetE2EEEnabled(on),
   setTrayNotify: (on: boolean) => app().SetTrayNotify(on),
   conversationEncrypted: (screenName: string) =>
     app().ConversationEncrypted(screenName),

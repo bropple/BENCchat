@@ -9,9 +9,9 @@ package e2ee
 // readily because they are nameable: "otter, anchor, cactus" survives being read
 // aloud in a way "48173 90244" does not.
 //
-// This is a rendering of the SAME digest the digits come from (safetyDigest),
-// not a second, independent code. Both are shown; matching either means the same
-// thing.
+// This is a rendering of the SAME digest the digits come from
+// (identitySafetyDigest), not a second, independent code. Both are shown;
+// matching either means the same thing.
 //
 // # Why eighteen and not seven
 //
@@ -19,9 +19,10 @@ package e2ee
 // sound for what it is — an INTERACTIVE verification, where an attacker has to
 // produce a colliding short string live, during the exchange, with one attempt.
 //
-// A BENCchat safety number is not that. It is static, it describes a key set
-// that persists, and an attacker can grind candidate device keys offline for as
-// long as they like looking for a set that renders the same. At 42 bits that is
+// A BENCchat safety number is not that. It is static, it describes an account
+// identity that persists, and an attacker can grind candidate identity keys
+// offline for as long as they like looking for one that renders the same. At 42
+// bits that is
 // roughly four trillion hashes — hours on one GPU. Copying the count from Matrix
 // without copying its threat model would have quietly cut this from ~100 bits to
 // ~42 and left the UI looking more trustworthy than before.
@@ -68,17 +69,6 @@ var safetyEmojiAlphabet = [64]SafetyEmoji{
 	{"🚂", "train"}, {"🚲", "bicycle"}, {"✈️", "aeroplane"}, {"🚀", "rocket"},
 	{"🏆", "trophy"}, {"⚽", "ball"}, {"🎸", "guitar"}, {"🎺", "trumpet"},
 	{"🔔", "bell"}, {"⚓", "anchor"}, {"🎧", "headphones"}, {"📁", "folder"},
-}
-
-// SafetyEmojiSet renders the same safety number as SafetyNumberSet, as emoji.
-//
-// Returns nil when either side has no keys, matching SafetyNumberSet's caller
-// contract: there is nothing to compare until a key exchange has happened.
-func SafetyEmojiSet(ours, theirs [][32]byte) []SafetyEmoji {
-	if len(ours) == 0 || len(theirs) == 0 {
-		return nil
-	}
-	return emojiFromDigest(safetyDigest(ours, theirs))
 }
 
 // emojiFromDigest reads six bits at a time off the digest, most significant

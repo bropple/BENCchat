@@ -18,7 +18,8 @@ import (
 // That also means a member serving catch-up history could invent it wholesale.
 //
 // Each device therefore has an Ed25519 signing key alongside its X25519
-// encryption key, published in the same profile marker. Every room message
+// encryption key, both named by the same entry in the account's signed device
+// manifest and served from the key directory. Every room message
 // carries a signature over the room name and the plaintext, made with the
 // sender's signing key, and recipients check it against the keys the claimed
 // sender publishes.

@@ -610,38 +610,77 @@ cleared everything (`app.go:742-759`).
 
 ## 11. Known dead code and stale comments
 
-Found while writing this. None are urgent; all are the kind of thing that makes
-the codebase read as larger and more mysterious than it is.
+The inventory that used to live here has been acted on: everything it listed is
+now either deleted or deliberately kept, and the reasons are below rather than
+in a commit message.
 
-**Dead:**
-- `oscar.Dial` (`internal/oscar/transport.go:79`) — no call sites; everything
-  dials through `Transport.dial`.
-- `Transport.PinAddress` — implemented and tested, never set by production code.
-- `EventDisconnected` (`state.go:206-208`) — declared, never emitted, no handler.
-- `containsFold` (`state.go:1048-1056`) — never called.
-- `BuddyList.Blocked` — populated in `internal/oscar`, never read outside it, so
-  a blocked non-buddy is invisible to the state layer.
-- `ICBMEventGone` — defined, never sent.
-- `ICBMHostAck` — requested on every send, never handled.
-- Bound to JS but absent from `bridge.ts` entirely: `ForgetOtherDevices`,
-  `DeviceCount` (whose doc comment says it exists "so the settings panel can
-  show it"; the settings panel does not call it).
-- In `bridge.ts` but never called by any UI code: `getGroups`,
-  `requestAwayMessage`, `setTLS`, `connectionSecure`, `clearCustomSounds`,
-  `setE2EEEnabled`. The last three track features that were deliberately made
-  non-optional — the Go method and the binding outlived the UI that called them.
-- `e2ee.SafetyNumber` (single-key, `e2ee.go:80`) — production uses
-  `SafetyNumberSet`.
+**Removed.** The key-directory v2 / cross-signing port orphaned the whole v1
+device-linking mechanism, and it is gone:
 
-**Stale:**
-- `internal/oscar/transport.go:53-54` says *"The OSCAR server is plain TCP with
-  no TLS handshake"* — beside the timeout constant used by both dial paths,
-  including the TLS one. The deployment is TLS-only.
-- `app_e2ee.go:700` — the `DeviceShare` handler calls `publishProfile()`, which
-  used to publish the merged device list via the profile marker and now publishes
-  only the bio. Not a live bug (the approving device already publishes the merged
-  list at `:933`, and every device republishes itself on sign-on), but the call
-  no longer does what it was written to do.
+- The device-message channel — self-addressed unencrypted IMs carrying
+  announce/share/deny. `Client.SendDeviceMessage`,
+  `Client.SetDeviceMessageHandler`, `Client.handleDeviceMessage` and its
+  dispatch in `handleICBM`; in `internal/e2ee`, the `DeviceAnnounce` /
+  `DeviceShare` / `DeviceDeny` constants, `EncodeDeviceMessage`,
+  `DecodeDeviceMessage`, `IsDeviceMessage` and the `deviceMsgPrefix`.
+- `e2ee.PickDevices` and its `dedupeAll` helper — recency-based eviction over a
+  raw key set. Device removal is now a signed manifest at counter+1
+  (`app_identity.go`), which evicts by name rather than by policy.
+- The device-set safety numbers: `SafetyNumberSet`, `SafetyEmojiSet` and the
+  shared `safetyDigest` (plus `flatten`), superseded by `IdentitySafetyNumber` /
+  `IdentitySafetyEmoji`. Also `e2ee.SafetyNumber`, the original single-key
+  version, which nothing but its own test had called for some time.
+- `oscar.Dial` — every dial goes through `Transport.dial`. Its three apparent
+  references were its own definition, its own doc comment, and a mention in
+  `NewConn`'s comment.
+- `state.containsFold`, `state.EventDisconnected` (and the `"disconnected"` arm
+  of the `StateEventKind` union in `bridge.ts`, which had no `case` in
+  `handleStateEvent`), `wire.ICBMEventGone`, `wire.ICBMHostAck`.
+- Wails methods bound to JS with no caller left in `frontend/src`, removed on
+  both sides: `GetGroups`, `RequestAwayMessage`, `SetTLS`, `ConnectionSecure`,
+  `ClearCustomSounds`, `SetE2EEEnabled`, and `DeviceCount` (which was never in
+  `bridge.ts` at all). `SetTLS` and `SetE2EEEnabled` were the only writers of
+  `cfg.TLSEnabled` and `cfg.E2EEEnabled`; both are `*bool` defaulting to ON, and
+  both fields are still read, so the settings survive as hand-editable config
+  and nothing about the running program changed. `Client.RequestAwayMessage`
+  went with its only caller; `oscar.Session.RequestAwayMessage` stays, and stays
+  live-tested.
+
+**Kept, deliberately.** These have no production caller and are staying anyway:
+
+- `Transport.PinAddress` — read by `Transport.redirect`, but never set true
+  outside a live test. It is the switch that makes the client reachable through
+  a tunnel or proxy that is not on the host the server advertises for BOS, which
+  is exactly how the Management API is reached per `CLAUDE.md`. Deleting a
+  documented, live-exercised transport option to save a struct field would cost
+  more than it saves.
+- `BuddyList.Blocked` (`internal/oscar/feedbag.go:31`) — the deny-list screen
+  names. The per-buddy `BuddyEntry.Blocked` flag IS live (it reaches the store
+  via `client.go` and the UI as `blocked`); the list field is the only record of
+  deny-list entries that are not also buddies, and `internal/oscar/live_test.go`
+  asserts against it to prove a block actually reached the server. Wiring it
+  through to the Store is a feature, not a deletion, so it is still true that a
+  blocked non-buddy is invisible to the state layer.
+- `state.Store.Groups()` and `Client.Secure()` — caller-free after the bindings
+  above went, but both are part of the layer `CLAUDE.md` says a headless
+  consumer binds to, and `Client.Secure()` is what the live TLS sign-on tests
+  assert on.
+- `TestLiveSelfMessageRelay` — the server property it probes is real and
+  undocumented upstream, so it is kept with its premise corrected; BENCchat no
+  longer uses self-addressed relay for anything.
+
+**Stale comments fixed.** `transport.go`'s "the OSCAR server is plain TCP with
+no TLS handshake" beside `dialTimeout` (both dial paths use it, and the
+deployment is TLS-only); `roomsign.go` claiming signing keys are "published in
+the same profile marker" (they are named in the signed manifest and served from
+the key directory); the same profile-marker claim in `TestLiveRoomHost`'s
+header; two comments in `identity.go` and one in `app_keydir.go` that explained
+themselves by naming functions this pass deleted — the explanations were kept
+and the references reworded. Removing `SetTLS` also reunited an orphaned
+`SaveServerSettings` doc comment with the function it documents.
+
+The `app_e2ee.go` `DeviceShare` handler previously noted here no longer exists;
+the cross-signing port removed it.
 
 ---
 

@@ -49,7 +49,6 @@ const (
 // Typing notification events (SNAC 0x04,0x14). The server defines no constants
 // and never inspects the value; these are the conventional OSCAR ones.
 const (
-	ICBMEventGone   uint16 = 0x0000
 	ICBMEventTyped  uint16 = 0x0001
 	ICBMEventTyping uint16 = 0x0002
 )

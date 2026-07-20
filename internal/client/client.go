@@ -66,8 +66,6 @@ type Client struct {
 	onPeerKey func(screenName string, keys, prev [][32]byte)
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
-	// onDeviceMessage handles device-linking traffic from our own other sessions.
-	onDeviceMessage func(kind string, keys [][32]byte)
 	// keyDirWait correlates device key directory replies to their requests.
 	// Keyed by request ID because several queries can be outstanding at once —
 	// one per peer whose keys we want. See keydir.go.
@@ -312,22 +310,6 @@ func (c *Client) UnblockBuddy(screenName string) error {
 	return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
 		return s.UnblockBuddy(screenName)
 	})
-}
-
-// RequestAwayMessage fetches a buddy's away message. The result arrives
-// asynchronously and lands on the buddy in the store. Failures are logged, not
-// returned — a missing away message is not worth interrupting the UI over.
-func (c *Client) RequestAwayMessage(screenName string) {
-	c.mu.Lock()
-	session := c.session
-	c.mu.Unlock()
-
-	if session == nil {
-		return
-	}
-	if err := session.RequestAwayMessage(screenName); err != nil {
-		c.log.Debug("away-message request failed", "err", err)
-	}
 }
 
 // SetProfile sets our profile text.
@@ -659,13 +641,6 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		at := msg.SentAt
 		if at.IsZero() {
 			at = time.Now()
-		}
-		// Device-linking traffic is machine-to-machine chatter between this
-		// account's own sessions. It must be intercepted before anything stores
-		// it, or the user sees protocol noise in a conversation with themselves.
-		if c.isSelf(msg.From) && e2ee.IsDeviceMessage(msg.Text) {
-			c.handleDeviceMessage(msg.Text)
-			return
 		}
 		// The server sends its own notices (offline-message counts,
 		// multi-instance sign-on) as ordinary IMs from a reserved screen name.

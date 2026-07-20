@@ -3,7 +3,6 @@ package main
 import (
 	"log/slog"
 
-	"github.com/benco-holdings/benchat/internal/config"
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/secret"
 	"github.com/benco-holdings/benchat/internal/state"
@@ -212,34 +211,6 @@ func (a *App) publishProfile() {
 	if a.client.SignedOn() {
 		_ = a.client.SetProfile(a.wireProfile())
 	}
-}
-
-// SetE2EEEnabled turns opt-in end-to-end encryption on or off. Enabling
-// generates this device's keypair if needed and re-runs the identity flow, since
-// an account with no identity has to bootstrap one before anything can be
-// published. Returns an error string on failure.
-func (a *App) SetE2EEEnabled(on bool) string {
-	a.cfg.E2EEEnabled = &on
-	if on && !a.e2eeHasKey {
-		kp, err := e2ee.GenerateKeyPair()
-		if err != nil {
-			return err.Error()
-		}
-		if serr := secret.StorePrivateKey(a.currentAccount(), e2ee.EncodeKey(kp.Private)); serr != nil {
-			slog.Default().Warn("could not save E2EE key", "err", serr)
-		}
-		a.e2eePub, a.e2eeHasKey = kp.Public, true
-		a.client.SetE2EEKeyPair(kp, true)
-	}
-	a.client.SetE2EEOn(on && a.e2eeHasKey)
-	_ = config.Save(a.cfg)
-	if on && a.client.SignedOn() {
-		go a.setupIdentity()
-	} else {
-		a.setIdentityFlow("unavailable")
-		a.publishProfile()
-	}
-	return ""
 }
 
 // ConversationEncrypted reports whether messages to a buddy will currently be

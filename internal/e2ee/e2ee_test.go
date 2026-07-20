@@ -105,42 +105,6 @@ func TestStripMarkerHidesLegacyV1(t *testing.T) {
 	}
 }
 
-func TestSafetyNumberSymmetricAndStable(t *testing.T) {
-	alice, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	bob, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Order-independent: both parties compute the same number regardless of which
-	// key they treat as "self".
-	if SafetyNumber(alice.Public, bob.Public) != SafetyNumber(bob.Public, alice.Public) {
-		t.Fatal("SafetyNumber is not order-independent")
-	}
-	// Stable across calls.
-	if SafetyNumber(alice.Public, bob.Public) != SafetyNumber(alice.Public, bob.Public) {
-		t.Fatal("SafetyNumber is not stable")
-	}
-
-	// A different peer key yields a different number (MITM detection).
-	mallory, err := GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if SafetyNumber(alice.Public, bob.Public) == SafetyNumber(alice.Public, mallory.Public) {
-		t.Fatal("SafetyNumber collided across different peer keys")
-	}
-
-	// Shape: six groups of five digits.
-	sn := SafetyNumber(alice.Public, bob.Public)
-	if got := len(sn); got != 6*5+5 { // 6 groups, 5 digits each, 5 separators
-		t.Fatalf("SafetyNumber %q has length %d, want %d", sn, got, 6*5+5)
-	}
-}
-
 func containsPlaintext(env, needle string) bool {
 	for i := 0; i+len(needle) <= len(env); i++ {
 		if env[i:i+len(needle)] == needle {

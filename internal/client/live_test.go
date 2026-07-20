@@ -666,7 +666,6 @@ func TestLiveE2EEDriver(t *testing.T) {
 		t.Logf("no E2EE key published by %q yet — is encryption enabled on that side?", target)
 	} else {
 		t.Logf("learned %q's key(s): %s", target, e2ee.EncodeKeys(peer))
-		t.Logf("SAFETY NUMBER (both sides must match):\n\t%s", e2ee.SafetyNumberSet([][32]byte{kp.Public}, peer))
 		t.Logf("CanEncryptTo(%q) = %v", target, c.CanEncryptTo(target))
 	}
 
@@ -751,9 +750,11 @@ func TestLiveSelfLookupIsInstanceScoped(t *testing.T) {
 // TestLiveSelfMessageRelay asks whether the server relays an instant message
 // addressed to your OWN account to your other signed-on sessions.
 //
-// If it does, devices can link themselves: a new machine announces its public
-// key over the account's own message channel and an existing machine merges it,
-// with no codes to copy by hand. If it doesn't, linking has to be manual. Run:
+// BENCchat no longer uses this for anything: device linking is cross-signing
+// against the key directory, and the announce/share/deny message channel this
+// question was asked for is gone. Kept because the server property is real,
+// undocumented upstream, and cheap to re-confirm before anything else is built
+// on it. Run:
 //
 //	BENCCHAT_LIVE_SERVER=... SCREENNAME=... PASSWORD=... \
 //	go test ./internal/client/ -run TestLiveSelfMessageRelay -v -timeout 120s
@@ -816,126 +817,6 @@ func TestLiveSelfMessageRelay(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Log("the sending device did not receive its own message")
 	}
-}
-
-// TestLiveDeviceLinkHandshake runs the whole linking flow between two live
-// sessions on one account: device B announces itself, device A (standing in for
-// the user clicking Approve) merges and shares back the full list, and B ends up
-// knowing both devices. Finally a peer-style send to the merged set is checked
-// to be readable on both machines — the actual point of the exercise. Run:
-//
-//	BENCCHAT_LIVE_SERVER=... SCREENNAME=... PASSWORD=... \
-//	go test ./internal/client/ -run TestLiveDeviceLinkHandshake -v -timeout 120s
-func TestLiveDeviceLinkHandshake(t *testing.T) {
-	addr, sn, pw := liveCreds(t)
-
-	type device struct {
-		c    *Client
-		key  e2ee.KeyPair
-		msgs chan struct {
-			kind string
-			keys [][32]byte
-		}
-	}
-	signOn := func(label string) *device {
-		kp, err := e2ee.GenerateKeyPair()
-		if err != nil {
-			t.Fatal(err)
-		}
-		store := state.NewStore()
-		c := New(store, nil)
-		c.SetE2EEKeyPair(kp, true)
-		c.SetE2EEOn(true)
-		d := &device{c: c, key: kp, msgs: make(chan struct {
-			kind string
-			keys [][32]byte
-		}, 8)}
-		c.SetDeviceMessageHandler(func(kind string, keys [][32]byte) {
-			select {
-			case d.msgs <- struct {
-				kind string
-				keys [][32]byte
-			}{kind, keys}:
-			default:
-			}
-		})
-		if err := c.SignOn(context.Background(), addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
-			t.Fatalf("%s SignOn: %v", label, err)
-		}
-		return d
-	}
-
-	deviceA := signOn("device A (existing)")
-	defer func() { _ = deviceA.c.SignOff() }()
-	deviceB := signOn("device B (new)")
-	defer func() { _ = deviceB.c.SignOff() }()
-	time.Sleep(time.Second)
-
-	// B announces itself, as it would on sign-on.
-	if err := deviceB.c.SendDeviceMessage(e2ee.DeviceAnnounce, [][32]byte{deviceB.key.Public}); err != nil {
-		t.Fatalf("device B announce: %v", err)
-	}
-
-	// A should hear it. (It also reaches B's own session; that echo is ignored
-	// by the app layer, and here we simply read A's copy.)
-	var announced [][32]byte
-	deadline := time.After(15 * time.Second)
-	for announced == nil {
-		select {
-		case m := <-deviceA.msgs:
-			if m.kind == e2ee.DeviceAnnounce && len(m.keys) == 1 && m.keys[0] == deviceB.key.Public {
-				announced = m.keys
-			}
-		case <-deadline:
-			t.Fatal("device A never received device B's announcement")
-		}
-	}
-	t.Logf("device A received the announcement, fingerprint %s", e2ee.Fingerprint(announced[0]))
-
-	// The user approves on A: A shares the full device list back.
-	full := [][32]byte{deviceA.key.Public, deviceB.key.Public}
-	if err := deviceA.c.SendDeviceMessage(e2ee.DeviceShare, full); err != nil {
-		t.Fatalf("device A share: %v", err)
-	}
-
-	var shared [][32]byte
-	deadline = time.After(15 * time.Second)
-	for shared == nil {
-		select {
-		case m := <-deviceB.msgs:
-			if m.kind == e2ee.DeviceShare && len(m.keys) == 2 {
-				shared = m.keys
-			}
-		case <-deadline:
-			t.Fatal("device B never received the shared device list")
-		}
-	}
-	var sawA, sawB bool
-	for _, k := range shared {
-		sawA = sawA || k == deviceA.key.Public
-		sawB = sawB || k == deviceB.key.Public
-	}
-	if !sawA || !sawB {
-		t.Fatalf("shared list is incomplete (A=%v B=%v)", sawA, sawB)
-	}
-	t.Log("device B learned the full device list — linking completed with no codes typed")
-
-	// The payoff: a message encrypted to the linked set is readable on both.
-	peer, err := e2ee.GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	env, err := e2ee.SealFor("readable on every linked device", shared, peer.Private)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, kp := range map[string]e2ee.KeyPair{"device A": deviceA.key, "device B": deviceB.key} {
-		got, oerr := e2ee.OpenAny(env, peer.Public, kp.Private)
-		if oerr != nil || got != "readable on every linked device" {
-			t.Errorf("%s could not read the message: %q %v", name, got, oerr)
-		}
-	}
-	t.Log("both linked devices decrypt the same message")
 }
 
 // TestLiveTLSSignOn signs on to the real server through a local TLS proxy —
@@ -1458,8 +1339,9 @@ func TestLiveSignedRoomMessage(t *testing.T) {
 // TestLiveRoomHost is the reverse of the earlier room driver: bob CREATES
 // an encrypted room, invites the human, and hosts it.
 //
-// It publishes a v3 profile marker (encryption key plus signing key) so the
-// invitee's client can both encrypt to it and verify its room messages. Run:
+// It publishes a signed device manifest naming both this device's encryption
+// key and its signing key, so the invitee's client can both encrypt to it and
+// verify its room messages. Run:
 //
 //	BENCCHAT_LIVE_ROOM_HOST=1 BENCCHAT_LIVE_TARGET=alice BENCCHAT_LIVE_LISTEN_SECS=1200 \
 //	BENCCHAT_LIVE_TLS_SERVER=oscar.example.com:5191 \
@@ -1730,7 +1612,6 @@ func TestLiveDeviceWatch(t *testing.T) {
 		t.Fatalf("SetProfile: %v", err)
 	}
 	publishSelfDevices(t, c, e2ee.Device{Box: kp.Public})
-	ours := [][32]byte{kp.Public}
 
 	// Learn the target's keys BEFORE the opening DM. SendMessage falls back to
 	// plaintext for a peer whose keys we don't hold yet, so sending first sends
@@ -1781,9 +1662,7 @@ func TestLiveDeviceWatch(t *testing.T) {
 			}
 			t.Logf("CHANGE: %d -> %d device key(s); classified as %s",
 				len(last), len(keys), verdict)
-			t.Logf("  old safety number: %s", e2ee.SafetyNumberSet(ours, last))
 		}
-		t.Logf("  new safety number: %s", e2ee.SafetyNumberSet(ours, keys))
 		t.Logf("  keys: %s", e2ee.EncodeKeys(keys))
 		last = keys
 	}

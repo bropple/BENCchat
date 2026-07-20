@@ -2,6 +2,7 @@ package e2ee
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"errors"
 	"testing"
 )
@@ -175,8 +176,9 @@ func TestIdentitySafetyNumberIsOrderIndependentAndDeviceStable(t *testing.T) {
 	}
 
 	// Adding devices under the same identities must not move either rendering.
-	// This is exactly what SafetyNumberSet cannot promise, and the reason for
-	// the whole cross-signing design.
+	// This is exactly what the old device-set safety number could not promise —
+	// it rehashed both sides' key sets, so any new machine moved it — and it is
+	// the reason for the whole cross-signing design.
 	for i := 0; i < 3; i++ {
 		if _, err := GenerateKeyPair(); err != nil { // stand-in for a new device
 			t.Fatalf("device keypair: %v", err)
@@ -195,22 +197,6 @@ func TestIdentitySafetyNumberIsOrderIndependentAndDeviceStable(t *testing.T) {
 	}
 }
 
-// Device-set safety numbers churn on device addition. Asserted here so the
-// contrast is recorded, and so that a later pass that switches the app over has
-// a test proving what it fixed.
-func TestDeviceSetSafetyNumberChurnsWhereIdentityDoesNot(t *testing.T) {
-	a, _ := GenerateKeyPair()
-	b, _ := GenerateKeyPair()
-	extra, _ := GenerateKeyPair()
-
-	before := SafetyNumberSet([][32]byte{a.Public}, [][32]byte{b.Public})
-	after := SafetyNumberSet([][32]byte{a.Public, extra.Public}, [][32]byte{b.Public})
-	if before == after {
-		t.Fatal("device-set safety number did not change on device addition; " +
-			"if this now holds, the identity-based version has nothing to fix")
-	}
-}
-
 func TestIdentitySafetyRenderingsRejectMissingKeys(t *testing.T) {
 	kp, _ := GenerateIdentityKey()
 	defer kp.Zero()
@@ -223,18 +209,19 @@ func TestIdentitySafetyRenderingsRejectMissingKeys(t *testing.T) {
 	}
 }
 
-// The domain prefix exists so an identity digest can never coincide with a
-// device-set digest over the same two 32-byte blobs. Without it a one-device
-// account's number and an identity number would be the same string, and during
-// the transition both are on screen.
-func TestIdentityDigestIsDomainSeparatedFromDeviceSet(t *testing.T) {
+// The domain prefix is what stops an identity digest from being a plain hash of
+// two 32-byte key blobs. It originally guarded against colliding with the
+// device-set safety number, which is gone; the prefix stays because removing it
+// would move every number already shown to a user, so it still needs a test.
+func TestIdentityDigestIsDomainSeparated(t *testing.T) {
 	var a, b [32]byte
 	a[0], b[0] = 1, 2
 
-	deviceDigest := safetyDigest([][32]byte{a}, [][32]byte{b})
+	// The same two keys, ordered the same way, hashed without the prefix.
+	undomained := sha256.Sum256(append(append([]byte{}, a[:]...), b[:]...))
 	identityDigest := identitySafetyDigest(ed25519.PublicKey(a[:]), ed25519.PublicKey(b[:]))
 
-	if deviceDigest == identityDigest {
-		t.Fatal("identity digest collides with the device-set digest over the same keys")
+	if undomained == identityDigest {
+		t.Fatal("identity digest is a bare hash of the two keys; the domain prefix is not being applied")
 	}
 }

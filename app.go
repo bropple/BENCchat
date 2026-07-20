@@ -272,21 +272,6 @@ func (a *App) GetServerSettings() ServerSettings {
 
 // SaveServerSettings persists a new server address. Returns an error string
 // (empty on success) so the frontend can show it inline.
-// SetTLS turns TLS on or off for future connections. insecure disables
-// certificate verification and is for testing against a self-signed server
-// only — it defeats the point of TLS, so the UI must label it as such.
-func (a *App) SetTLS(on, insecure bool) string {
-	a.cfg.TLSEnabled = &on
-	a.cfg.TLSInsecure = on && insecure
-	if err := config.Save(a.cfg); err != nil {
-		return err.Error()
-	}
-	return ""
-}
-
-// ConnectionSecure reports whether the live session is encrypted in transit.
-func (a *App) ConnectionSecure() bool { return a.client.Secure() }
-
 func (a *App) SaveServerSettings(host string, port int) string {
 	if host == "" {
 		return "server host cannot be empty"
@@ -534,9 +519,6 @@ func (a *App) GetBuddyIcon(screenName string) string {
 	return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data)
 }
 
-// GetGroups returns the buddy-list group names in list order.
-func (a *App) GetGroups() []string { return a.store.Groups() }
-
 // GetConversation returns one message thread. A thread that hasn't been started
 // yet returns empty rather than an error — opening a new chat window is normal.
 func (a *App) GetConversation(screenName string) state.Conversation {
@@ -618,10 +600,6 @@ func (a *App) SetAway(message string) string {
 	}
 	return ""
 }
-
-// RequestAwayMessage asks for a buddy's away message. The result arrives as a
-// state:event updating that buddy, so this returns nothing.
-func (a *App) RequestAwayMessage(screenName string) { a.client.RequestAwayMessage(screenName) }
 
 // RequestUserInfo fetches a buddy's profile and away message; results arrive as
 // state:events.

@@ -1,8 +1,6 @@
 package client
 
 import (
-	"errors"
-
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/oscar"
 	"github.com/benco-holdings/benchat/internal/state"
@@ -197,46 +195,4 @@ func (c *Client) setLocateCapsProbe(fn func(screenName string, caps []oscar.Capa
 	c.e2eeMu.Lock()
 	c.locateCapsProbe = fn
 	c.e2eeMu.Unlock()
-}
-
-// SetDeviceMessageHandler registers the handler for device-linking traffic
-// arriving from this account's other sessions.
-func (c *Client) SetDeviceMessageHandler(fn func(kind string, keys [][32]byte)) {
-	c.e2eeMu.Lock()
-	c.onDeviceMessage = fn
-	c.e2eeMu.Unlock()
-}
-
-func (c *Client) handleDeviceMessage(body string) {
-	kind, keys, ok := e2ee.DecodeDeviceMessage(body)
-	if !ok {
-		return
-	}
-	c.e2eeMu.Lock()
-	fn := c.onDeviceMessage
-	c.e2eeMu.Unlock()
-	if fn != nil {
-		fn(kind, keys)
-	}
-}
-
-// SendDeviceMessage sends device-linking traffic to our own account, which the
-// server relays to every other signed-on session.
-//
-// Deliberately bypasses SendMessage: it must not be encrypted (a device that
-// hasn't linked yet is precisely the one whose key nobody holds) and must not
-// be recorded as a conversation message.
-func (c *Client) SendDeviceMessage(kind string, keys [][32]byte) error {
-	c.mu.Lock()
-	session := c.session
-	c.mu.Unlock()
-	if session == nil {
-		return errors.New("client: not signed on")
-	}
-	self := c.store.Self().ScreenName
-	if self == "" {
-		return errors.New("client: own screen name unknown")
-	}
-	_, err := session.SendMessage(self, e2ee.EncodeDeviceMessage(kind, keys), false)
-	return err
 }

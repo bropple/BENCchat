@@ -544,13 +544,6 @@ func (a *App) ListDevices() []DeviceInfo {
 	return out
 }
 
-// DeviceCount reports how many devices the account's manifest names.
-func (a *App) DeviceCount() int {
-	a.trustMu.Lock()
-	defer a.trustMu.Unlock()
-	return len(a.e2eeDevices)
-}
-
 // RemoveDevice takes a machine off the account.
 //
 // Removal is no longer a server-side tombstone. It is a new manifest at a higher
