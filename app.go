@@ -73,6 +73,9 @@ type App struct {
 	linkPrompted map[[32]byte]bool
 	linkDeclined map[[32]byte]bool
 	linkPending  bool
+	// announcedDevices maps a device's displayed code to its key, for linking
+	// by code — a fingerprint is a hash and cannot be reversed.
+	announcedDevices map[string][32]byte
 	// linkNoticeShown ensures ONE explanation per sign-on for why this device
 	// cannot read encrypted messages; "new" and "removed" describe one state.
 	linkNoticeShown bool

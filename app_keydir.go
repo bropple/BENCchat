@@ -48,13 +48,13 @@ func (a *App) ownPublishedKeys() (keys [][32]byte, has bool, ok bool) {
 // profile marker. The marker is transitional: a peer running an older BENCchat
 // reads only profiles, and dropping it would make this account unreachable to
 // them. It can go once every client speaks the directory.
-func (a *App) publishDevices(boxKeys [][32]byte) (selfRefused bool) {
+func (a *App) publishDevices(boxKeys [][32]byte) (accepted int, selfRefused bool) {
 	// The profile is written regardless — it is also where the away message and
 	// user-visible profile text live, so this is not purely about keys.
 	a.publishProfile()
 
 	if !a.client.SupportsKeyDir() {
-		return false
+		return len(boxKeys), false
 	}
 
 	// Only this device's signing key is ours to publish. We learned other
@@ -69,10 +69,10 @@ func (a *App) publishDevices(boxKeys [][32]byte) (selfRefused bool) {
 		devices = append(devices, d)
 	}
 
-	refused, ok := a.client.PublishDevices(devices)
+	accepted, refused, ok := a.client.PublishDevices(devices)
 	if !ok {
 		slog.Default().Warn("could not publish device keys to the directory; the profile marker still carries them")
-		return false
+		return len(boxKeys), false
 	}
 
 	// A refused key is a device the user removed announcing itself again. The
@@ -84,29 +84,7 @@ func (a *App) publishDevices(boxKeys [][32]byte) (selfRefused bool) {
 		}
 		a.onRevokedDeviceReturned(d.Box)
 	}
-	return selfRefused
-}
-
-// publishedDeviceCount reports how many devices the SERVER actually holds.
-//
-// The local list is what we tried to publish, which is not the same thing once
-// the server starts refusing revoked keys. Announcing "this account has 3
-// devices" in the same breath as two of them being refused is worse than saying
-// nothing, so this asks rather than assumes. Falls back to the local count when
-// the directory is unavailable, where the local list IS the best answer.
-func (a *App) publishedDeviceCount(localCount int) int {
-	if !a.client.SupportsKeyDir() {
-		return localCount
-	}
-	self := a.store.Self().ScreenName
-	if self == "" {
-		return localCount
-	}
-	devices, ok := a.client.QueryDevices(self)
-	if !ok {
-		return localCount
-	}
-	return len(devices)
+	return accepted, selfRefused
 }
 
 // onRevokedDeviceReturned handles a removed device reappearing.

@@ -229,6 +229,16 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. Remove one you no longer use — senders will stop encrypting to it.</p>
                 <div class="settings__devices" id="deviceList"></div>
 
+                <div class="settings__link-by-code">
+                  <label class="benco-caption" for="linkCodeInput">Link a device by its code</label>
+                  <div class="settings__link-by-code-row">
+                    <input type="text" id="linkCodeInput" class="benco-input"
+                           placeholder="00000 00000 00000 00000" autocomplete="off" spellcheck="false" />
+                    <button class="benco-button" id="linkCodeBtn">Link</button>
+                  </div>
+                  <p class="benco-caption settings__hint">The other device shows this code when it can't read encrypted messages. Use this when you missed its pop-up, or to <strong>restore a device you removed</strong> — approving it here undoes the removal. Compare the code on both screens before linking: it is what proves the device is yours.</p>
+                </div>
+
                 <p class="benco-caption settings__hint"><strong>On by default.</strong> Messages between BENCchat users are encrypted end-to-end automatically (look for the 🔒). Clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. Your keys stay in this device's keychain. Group chats are <em>not</em> covered. Metadata — who you talk to and when — is hidden from the network by TLS above, but is still visible to the server itself.</p>
               </section>
             </div>
@@ -518,6 +528,35 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
           </div>`,
         )
         .join("");
+      // Linking by code is the only route that does not depend on catching the
+      // other device's live announcement — which is exactly the case a user hits
+      // after dismissing the pop-up, or when re-approving a device they removed.
+      const linkInput = overlay.querySelector<HTMLInputElement>("#linkCodeInput");
+      const linkBtn = overlay.querySelector<HTMLButtonElement>("#linkCodeBtn");
+      if (linkInput && linkBtn && !linkBtn.dataset.wired) {
+        linkBtn.dataset.wired = "1";
+        const submit = async () => {
+          const code = linkInput.value.trim();
+          if (!code) return;
+          linkBtn.disabled = true;
+          try {
+            const err = await Bridge.approveDeviceByCode(code);
+            if (err) {
+              void alertDialog(err, { title: "Could not link that device" });
+              return;
+            }
+            linkInput.value = "";
+            void renderDevices();
+          } finally {
+            linkBtn.disabled = false;
+          }
+        };
+        linkBtn.addEventListener("click", () => void submit());
+        linkInput.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") void submit();
+        });
+      }
+
       for (const btn of deviceListEl.querySelectorAll<HTMLButtonElement>(".settings__device-remove")) {
         btn.addEventListener("click", async () => {
           const ok = await confirmDialog(

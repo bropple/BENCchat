@@ -214,7 +214,8 @@ func (a *App) publishAfterDeviceCheck() {
 	// publishDevices reports whether THIS device was refused, which means it was
 	// removed rather than merely new — a different situation needing different
 	// words, already explained by onRevokedDeviceReturned.
-	if wasRefused := a.publishDevices(devices); notLinked && !wasRefused {
+	accepted, wasRefused := a.publishDevices(devices)
+	if notLinked && !wasRefused {
 		a.notifyNotLinked()
 	}
 	// Say hello to any other session on this account, so a new machine can be
@@ -224,7 +225,11 @@ func (a *App) publishAfterDeviceCheck() {
 	// Count what the SERVER accepted, not what we hoped to publish. Reporting
 	// the local list meant announcing "3 devices" in the same breath as the
 	// server refusing two of them, which is worse than saying nothing.
-	if n := a.publishedDeviceCount(len(devices)); n > 1 {
+	// The publish reply already says how many the server stored, so this needs
+	// no second round trip — and the extra query it replaces was racing the very
+	// publish it was meant to report on, which is how "2 devices" appeared in
+	// the same breath as one of them being refused.
+	if n := accepted; n > 1 {
 		a.store.Notify(state.NoticeInfo, fmt.Sprintf(
 			"This account has %d devices set up for encryption. Messages sent to you are "+
 				"encrypted to all of them.", n))
@@ -646,6 +651,13 @@ func (a *App) handleDeviceMessage(kind string, keys [][32]byte) {
 			a.shareDeviceList()
 			return
 		}
+		// Remember it regardless of whether we prompt. A fingerprint is a hash
+		// and cannot be reversed, so linking by code later can only work against
+		// keys actually seen — and the cases that need it most (the pop-up was
+		// dismissed, or suppressed because this device was prompted earlier) are
+		// exactly the ones where the announcement arrived and the dialog did not.
+		a.rememberAnnouncedDevice(newKey)
+
 		// Ask once per device per session. A sibling that announces again —
 		// reconnecting, or an auto-login racing a manual sign-on — must not
 		// stack a second dialog on top of the one already open, which is how
@@ -888,4 +900,59 @@ func (a *App) ApproveDevice(keyB64 string) string {
 	a.shareDeviceList()
 	a.store.Notify(state.NoticeInfo, "Device linked. Messages will now be encrypted to it as well.")
 	return ""
+}
+
+// rememberAnnouncedDevice records a device key seen in an announcement, keyed by
+// the code the user is shown.
+func (a *App) rememberAnnouncedDevice(k [32]byte) {
+	a.linkMu.Lock()
+	defer a.linkMu.Unlock()
+	if a.announcedDevices == nil {
+		a.announcedDevices = map[string][32]byte{}
+	}
+	a.announcedDevices[normalizeDeviceCode(e2ee.Fingerprint(k))] = k
+}
+
+// normalizeDeviceCode strips the grouping so a code typed with different spacing
+// still matches what was displayed.
+func normalizeDeviceCode(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// ApproveDeviceByCode links a device identified by the code it displays.
+//
+// The pop-up is the usual route, but it depends on catching a live announcement:
+// dismiss it, or be on a device that was already prompted this session, and
+// there is no way back. Both notices tell the user to approve from another
+// device, so there has to be somewhere to do that.
+//
+// It resolves against announcements seen this session rather than reversing the
+// code, which is impossible — the code is a hash of the key.
+func (a *App) ApproveDeviceByCode(code string) string {
+	want := normalizeDeviceCode(code)
+	if want == "" {
+		return "Enter the code shown on the other device."
+	}
+	if want == normalizeDeviceCode(e2ee.Fingerprint(a.e2eePub)) {
+		return "That's this device's own code — enter the code shown on the other one."
+	}
+
+	a.linkMu.Lock()
+	key, found := a.announcedDevices[want]
+	a.linkMu.Unlock()
+
+	if !found {
+		// Being specific about why beats "invalid code": the usual cause is that
+		// the other device has not signed in since this one did, so nothing has
+		// announced itself yet.
+		return "No device with that code has announced itself yet. Sign in on that " +
+			"device (or sign it out and back in), then try again."
+	}
+	return a.ApproveDevice(e2ee.EncodeKey(key))
 }

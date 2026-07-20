@@ -250,6 +250,7 @@ interface AppBindings {
   ListDevices(): Promise<DeviceInfo[] | null>;
   RemoveDevice(key: string): Promise<string>;
   ApproveDevice(key: string): Promise<string>;
+  ApproveDeviceByCode(code: string): Promise<string>;
   DeclineDevice(key: string): Promise<string>;
   GetDeviceLinkState(): Promise<DeviceLinkState>;
   SetCustomSound(key: string, data: string): Promise<string>;
@@ -365,6 +366,7 @@ export const Bridge = {
   listDevices: () => app().ListDevices(),
   removeDevice: (key: string) => app().RemoveDevice(key),
   approveDevice: (key: string) => app().ApproveDevice(key),
+  approveDeviceByCode: (code: string) => app().ApproveDeviceByCode(code),
   declineDevice: (key: string) => app().DeclineDevice(key),
   getDeviceLinkState: () => app().GetDeviceLinkState(),
 

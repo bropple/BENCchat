@@ -27,6 +27,7 @@ const keyDirTimeout = 5 * time.Second
 type keyDirReply struct {
 	devices  []e2ee.Device
 	refused  []e2ee.Device
+	accepted int
 	revoked  bool
 	restored bool
 }
@@ -105,12 +106,12 @@ func (c *Client) QueryDevices(screenName string) (devices []e2ee.Device, ok bool
 // refused carries devices the server declined because they were revoked — a
 // machine the user removed announcing itself again. The caller is expected to
 // put those in front of the user rather than retrying.
-func (c *Client) PublishDevices(devices []e2ee.Device) (refused []e2ee.Device, ok bool) {
+func (c *Client) PublishDevices(devices []e2ee.Device) (accepted int, refused []e2ee.Device, ok bool) {
 	c.mu.Lock()
 	sess := c.session
 	c.mu.Unlock()
 	if sess == nil || !sess.SupportsKeyDir() {
-		return nil, false
+		return 0, nil, false
 	}
 
 	wireDevices := make([]wire.BENCODevice, 0, len(devices))
@@ -125,17 +126,17 @@ func (c *Client) PublishDevices(devices []e2ee.Device) (refused []e2ee.Device, o
 	reqID, err := sess.PublishDeviceKeys(wireDevices)
 	if err != nil {
 		c.log.Warn("key directory publish failed to send", "err", err)
-		return nil, false
+		return 0, nil, false
 	}
 	ch, done := c.waitKeyDir(reqID)
 	defer done()
 
 	select {
 	case r := <-ch:
-		return r.refused, true
+		return r.accepted, r.refused, true
 	case <-time.After(keyDirTimeout):
 		c.log.Warn("key directory publish timed out")
-		return nil, false
+		return 0, nil, false
 	}
 }
 
@@ -249,7 +250,10 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 		if len(refused) > 0 {
 			c.log.Info("server refused revoked device keys", "count", len(refused))
 		}
-		c.deliverKeyDir(frame.RequestID, keyDirReply{refused: refused})
+		c.deliverKeyDir(frame.RequestID, keyDirReply{
+			accepted: int(reply.Accepted),
+			refused:  refused,
+		})
 
 	case wire.BENCOKeyDirRevokeReply:
 		reply, err := oscar.DecodeKeyDirRevokeReply(body)
