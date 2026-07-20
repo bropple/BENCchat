@@ -105,10 +105,25 @@ Stated plainly, because the failure modes are the point of writing it down.
    the identity key. Safety numbers change once, for everyone, at cutover — and
    that is the last time they change for a device addition.
 
-2. **Lose every device *and* the recovery passphrase and the account's history
-   is gone.** This is the correct behaviour and it is worse than today, where an
-   operator could in principle intervene. Users must be told at setup, once,
-   plainly.
+2. **Lose every device *and* the recovery passphrase and the cryptographic
+   identity is gone** — along with any history that existed only on those
+   devices.
+
+   The *account* is not gone. An operator can still delete, recreate and
+   password-reset it through the management API exactly as today; none of this
+   touches that. What cannot be recovered is the identity key, and the recovery
+   is to clear the account's identity binding and bootstrap a fresh one. Every
+   contact then sees the safety number change, which is correct: cryptographi-
+   cally you are a new person, and nobody can prove otherwise.
+
+   That asymmetry is the whole design, stated once: **an operator who can
+   restore your identity is an operator who can take it over.** So the operator
+   keeps the account and loses the identity, deliberately.
+
+   This does need one admin operation that does not exist yet — clearing an
+   account's device keys and identity binding so it can bootstrap again. That is
+   a directory operation, not an account one, and it is safe precisely because
+   it destroys rather than restores.
 
 3. **The recovery passphrase is a new thing to lose.** It is now the account. A
    weak one is a weak account, and it cannot be rate-limited the way a login can.
