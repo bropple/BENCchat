@@ -32,9 +32,11 @@ supersedes its wire-level sketch in one respect, flagged in §3.
   transient custody rather than a policy. The backup can be re-keyed later, but
   only while the user is proving they still hold the current key. See §10.
 - **First run takes the whole window** and cannot be left until the key has been
-  copied or saved. See §12.
-- **Possession is never re-confirmed afterwards**, accepting that a lost key may
-  go unnoticed for years. See §13.
+  saved to a file or copied — either satisfies the gate. The file is plain text
+  on purpose, and nothing is persisted anywhere until the user has the key. See
+  §12.
+- **Possession is never prompted for**, only reported passively in Settings,
+  accepting that a lost key may go unnoticed for years. See §13.
 
 ## 2. What v1 looks like now
 
@@ -491,24 +493,103 @@ did.
 
 Some environments have no clipboard access at all. A gate that cannot be
 satisfied would leave the account permanently unusable, which is a worse outcome
-than any it prevents — so the save-to-file path above doubles as the escape
-hatch, and at least one of the two must always be available.
+than any it prevents — so the save-to-file path doubles as the escape hatch, and
+at least one of the two must always be available.
 
-## 13. Recovery-key possession is never re-confirmed
+### The saved file is plain text, deliberately
 
-**Decided: never.** No periodic prompt, no nag, no "can you still find your
-recovery key?" check.
+It is tempting to encrypt it. Doing so makes recovery worse, for two reasons.
 
-Recording the cost, because it is real and was accepted deliberately rather than
-overlooked. Combined with the slow failure in §10 — devices keep working, only
-the ability to change the device list is lost — this means a user can lose their
-recovery key and not discover it for years. The discovery moment becomes the day
-they replace a laptop and cannot link the new one, which is both the worst time
-to find out and long past when anything could have been done about it.
+**Encrypted with what?** A password the user picks replaces a generated ~110-bit
+secret with a human-chosen one, which then becomes the weakest link — the
+problem moves rather than going away. A key BENCchat holds makes the file
+useless in precisely the situation it exists for, which is the machine being
+gone.
 
-The counter-argument for a periodic check is that it converts a silent loss into
-a noticed one while re-keying is still possible (§10). The argument against, and
-the one that won: a prompt that fires when nothing is wrong is a prompt people
-learn to dismiss, and this project has already established — with safety-number
-churn — that an alert which fires during normal use is not there when it
-matters.
+**And a plaintext key can be printed, photographed, typed in from paper, or
+pasted into a password manager.** An encrypted blob can only be opened by
+BENCchat, which may be the thing that is broken. A recovery path should not
+depend on the software it recovers.
+
+So: write it `0600`, name it clearly, and make the guidance specific — *put this
+in a password manager, print it, or store it where you would keep a passport;
+do not leave it in Downloads.* If the user wants it encrypted at rest, a
+password manager already does that job better than this would.
+
+This is also what Signal, Element and every password manager do with recovery
+codes, which is some evidence it is not an oversight.
+
+### Ordering: nothing is persisted until the key is safe
+
+**The crash window is a real failure mode, and it is closed by ordering rather
+than by error handling.**
+
+The obvious sequence is wrong. Generating the identity, uploading the encrypted
+backup, and *then* showing the key means a crash — or a power loss, or a force
+quit — between upload and acknowledgement leaves the server holding an identity
+encrypted under a recovery key nobody ever saw. The next launch sees
+`Present = 1`, prompts for a key the user never had, and the account is dead with
+no indication of why.
+
+The correct order never creates that state:
+
+1. Generate the identity keypair **in memory only**.
+2. Generate the recovery key.
+3. Show it. Gate on copy or save.
+4. User acknowledges.
+5. *Only now* derive the wrapping key, encrypt, and `PutBackup`.
+6. Sign and publish the first manifest.
+7. Leave the screen.
+
+Crash before step 5 and **nothing was written anywhere** — not on the server,
+not on disk. `GetBackup` still reports `Present = 0`, so the next launch is
+simply a fresh first run with a new recovery key. The user sees the screen again
+and nothing is lost.
+
+Crash between 5 and 6 and the backup exists, but the user *has* the key, because
+they acknowledged before it was uploaded. The next launch prompts for it and
+recovers normally.
+
+Steps 5 and 6 must also **not** dismiss the screen until they have succeeded. If
+the upload or publish fails, stay put — the key is still on screen, still
+readable, still saveable — and offer a retry. Dismissing first and failing after
+is the same bug in a smaller window.
+
+This is the same discipline as the atomic history write (temp file, then
+rename): decide what the recoverable intermediate states are, and arrange for
+the only reachable ones to be harmless.
+
+## 13. Possession is never prompted for, only reported
+
+**Nothing ever fires.** No periodic prompt, no nag, no "can you still find your
+recovery key?" interruption. A prompt that appears when nothing is wrong is one
+people learn to dismiss, and this project has already been bitten by that once
+with safety-number churn: an alert that fires during normal use is not there
+when it matters.
+
+But "never ask" does not have to mean "never tell". A passive line in
+**Settings → Privacy & Security**:
+
+> **Recovery key** — created 19 July 2026, never verified.  `[Verify now]`
+
+It never appears uninvited, so it cannot train anyone to dismiss anything. It is
+discoverable by someone who goes looking, which is exactly the person who wants
+it. And it states something true and otherwise invisible.
+
+`Verify now` runs the only check that actually proves anything: the user enters
+their recovery key, the client fetches the backup, derives the wrapping key, and
+attempts decryption. Success or failure is real evidence, not a self-report, and
+it involves no exposure that linking a device does not already involve. On
+success, record the date and show it on that line.
+
+### The cost of never prompting, stated plainly
+
+A user can lose their recovery key and not discover it for years. Combined with
+the slow failure in §10 — devices keep working, only changing the device list is
+lost — the discovery moment becomes the day they replace a laptop and cannot
+link the new one. That is both the worst possible time to find out and long past
+when re-keying (§10) could have saved them.
+
+This was accepted deliberately. The passive line is the compromise: it makes the
+information available without making it an interruption, and someone who has
+thought about the risk at all will find it.
