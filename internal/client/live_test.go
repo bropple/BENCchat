@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -1667,4 +1668,98 @@ func TestLiveDeviceWatch(t *testing.T) {
 		last = keys
 	}
 	t.Logf("watch window ended")
+}
+
+// TestLiveCrossSigning is the end-to-end proof that key directory v2 works
+// against a real BENCoscar: bootstrap an identity, publish a manifest signed by
+// it, read it back, and verify the signature over the bytes AS RETURNED.
+//
+// Everything else that exercises publishSelfDevices is an interactive driver
+// needing a human on the other end, so before this there was no automated check
+// that the whole chain -- identity, signing, wire encoding, server storage,
+// retrieval, verification -- survives contact with the server.
+//
+// The signature check is the point. A server that re-encoded the manifest rather
+// than storing the bytes it was given would return something that decodes
+// perfectly and verifies as forged, and nothing short of this would notice.
+//
+//	BENCCHAT_LIVE_SERVER=host:port BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
+//	[BENCCHAT_LIVE_RECOVERY_KEY=...] \
+//	go test ./internal/client/ -run TestLiveCrossSigning -v
+func TestLiveCrossSigning(t *testing.T) {
+	addr, sn, pw := liveCreds(t)
+
+	c, _ := newTestClient(t)
+	if err := c.SignOn(context.Background(), addr,
+		oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
+		t.Fatalf("SignOn: %v", err)
+	}
+	defer func() { _ = c.SignOff() }()
+
+	kp, err := e2ee.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	// Bootstraps an identity if the account has none, or opens the existing
+	// backup with BENCCHAT_LIVE_RECOVERY_KEY. Either way it publishes a signed
+	// manifest naming this device.
+	publishSelfDevices(t, c, e2ee.Device{Box: kp.Public})
+
+	// Read it back the way a peer would.
+	sm, ok := c.QueryManifest(sn)
+	if !ok {
+		t.Fatal("could not query our own manifest back")
+	}
+	if !sm.Present {
+		t.Fatal("the server reports no manifest immediately after we published one")
+	}
+	if len(sm.Manifest) == 0 || len(sm.Signature) == 0 {
+		t.Fatalf("manifest=%d bytes signature=%d bytes, want both non-empty",
+			len(sm.Manifest), len(sm.Signature))
+	}
+
+	// Decode ONLY to reach the identity key the manifest vouches for. The
+	// signature must then be checked over sm.Manifest exactly as received --
+	// never over a re-encoding of the decoded struct.
+	m, err := wire.DecodeManifest(sm.Manifest)
+	if err != nil {
+		t.Fatalf("decode the manifest the server returned: %v", err)
+	}
+	if m.Identity.Alg != wire.BENCOAlgEd25519 {
+		t.Fatalf("identity alg = %d, want Ed25519", m.Identity.Alg)
+	}
+	if err := e2ee.VerifyManifest(m.Identity.Key, sm.Manifest, sm.Signature); err != nil {
+		t.Fatalf("the manifest the SERVER returned does not verify: %v\n"+
+			"This is what a server re-encoding the bytes it stored would look like.", err)
+	}
+
+	if !strings.EqualFold(m.ScreenName, sn) {
+		t.Errorf("manifest is signed for %q, want %q", m.ScreenName, sn)
+	}
+	if m.Counter == 0 {
+		t.Error("counter is 0, which is reserved so that 'no manifest' stays distinguishable")
+	}
+
+	var found bool
+	for _, d := range m.Devices {
+		if bytes.Equal(d.Box.Key, kp.Public[:]) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("the manifest names %d device(s), none of them the one we just published",
+			len(m.Devices))
+	}
+
+	t.Logf("verified: counter=%d, %d device(s), signed by identity %s",
+		m.Counter, len(m.Devices), e2ee.EncodeIdentityPublic(m.Identity.Key)[:16]+"...")
+
+	// Tampering must be caught. One byte, in the body rather than the header.
+	bad := append([]byte(nil), sm.Manifest...)
+	bad[len(bad)-1] ^= 0x01
+	if err := e2ee.VerifyManifest(m.Identity.Key, bad, sm.Signature); err == nil {
+		t.Error("a manifest with a flipped byte still verified")
+	}
 }
