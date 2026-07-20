@@ -676,6 +676,52 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Eighteen emoji in a fixed six-across grid. Fixed rather than auto-fitting
+   because the reading order has to be identical on both people's screens —
+   a grid that reflows at a different width has the two of them comparing
+   different sequences and disagreeing about a number that in fact matches. */
+.verify__emojiGrid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px 4px;
+  padding: 14px 10px;
+  border: 1px solid var(--benco-green);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel);
+}
+
+.verify__emoji {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.verify__emojiGlyph {
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+/* The name is not decoration: it is what gets spoken, and the fallback when a
+   platform has no glyph for an entry. */
+.verify__emojiName {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--benco-dim, var(--benco-phosphor));
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.verify__digits > summary {
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.verify__digits[open] > summary {
+  margin-bottom: 8px;
+}
+
 .verify__actions {
   display: flex;
   justify-content: flex-end;

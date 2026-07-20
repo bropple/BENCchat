@@ -290,10 +290,26 @@ through.
 
 ### Safety numbers
 
-`SafetyNumberSet` (`internal/e2ee/multidevice.go:241`) concatenates both sides'
-deduped, sorted device keys, orders the two blobs against each other so both
-parties compute the same string, hashes with SHA-256, and renders six groups of
-five digits.
+`safetyDigest` (`internal/e2ee/multidevice.go`) concatenates both sides' deduped,
+sorted device keys and orders the two blobs against each other so both parties
+compute the same value without agreeing who is "first", then hashes with
+SHA-256. Two renderings come off that one digest:
+
+- **Digits** — `SafetyNumberSet`, six groups of five (~99.7 bits).
+- **Emoji** — `SafetyEmojiSet` (`internal/e2ee/safetyemoji.go`), eighteen emoji
+  from a 64-entry alphabet (108 bits). This is what the verify dialog leads
+  with; digits are behind a disclosure.
+
+They are renderings of the *same* number, not two codes. That matters: if they
+could drift apart, one would be a second and weaker thing to check, and an
+attacker would target whichever the user actually reads.
+
+**Eighteen, not seven.** Matrix's SAS uses seven emoji (42 bits), which is sound
+for an *interactive* verification where a MITM must produce a collision live, in
+one attempt. A safety number is static — an attacker can grind device keys
+offline until a set renders identically, and 42 bits is a few hours on a GPU.
+Copying Matrix's count would have cut this from ~100 bits to ~42 while making
+the UI look more trustworthy.
 
 Because it is computed over the **set of device keys**, adding any device on
 either side changes it. There is no stable identity underneath to anchor it to.

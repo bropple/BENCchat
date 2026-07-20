@@ -94,8 +94,19 @@ export interface Theme {
 }
 
 /** Safety-number verification state of a 1:1 conversation. Mirrors app.Verification. */
+/** One position in the emoji rendering of a safety number. The name is what
+ *  gets read aloud, and the fallback wherever a font has no glyph. */
+export interface SafetyEmoji {
+  emoji: string;
+  name: string;
+}
+
 export interface Verification {
   safetyNumber: string;
+  /** The SAME code as safetyNumber, rendered as emoji — not a second, weaker
+   *  thing to check. Matching either proves the same fact. Empty when there is
+   *  nothing to compare yet. */
+  safetyEmoji: SafetyEmoji[];
   /** "device-added" is a key set that GREW — they set up another machine —
    *  which is expected, unlike "changed" where a key we relied on is gone. */
   status: "unavailable" | "unverified" | "verified" | "changed" | "device-added";

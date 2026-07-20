@@ -432,6 +432,10 @@ type Verification struct {
 	// SafetyNumber is the shared code both parties compare out of band. Empty
 	// when no key exchange has happened yet (Status "unavailable").
 	SafetyNumber string `json:"safetyNumber"`
+	// SafetyEmoji is the SAME code rendered as emoji — not a second, weaker
+	// thing to check. Both are shown because matching either proves the same
+	// fact, and people will actually read this one.
+	SafetyEmoji []e2ee.SafetyEmoji `json:"safetyEmoji"`
 	// Status is one of:
 	//   "unavailable" — no peer key yet, nothing to verify
 	//   "unverified"  — key known but not yet confirmed (trust-on-first-use)
@@ -457,6 +461,7 @@ func (a *App) VerificationInfo(screenName string) Verification {
 	}
 	v := Verification{
 		SafetyNumber: e2ee.SafetyNumberSet(ourDevices, peerKeys),
+		SafetyEmoji:  e2ee.SafetyEmojiSet(ourDevices, peerKeys),
 		Status:       "unverified",
 		Devices:      len(peerKeys),
 	}

@@ -251,19 +251,31 @@ func OpenAny(envelope string, senderPub, ourPriv [32]byte) (string, error) {
 // added" from "keys were replaced" before deciding how loudly to react. See
 // KeysOnlyAdded.
 func SafetyNumberSet(ours, theirs [][32]byte) string {
-	a := flatten(dedupeKeys(ours))
-	b := flatten(dedupeKeys(theirs))
-	x, y := a, b
-	if x > y {
-		x, y = y, x
-	}
-	sum := sha256.Sum256([]byte(x + y))
+	sum := safetyDigest(ours, theirs)
 	groups := make([]string, 6)
 	for i := range groups {
 		n := binary.BigEndian.Uint32(sum[i*4:i*4+4]) % 100000
 		groups[i] = fmt.Sprintf("%05d", n)
 	}
 	return strings.Join(groups, " ")
+}
+
+// safetyDigest is the value every safety-number rendering derives from.
+//
+// Both parties must compute the same digest without agreeing who is "first", so
+// the two key blobs are ordered against each other rather than by role. Pulling
+// this out of SafetyNumberSet is what lets the digit and emoji renderings be
+// provably the same number shown two ways — if they could drift apart, one of
+// them would be a second, weaker thing to compare, and an attacker would target
+// whichever the user actually reads.
+func safetyDigest(ours, theirs [][32]byte) [32]byte {
+	a := flatten(dedupeKeys(ours))
+	b := flatten(dedupeKeys(theirs))
+	x, y := a, b
+	if x > y {
+		x, y = y, x
+	}
+	return sha256.Sum256([]byte(x + y))
 }
 
 func flatten(keys [][32]byte) string {

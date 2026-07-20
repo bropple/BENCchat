@@ -1431,6 +1431,16 @@ export function renderRoster(
       .split(" ")
       .map((g) => `<span class="verify__group">${escapeHTML(g)}</span>`)
       .join("");
+    // Emoji lead, digits follow. Both render the same number, so this is purely
+    // about which one someone will actually read out loud on a phone call —
+    // and it is not the thirty digits.
+    const emoji = info.safetyEmoji
+      .map(
+        (e) =>
+          `<span class="verify__emoji"><span class="verify__emojiGlyph">${escapeHTML(e.emoji)}</span>` +
+          `<span class="verify__emojiName">${escapeHTML(e.name)}</span></span>`,
+      )
+      .join("");
     const close = () => overlay.remove();
 
     const render = (status: Verification["status"]): void => {
@@ -1462,8 +1472,12 @@ export function renderRoster(
           <div class="verify__body">
             ${changed}
             ${verifiedBadge}
-            <p class="benco-caption">Compare this safety number with ${escapeHTML(screenName)} over a channel you both trust — a phone call, in person, another app. If your numbers match, your conversation is private end-to-end. If they don't, stop.</p>
-            <div class="verify__number">${groups}</div>
+            <p class="benco-caption">Compare this with ${escapeHTML(screenName)} over a channel you both trust — a phone call, in person, another app. If it matches, your conversation is private end-to-end. If it doesn't, stop.</p>
+            ${emoji ? `<div class="verify__emojiGrid">${emoji}</div>` : ""}
+            <details class="verify__digits">
+              <summary class="benco-caption">Show as numbers instead</summary>
+              <div class="verify__number">${groups}</div>
+            </details>
             ${deviceNote}
             <div class="verify__actions">
               ${action}
