@@ -85,6 +85,27 @@ func (c *Client) CanEncryptTo(screenName string) bool {
 	return ok && len(k) > 0
 }
 
+// e2eeReady reports whether this client CAN encrypt at all — E2EE is on and we
+// hold our own keypair — regardless of whether we know any given peer's keys.
+// It is what tells the send path that fetching a peer's manifest is worth a try
+// rather than plaintext being a foregone conclusion.
+func (c *Client) e2eeReady() bool {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	return c.e2eeOn && c.e2eeHasKP
+}
+
+// EnsurePeerKeys fetches a peer's manifest if we do not already have their keys,
+// so a conversation shows its lock state and encrypts from the first message
+// rather than after the first reply. Blocking; callers that must not stall (the
+// UI opening a conversation) should run it in a goroutine.
+func (c *Client) EnsurePeerKeys(screenName string) {
+	if !c.e2eeReady() || c.CanEncryptTo(screenName) {
+		return
+	}
+	c.RefreshPeerKeys(screenName)
+}
+
 // sealFor returns the parameters to encrypt a message to screenName, or
 // ok=false to send plaintext (E2EE off, no keypair, or the peer's keys
 // unknown). Every one of the peer's devices is a recipient, so the message is

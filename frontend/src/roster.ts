@@ -629,6 +629,12 @@ export function renderRoster(
     chatActiveEl.hidden = false;
     chatWithEl.textContent = screenName;
     void refreshEncBadge(screenName);
+    // Proactively learn the peer's keys — every BENCchat account has them — so
+    // the lock shows before the first message, not after. Refresh the badge once
+    // it lands rather than leaving it stale.
+    void Bridge.prepareConversation(screenName).then((enc) => {
+      if (activeScreenName === screenName && enc) void refreshEncBadge(screenName);
+    });
     renderChatStatus();
 
     // Fetch the buddy's profile (and away text) — replies land via buddyChanged

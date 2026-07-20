@@ -321,6 +321,7 @@ interface AppBindings {
   ClearHistory(): Promise<string>;
   SetTrayNotify(on: boolean): Promise<void>;
   ConversationEncrypted(screenName: string): Promise<boolean>;
+  PrepareConversation(screenName: string): Promise<boolean>;
   VerificationInfo(screenName: string): Promise<Verification>;
   MarkVerified(screenName: string): Promise<string>;
   Unverify(screenName: string): Promise<string>;
@@ -464,6 +465,10 @@ export const Bridge = {
   setTrayNotify: (on: boolean) => app().SetTrayNotify(on),
   conversationEncrypted: (screenName: string) =>
     app().ConversationEncrypted(screenName),
+  /** Fetch a peer's keys on conversation open; resolves to whether it's now
+   *  encryptable, so the badge can refresh once without a second call. */
+  prepareConversation: (screenName: string) =>
+    app().PrepareConversation(screenName),
   verificationInfo: (screenName: string) => app().VerificationInfo(screenName),
   markVerified: (screenName: string) => app().MarkVerified(screenName),
   unverify: (screenName: string) => app().Unverify(screenName),

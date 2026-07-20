@@ -219,6 +219,19 @@ func (a *App) ConversationEncrypted(screenName string) bool {
 	return a.client.CanEncryptTo(screenName)
 }
 
+// PrepareConversation fetches a peer's keys when a conversation is opened, so
+// the lock badge is right before the first message rather than after it.
+//
+// Every BENCchat account publishes an identity, so the expectation is that a
+// peer HAS keys; this just goes and gets them. It blocks on the Go side (a
+// directory round trip), but the Wails call is async to the UI. Returns whether
+// the conversation is now encryptable, so the caller can refresh the badge
+// without a second round trip.
+func (a *App) PrepareConversation(screenName string) bool {
+	a.client.EnsurePeerKeys(screenName)
+	return a.client.CanEncryptTo(screenName)
+}
+
 // Verification is the safety-number state of a 1:1 conversation, for the UI's
 // verify dialog and lock badge.
 type Verification struct {

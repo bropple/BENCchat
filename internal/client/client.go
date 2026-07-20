@@ -263,7 +263,21 @@ func (c *Client) SendMessage(to, text string) error {
 // encapsulation, say) lands exactly here.
 func (c *Client) sealOutbound(to, text string) (wireText string, encrypted bool, err error) {
 	peerKeys, ourPriv, ok := c.sealFor(to)
+	if !ok && c.e2eeReady() {
+		// We hold no keys for this peer YET. That is the normal state for the
+		// first message to someone: nothing has fetched their manifest, because
+		// key learning used to ride on the profile the old scheme fetched on
+		// conversation open, and that trigger went away with the profile. Without
+		// this, the first message -- and every message, since the peer is in the
+		// same position and never sends us an encrypted one to learn from --
+		// goes in the clear forever. So look once: query and verify their
+		// manifest, then decide. RefreshPeerKeys is a no-op once keys are cached,
+		// so only the first send to a peer pays the round trip.
+		c.RefreshPeerKeys(to)
+		peerKeys, ourPriv, ok = c.sealFor(to)
+	}
 	if !ok {
+		// Genuinely no keys: not a BENCchat user, or E2EE is off. Plaintext, no lock.
 		return text, false, nil
 	}
 	env, serr := e2ee.SealFor(text, peerKeys, ourPriv)
