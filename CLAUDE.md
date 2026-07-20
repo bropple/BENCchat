@@ -33,9 +33,11 @@ The backend is **[open-oscar-server](https://github.com/mk6i/open-oscar-server)*
 address is a deployment detail and publishing it just invites traffic. Read that
 file for specifics. What matters for the code here:
 
-- Plain OSCAR on the standard port, with a TLS listener alongside it (stunnel
-  terminating in front of the plaintext one, which stays open for period AIM
-  clients).
+- **TLS only.** A single stunnel-fronted TLS listener; the plaintext OSCAR port
+  is closed. Anything connecting to this deployment must speak TLS, which
+  includes test harnesses — a plaintext dial connects and then hangs waiting for
+  a FLAP hello that never comes. Period AIM clients cannot connect at all; that
+  compatibility was given up deliberately.
 - `DISABLE_AUTH=false` — accounts must be provisioned via the Management API
   before they can sign in.
 - The Management API is bound to loopback on the VPS and is **not** publicly
