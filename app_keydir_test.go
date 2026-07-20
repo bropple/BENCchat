@@ -343,3 +343,36 @@ func TestForkedManifestAtTheSameCounterIsRefused(t *testing.T) {
 		t.Fatal("a fork at the same counter was accepted")
 	}
 }
+
+// A self pin written WITHOUT a digest -- which the publish path once did -- must
+// not cause the account's own current manifest to be refused on the next launch.
+// That refusal made a device re-verify against itself and republish, climbing
+// its own counter every restart. An empty stored digest is adopted, not treated
+// as a stale-counter mismatch.
+func TestSelfManifestWithDigestlessPinIsAcceptedAfterRestart(t *testing.T) {
+	id, err := e2ee.GenerateIdentityKey()
+	if err != nil {
+		t.Fatalf("GenerateIdentityKey: %v", err)
+	}
+	defer id.Zero()
+
+	a := appForVerify(t)
+	a.store.SetSelf("us") // so isSelf("us") is true and the self branch runs
+	// Pin our own identity at counter 1 with NO digest, exactly as the buggy
+	// publish path persisted it.
+	a.setSelfIdentityPin(trust.Identity{Key: e2ee.EncodeIdentityPublic(id.Public), Counter: 1})
+
+	// Restart: fresh App, same trust file, empty in-memory memo.
+	b := restartOver(t, a)
+	b.store.SetSelf("us")
+
+	// The account's own current manifest, at the pinned counter, must verify.
+	sm := signedFor(t, id, "us", 1, box(1))
+	if _, ok := b.verifyManifest(sm); !ok {
+		t.Fatal("our own current manifest was refused after a restart from a digest-less pin")
+	}
+	// And the pin now carries a digest, so it is self-healed.
+	if b.selfIdentityPin().Digest == "" {
+		t.Error("the pin was not re-recorded with a digest")
+	}
+}

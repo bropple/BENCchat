@@ -205,8 +205,14 @@ func (a *App) acceptCounter(who, display string, identity ed25519.PublicKey, cou
 			// say the right thing. Accept it as a statement — it verified — but
 			// the pin does not move here; the sign-out path replaces it.
 			return true
-		case counter == pinned.Counter && digest == pinned.Digest:
-			// The manifest we already hold, re-read. Routine after a restart.
+		case counter == pinned.Counter && (digest == pinned.Digest || pinned.Digest == ""):
+			// The manifest we already hold, re-read — routine after a restart.
+			// An EMPTY pinned digest is a pin written before the digest was
+			// recorded (the publish path once omitted it); adopt this manifest's
+			// digest rather than refusing our own current statement, which is how
+			// a device ended up re-verifying against itself and climbing its own
+			// counter on every launch. The re-pin below records the digest, so
+			// this self-heals on first read.
 		case counter <= pinned.Counter:
 			slog.Default().Warn("refusing a stale manifest for our own account",
 				"counter", counter, "high_water", pinned.Counter)
@@ -227,7 +233,11 @@ func (a *App) acceptCounter(who, display string, identity ed25519.PublicKey, cou
 	// ordinary case on every sign-on, since the high-water mark IS the counter of
 	// the current manifest. A same-counter manifest whose bytes DIFFER is a fork,
 	// which a well-behaved publisher never produces, and is refused below.
-	same := !changed && counter == prev.Counter && digest == prev.Digest
+	// An empty stored digest (a pin from before digests were recorded) is
+	// adopted rather than treated as a mismatch, same as the self branch: we
+	// know the counter, we just did not record which bytes, so re-seeing that
+	// counter is a re-read, not a fork.
+	same := !changed && counter == prev.Counter && (digest == prev.Digest || prev.Digest == "")
 	if !changed && !same && counter <= prev.Counter {
 		a.trustMu.Unlock()
 		slog.Default().Warn("refusing a stale manifest",
@@ -387,21 +397,26 @@ func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error 
 			// query. Otherwise our own fresh manifest could be answered by a
 			// replay of the previous one, which our high-water mark would then
 			// happily accept.
+			// The digest matters as much as the counter. Without it the pin says
+			// "counter 1" but not WHICH manifest, so on the next launch — memo
+			// gone — the counter rule cannot tell our own current manifest from a
+			// stale one and refuses it, which republishes, which climbs the
+			// counter every restart. The server returns these exact bytes, so
+			// sha256(manifest) is what a self-query will hash to.
+			sum := sha256.Sum256(manifest)
 			a.setSelfIdentityPin(trust.Identity{
 				Key:     e2ee.EncodeIdentityPublic(kp.Public),
 				Counter: counter,
+				Digest:  hex.EncodeToString(sum[:]),
 			})
-			// And remember the statement itself, not just its number. The
-			// server will hand these exact bytes back on the next self-query,
-			// and without the memo the counter rule would refuse the manifest
-			// this device had just written — "at or below the high-water mark"
-			// includes the manifest that SET the mark.
+			// And remember the statement itself in the in-process memo too, so a
+			// self-query WITHIN this session skips verification entirely.
 			a.trustMu.Lock()
 			if a.manifestSeen == nil {
 				a.manifestSeen = map[string]manifestMemo{}
 			}
 			a.manifestSeen[state.NormalizeScreenName(self)] = manifestMemo{
-				sum:     sha256.Sum256(manifest),
+				sum:     sum,
 				devices: devices,
 			}
 			a.e2eeDevices = e2ee.BoxKeysOf(devices)
