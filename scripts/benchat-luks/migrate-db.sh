@@ -302,6 +302,12 @@ if [ -n "$EFFECTIVE" ] && [ "$EFFECTIVE" != "$TARGET" ]; then
   echo "     Something later in the unit is overriding the drop-in — most likely an"
   echo "     EnvironmentFile= that also sets DB_PATH. Fix that file to point at"
   echo "     $TARGET, or the server will keep using the old, unencrypted database."
+  echo
+  echo "     Continuing anyway: this reads only the unit's own Environment= lines"
+  echo "     and cannot see inside an EnvironmentFile=, so it is a hint rather than"
+  echo "     a verdict. The check after startup looks at the open file descriptor,"
+  echo "     which is the real answer, and will stop if the server is on the wrong"
+  echo "     database."
 fi
 
 # --- 6. Start and check ----------------------------------------------------
@@ -320,6 +326,49 @@ if ! systemctl is-active --quiet "$SERVICE.service"; then
   die "See above. Your data is intact in $TARGET and in $DB.pre-luks-*."
 fi
 
+# Which database did it ACTUALLY open?
+#
+# Everything up to here is inference: the drop-in says one thing, `systemctl
+# show -p Environment` reports the unit's own assignments, and neither sees
+# inside an EnvironmentFile= that assigns DB_PATH later and wins. Reading
+# $TARGET with sqlite3 proves nothing either -- it reads the file we just
+# wrote, whatever the server is doing.
+#
+# The open file descriptor is the only ground truth. If the server is still on
+# the old unencrypted database, that is exactly the silent failure this whole
+# bundle exists to prevent: everything looks healthy, accounts are all present,
+# and none of it is on the encrypted volume.
+MAINPID="$(systemctl show -p MainPID --value "$SERVICE.service" 2>/dev/null || echo 0)"
+OPENED=""
+if [ "${MAINPID:-0}" -gt 0 ] && [ -d "/proc/$MAINPID/fd" ]; then
+  for fd in /proc/"$MAINPID"/fd/*; do
+    tgt="$(readlink -f "$fd" 2>/dev/null || true)"
+    case "$tgt" in
+      *.sqlite|*.sqlite3|*.db) OPENED="$tgt"; break ;;
+    esac
+  done
+fi
+
+if [ -z "$OPENED" ]; then
+  warn "Could not read $SERVICE's open files to confirm which database it is using."
+  echo "     Not fatal, but it means the check below did not run. Confirm by hand:"
+  echo "       sudo ls -l /proc/\$(systemctl show -p MainPID --value $SERVICE.service)/fd"
+elif [ "$OPENED" != "$(readlink -f "$TARGET")" ]; then
+  warn "$SERVICE has '$OPENED' open, NOT '$TARGET'."
+  echo
+  echo "     The drop-in did not win. Almost always an EnvironmentFile= that also"
+  echo "     sets DB_PATH and is read after it. systemd reports these files:"
+  systemctl show -p EnvironmentFiles --value "$SERVICE.service" 2>/dev/null | sed 's/^/       /'
+  echo
+  echo "     The server is running against the OLD, UNENCRYPTED database. Everything"
+  echo "     looks fine and nothing is on the encrypted volume, which is the exact"
+  echo "     failure this bundle exists to prevent. Point DB_PATH at $TARGET in that"
+  echo "     file, restart, and run this script again."
+  die "Stopping so this is not mistaken for success. No data has been lost:
+     the copy is at $TARGET and the original at $DB.pre-luks-*."
+fi
+
+say "Confirmed: $SERVICE has $OPENED open."
 USERS="$(sqlite3 "$TARGET" "SELECT COUNT(*) FROM users;" 2>/dev/null || echo "?")"
 
 cat <<EOF
