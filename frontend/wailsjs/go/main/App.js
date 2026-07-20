@@ -10,20 +10,28 @@ export function AddBuddy(arg1, arg2) {
   return window['go']['main']['App']['AddBuddy'](arg1, arg2);
 }
 
-export function ApproveDevice(arg1) {
-  return window['go']['main']['App']['ApproveDevice'](arg1);
-}
-
-export function ApproveDeviceByCode(arg1) {
-  return window['go']['main']['App']['ApproveDeviceByCode'](arg1);
-}
-
 export function AutoSignIn() {
   return window['go']['main']['App']['AutoSignIn']();
 }
 
+export function BeginIdentitySetup() {
+  return window['go']['main']['App']['BeginIdentitySetup']();
+}
+
+export function BeginRecoveryKeyRotation(arg1) {
+  return window['go']['main']['App']['BeginRecoveryKeyRotation'](arg1);
+}
+
 export function BlockBuddy(arg1) {
   return window['go']['main']['App']['BlockBuddy'](arg1);
+}
+
+export function CancelIdentitySetup() {
+  return window['go']['main']['App']['CancelIdentitySetup']();
+}
+
+export function CancelRecoveryKeyRotation() {
+  return window['go']['main']['App']['CancelRecoveryKeyRotation']();
 }
 
 export function ChangeEmail(arg1) {
@@ -38,10 +46,6 @@ export function ClearCustomSound(arg1) {
   return window['go']['main']['App']['ClearCustomSound'](arg1);
 }
 
-export function ClearCustomSounds() {
-  return window['go']['main']['App']['ClearCustomSounds']();
-}
-
 export function ClearHistory() {
   return window['go']['main']['App']['ClearHistory']();
 }
@@ -54,8 +58,12 @@ export function CloseWindow() {
   return window['go']['main']['App']['CloseWindow']();
 }
 
-export function ConnectionSecure() {
-  return window['go']['main']['App']['ConnectionSecure']();
+export function ConfirmIdentitySetup() {
+  return window['go']['main']['App']['ConfirmIdentitySetup']();
+}
+
+export function ConfirmRecoveryKeyRotation() {
+  return window['go']['main']['App']['ConfirmRecoveryKeyRotation']();
 }
 
 export function ConversationEncrypted(arg1) {
@@ -66,24 +74,12 @@ export function CreateEncryptedRoom(arg1) {
   return window['go']['main']['App']['CreateEncryptedRoom'](arg1);
 }
 
-export function DeclineDevice(arg1) {
-  return window['go']['main']['App']['DeclineDevice'](arg1);
-}
-
 export function DeclineRoomInvite(arg1) {
   return window['go']['main']['App']['DeclineRoomInvite'](arg1);
 }
 
-export function DeviceCount() {
-  return window['go']['main']['App']['DeviceCount']();
-}
-
 export function FindUser(arg1) {
   return window['go']['main']['App']['FindUser'](arg1);
-}
-
-export function ForgetOtherDevices() {
-  return window['go']['main']['App']['ForgetOtherDevices']();
 }
 
 export function ForgetRoom(arg1) {
@@ -110,16 +106,16 @@ export function GetCustomSounds() {
   return window['go']['main']['App']['GetCustomSounds']();
 }
 
-export function GetDeviceLinkState() {
-  return window['go']['main']['App']['GetDeviceLinkState']();
-}
-
-export function GetGroups() {
-  return window['go']['main']['App']['GetGroups']();
+export function GetIdentityState() {
+  return window['go']['main']['App']['GetIdentityState']();
 }
 
 export function GetPreferences() {
   return window['go']['main']['App']['GetPreferences']();
+}
+
+export function GetRecoveryKeyStatus() {
+  return window['go']['main']['App']['GetRecoveryKeyStatus']();
 }
 
 export function GetRoom(arg1) {
@@ -150,6 +146,10 @@ export function LeaveRoom(arg1) {
   return window['go']['main']['App']['LeaveRoom'](arg1);
 }
 
+export function LinkDevice(arg1) {
+  return window['go']['main']['App']['LinkDevice'](arg1);
+}
+
 export function ListDevices() {
   return window['go']['main']['App']['ListDevices']();
 }
@@ -178,16 +178,12 @@ export function RemoveBuddy(arg1) {
   return window['go']['main']['App']['RemoveBuddy'](arg1);
 }
 
-export function RemoveDevice(arg1) {
-  return window['go']['main']['App']['RemoveDevice'](arg1);
+export function RemoveDevice(arg1, arg2) {
+  return window['go']['main']['App']['RemoveDevice'](arg1, arg2);
 }
 
 export function RenameBuddy(arg1, arg2) {
   return window['go']['main']['App']['RenameBuddy'](arg1, arg2);
-}
-
-export function RequestAwayMessage(arg1) {
-  return window['go']['main']['App']['RequestAwayMessage'](arg1);
 }
 
 export function RequestUserInfo(arg1) {
@@ -200,6 +196,10 @@ export function RoomSecurityInfo(arg1) {
 
 export function RotateRoomKey(arg1, arg2) {
   return window['go']['main']['App']['RotateRoomKey'](arg1, arg2);
+}
+
+export function SaveRecoveryKeyToFile() {
+  return window['go']['main']['App']['SaveRecoveryKeyToFile']();
 }
 
 export function SaveServerSettings(arg1, arg2) {
@@ -234,10 +234,6 @@ export function SetCustomSound(arg1, arg2) {
   return window['go']['main']['App']['SetCustomSound'](arg1, arg2);
 }
 
-export function SetE2EEEnabled(arg1) {
-  return window['go']['main']['App']['SetE2EEEnabled'](arg1);
-}
-
 export function SetHistoryEnabled(arg1) {
   return window['go']['main']['App']['SetHistoryEnabled'](arg1);
 }
@@ -260,10 +256,6 @@ export function SetSoundMuted(arg1, arg2) {
 
 export function SetSoundPack(arg1) {
   return window['go']['main']['App']['SetSoundPack'](arg1);
-}
-
-export function SetTLS(arg1, arg2) {
-  return window['go']['main']['App']['SetTLS'](arg1, arg2);
 }
 
 export function SetTrayNotify(arg1) {
@@ -300,6 +292,10 @@ export function Unverify(arg1) {
 
 export function VerificationInfo(arg1) {
   return window['go']['main']['App']['VerificationInfo'](arg1);
+}
+
+export function VerifyRecoveryKey(arg1) {
+  return window['go']['main']['App']['VerifyRecoveryKey'](arg1);
 }
 
 export function WarnUser(arg1, arg2) {

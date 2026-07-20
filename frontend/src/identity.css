@@ -144,3 +144,53 @@
   letter-spacing: 0.5px;
   line-height: 1.5;
 }
+
+/* Recovery key as one box per word. A responsive grid so it reflows from two
+   columns on a narrow window to five on a wide one without ever overflowing --
+   the box COUNT is fixed at ten, only the columns move. */
+.rk-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.rk-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--benco-panel-2);
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  padding: 0 8px;
+}
+
+.rk-cell:focus-within {
+  border-color: var(--benco-green-deep);
+}
+
+/* The word number, so a "word 7" error maps to a labelled box at a glance. */
+.rk-num {
+  color: var(--benco-dim-2);
+  font-size: 11px;
+  min-width: 1.2em;
+  text-align: right;
+  user-select: none;
+}
+
+.rk-box {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--benco-phosphor);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  padding: 8px 2px;
+}
+
+/* The box a "word N is invalid" error points at. */
+.rk-cell:has(.rk-box--bad) {
+  border-color: var(--benco-error, #c0483a);
+}

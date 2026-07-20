@@ -17,6 +17,25 @@ export namespace config {
 
 }
 
+export namespace e2ee {
+	
+	export class SafetyEmoji {
+	    emoji: string;
+	    name: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SafetyEmoji(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.emoji = source["emoji"];
+	        this.name = source["name"];
+	    }
+	}
+
+}
+
 export namespace main {
 	
 	export class DeviceInfo {
@@ -35,18 +54,24 @@ export namespace main {
 	        this.thisDevice = source["thisDevice"];
 	    }
 	}
-	export class DeviceLinkState {
-	    pending: boolean;
+	export class IdentityState {
+	    flow: string;
 	    fingerprint: string;
+	    devices: number;
+	    issuedAt: number;
+	    recoveryWords: number;
 	
 	    static createFrom(source: any = {}) {
-	        return new DeviceLinkState(source);
+	        return new IdentityState(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.pending = source["pending"];
+	        this.flow = source["flow"];
 	        this.fingerprint = source["fingerprint"];
+	        this.devices = source["devices"];
+	        this.issuedAt = source["issuedAt"];
+	        this.recoveryWords = source["recoveryWords"];
 	    }
 	}
 	export class Preferences {
@@ -95,6 +120,38 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class RecoveryKeyInfo {
+	    recoveryKey: string;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RecoveryKeyInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.recoveryKey = source["recoveryKey"];
+	        this.error = source["error"];
+	    }
+	}
+	export class RecoveryKeyStatus {
+	    available: boolean;
+	    created: number;
+	    lastVerified: number;
+	    error: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RecoveryKeyStatus(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.available = source["available"];
+	        this.created = source["created"];
+	        this.lastVerified = source["lastVerified"];
+	        this.error = source["error"];
+	    }
+	}
 	export class RoomInviteInfo {
 	    room: string;
 	    from: string;
@@ -134,6 +191,7 @@ export namespace main {
 	    tlsInsecure: boolean;
 	    lastScreenName: string;
 	    remembered: boolean;
+	    build: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ServerSettings(source);
@@ -147,10 +205,12 @@ export namespace main {
 	        this.tlsInsecure = source["tlsInsecure"];
 	        this.lastScreenName = source["lastScreenName"];
 	        this.remembered = source["remembered"];
+	        this.build = source["build"];
 	    }
 	}
 	export class Verification {
 	    safetyNumber: string;
+	    safetyEmoji: e2ee.SafetyEmoji[];
 	    status: string;
 	    devices: number;
 	
@@ -161,9 +221,28 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.safetyNumber = source["safetyNumber"];
+	        this.safetyEmoji = this.convertValues(source["safetyEmoji"], e2ee.SafetyEmoji);
 	        this.status = source["status"];
 	        this.devices = source["devices"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

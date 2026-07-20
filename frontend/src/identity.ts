@@ -16,6 +16,11 @@
 
 import { Bridge } from "./bridge";
 import { confirmDialog } from "./dialog";
+import { mountRecoveryKeyInput, wordPositionFromError } from "./recoverykey-input";
+
+// Mirrors e2ee.RecoveryKeyWords. Fixed: the number of words is baked into the
+// key's entropy (10 × 11 bits), so it does not change without a protocol change.
+const RECOVERY_KEY_WORDS = 10;
 
 export interface IdentityHandle {
   destroy(): void;
@@ -332,12 +337,11 @@ function renderLink(
 
         <hr class="benco-rule" />
 
-        <label class="benco-label" for="rkInput">Recovery key</label>
-        <textarea class="benco-input identity__rk" id="rkInput" rows="3"
-                  spellcheck="false" autocomplete="off"
-                  placeholder="word-word-word…"></textarea>
+        <label class="benco-label">Recovery key</label>
+        <div id="rkBoxes"></div>
         <p class="benco-caption identity__hint">
-          Spaces or hyphens, upper or lower case — all of it is accepted.
+          One word per box. Paste the whole key into any box and it fills the
+          rest — case, spaces and hyphens all sort themselves out.
         </p>
 
         <div class="benco-error identity__error" id="idError"></div>
@@ -359,15 +363,21 @@ function renderLink(
       </div>
     </div>`;
 
-  const rkInput = el<HTMLTextAreaElement>(root, "#rkInput");
   const idError = el<HTMLDivElement>(root, "#idError");
   const linkBtn = el<HTMLButtonElement>(root, "#linkBtn");
   const skipBtn = el<HTMLButtonElement>(root, "#skipBtn");
+  const rk = mountRecoveryKeyInput(
+    el<HTMLDivElement>(root, "#rkBoxes"),
+    RECOVERY_KEY_WORDS,
+    () => void submit(),
+  );
 
   const submit = async (): Promise<void> => {
-    const key = rkInput.value.trim();
-    if (!key) {
-      idError.textContent = "Enter your recovery key.";
+    const key = rk.value();
+    // A key with any empty box is incomplete; the join leaves a gap the Go
+    // parser would reject less clearly than we can here.
+    if (key.split("-").some((w) => w === "")) {
+      idError.textContent = "Fill in all the words.";
       return;
     }
     linkBtn.disabled = true;
@@ -377,10 +387,14 @@ function renderLink(
       const err = await Bridge.linkDevice(key);
       if (err) {
         idError.textContent = humanError(err);
+        // If the error names a word, highlight that box — the same locate-the-typo
+        // feedback the single field could only put in text.
+        const pos = wordPositionFromError(err);
+        if (pos) rk.markInvalid(pos);
         return;
       }
       // Never leave the key in a DOM node once it has done its work.
-      rkInput.value = "";
+      rk.clear();
       // §10: the user has just proved they hold the current key, which is one of
       // only two moments a re-key is possible. Offered, never imposed — and
       // offered here rather than remembered for later, because "later" is a
@@ -397,28 +411,22 @@ function renderLink(
   };
 
   linkBtn.addEventListener("click", () => void submit());
-  rkInput.addEventListener("keydown", (e) => {
-    // Enter submits; Shift+Enter is left alone so a key pasted across lines
-    // can still be edited.
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      void submit();
-    }
-  });
+  // Enter-to-submit is wired through the box component's onEnter above.
   // Unlike first run, this screen is leaveable: the account is already set up
   // and works, this computer just can't read encrypted messages until it is
   // linked. Blocking the roster over that would withhold the parts that do
   // work. It does not come back on its own afterwards — §13, nothing nags.
   skipBtn.addEventListener("click", () => {
-    rkInput.value = "";
+    rk.clear();
     onSkip();
   });
 
-  rkInput.focus();
+  rk.focus();
 
   return {
     destroy(): void {
-      rkInput.value = "";
+      // A recovery key must not outlive the screen in a DOM node.
+      rk.clear();
     },
   };
 }
