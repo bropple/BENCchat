@@ -24,16 +24,26 @@
 
 .roster__header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
   padding: 10px 12px;
 }
 
+/* The account name is the menu trigger: a button styled to read as text, with a
+   caret, so the whole thing is one obvious click target. */
 .roster__me {
   display: flex;
-  flex-direction: column;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
+  max-width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
 }
 
 .roster__me-name {
@@ -45,31 +55,28 @@
   white-space: nowrap;
 }
 
+.roster__me-caret {
+  color: var(--benco-dim);
+  font-size: 11px;
+  flex: none;
+}
+
+.roster__me:hover .roster__me-name,
+.roster__me[aria-expanded="true"] .roster__me-name {
+  color: var(--benco-phosphor);
+}
+
+/* While away, the name itself carries the cue, since the toggle is in the menu. */
+.roster__me.is-away .roster__me-name {
+  color: var(--benco-amber);
+}
+
 .roster__me-status {
   color: var(--benco-amber);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 220px;
-}
-
-/* The away button reads as active (amber) while away is set. */
-.settings-gear.is-away {
-  color: var(--benco-amber);
-  border-color: var(--benco-amber);
-}
-
-.roster__head-btns {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-
-.roster__signoff {
-  flex: none;
-  font-size: 11px;
-  padding: 5px 9px;
 }
 
 .roster__actions {

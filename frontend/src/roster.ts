@@ -41,16 +41,11 @@ export function renderRoster(
     <div class="roster">
       <aside class="roster__list">
         <header class="roster__header">
-          <div class="roster__me">
-            <span class="benco-label">Signed on as</span>
+          <button class="roster__me" id="meMenuBtn" aria-haspopup="true" aria-expanded="false" title="Account">
             <span class="roster__me-name" id="meName">—</span>
-            <span class="benco-caption roster__me-status" id="meStatus"></span>
-          </div>
-          <div class="roster__head-btns">
-            <button class="settings-gear" id="awayBtn" title="Away message">Away</button>
-            <button class="settings-gear" id="settingsBtn" title="Settings">⚙</button>
-            <button class="benco-button benco-button--ghost roster__signoff" id="signOff">Sign Off</button>
-          </div>
+            <span class="roster__me-caret" aria-hidden="true">▾</span>
+          </button>
+          <span class="benco-caption roster__me-status" id="meStatus"></span>
         </header>
         <hr class="benco-rule" />
         <div class="roster__actions">
@@ -167,6 +162,10 @@ export function renderRoster(
   let buddies: Buddy[] = [];
   /** Our own screen name, for guarding against messaging ourselves. */
   let selfName = "";
+  // Read by the account menu (to label the away item) and set by refreshSelf,
+  // which run in that order, so it is declared up here rather than beside its
+  // updater.
+  let selfAway = false;
   let unread = new Map<string, number>();
   let typingTimer: number | undefined;
   let stopTypingTimer: number | undefined;
@@ -1130,9 +1129,14 @@ export function renderRoster(
     // A click anywhere but inside the row menu closes it (the ⋯ buttons
     // stopPropagation, so they don't self-close).
     if (!menuEl.hidden && !menuEl.contains(e.target as Node)) closeRowMenu();
+    // Same for the account menu; its toggle stopPropagations so it doesn't self-close.
+    if (!meMenu.hidden && !meMenu.contains(e.target as Node)) closeMeMenu();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeRowMenu();
+    if (e.key === "Escape") {
+      closeRowMenu();
+      closeMeMenu();
+    }
   });
 
   // Expand/collapse the room participant list from the header status.
@@ -1146,12 +1150,84 @@ export function renderRoster(
       noteTyping();
     }
   });
-  el<HTMLButtonElement>("signOff").addEventListener("click", () => {
-    void Bridge.signOff().then(onSignOff);
-  });
-
-  el<HTMLButtonElement>("settingsBtn").addEventListener("click", () => {
-    openSettings((on) => setSoundEnabled(on));
+  // The account menu: name + caret at the top, everything that used to be a row
+  // of buttons folded behind it. Away toggles, so its label reflects state; sign
+  // off confirms first, because it is the one item here that throws away a live
+  // session and a misclick should not.
+  const meMenuBtn = el<HTMLButtonElement>("meMenuBtn");
+  const meMenu = (() => {
+    const m = document.createElement("div");
+    m.className = "roster__menu";
+    m.hidden = true;
+    document.body.appendChild(m);
+    return m;
+  })();
+  function closeMeMenu(): void {
+    meMenu.hidden = true;
+    meMenu.innerHTML = "";
+    meMenuBtn.setAttribute("aria-expanded", "false");
+  }
+  function openMeMenu(): void {
+    const items: MenuItem[] = [
+      {
+        label: selfAway ? "I'm back (clear away)" : "Set away message…",
+        run: async () => {
+          if (selfAway) {
+            const err = await Bridge.setAway("");
+            if (err) await alertDialog(err, { title: "Away" });
+            return;
+          }
+          const msg = await promptDialog("Away message:", "I am away from my computer.", { title: "Set away" });
+          if (msg === null) return;
+          const err = await Bridge.setAway(msg.trim() || "Away");
+          if (err) await alertDialog(err, { title: "Away" });
+        },
+      },
+      {
+        label: "Settings…",
+        run: () => {
+          openSettings((on) => setSoundEnabled(on));
+        },
+      },
+      {
+        label: "Sign off",
+        danger: true,
+        run: async () => {
+          if (
+            await confirmDialog("Sign off BENCchat? You'll need your password to sign back in.", {
+              title: "Sign off",
+              okLabel: "Sign off",
+            })
+          ) {
+            void Bridge.signOff().then(onSignOff);
+          }
+        },
+      },
+    ];
+    meMenu.innerHTML = items
+      .map(
+        (it, i) =>
+          `<button type="button" class="roster__menu-item${it.danger ? " is-danger" : ""}" data-i="${i}">${escapeHTML(it.label)}</button>`,
+      )
+      .join("");
+    meMenu.querySelectorAll<HTMLButtonElement>(".roster__menu-item").forEach((elm, i) => {
+      elm.addEventListener("click", () => {
+        closeMeMenu();
+        void items[i].run();
+      });
+    });
+    meMenu.hidden = false;
+    meMenuBtn.setAttribute("aria-expanded", "true");
+    // Anchor under the name, left-aligned, clamped on screen.
+    const r = meMenuBtn.getBoundingClientRect();
+    const left = Math.max(6, Math.min(r.left, window.innerWidth - meMenu.offsetWidth - 6));
+    meMenu.style.left = `${left}px`;
+    meMenu.style.top = `${Math.min(r.bottom + 4, window.innerHeight - meMenu.offsetHeight - 6)}px`;
+  }
+  meMenuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (meMenu.hidden) openMeMenu();
+    else closeMeMenu();
   });
 
   el<HTMLButtonElement>("newIM").addEventListener("click", async () => {
@@ -1922,8 +1998,6 @@ export function renderRoster(
   }
 
   const meStatusEl = el<HTMLSpanElement>("meStatus");
-  const awayBtn = el<HTMLButtonElement>("awayBtn");
-  let selfAway = false;
 
   async function refreshSelf(): Promise<void> {
     const s = await Bridge.getSelf();
@@ -1931,26 +2005,15 @@ export function renderRoster(
     selfName = s.screenName;
     selfAway = s.presence === "away";
     const bits: string[] = [];
+    // The away state has to stay visible somewhere now that the toggle lives in
+    // a menu — otherwise you could be away and have nothing on screen say so.
     if (selfAway) bits.push(`Away — ${s.awayMessage ?? ""}`.trim());
     // Warning level is in tenths of a percent; show it when non-zero.
     if (s.warningLevel > 0) bits.push(`⚠ Warning ${Math.round(s.warningLevel / 10)}%`);
     meStatusEl.textContent = bits.join("  ·  ");
-    awayBtn.textContent = selfAway ? "Back" : "Away";
-    awayBtn.classList.toggle("is-away", selfAway);
+    // A quiet cue on the name itself, so "you are away" reads at a glance.
+    meMenuBtn.classList.toggle("is-away", selfAway);
   }
-
-  awayBtn.addEventListener("click", async () => {
-    if (selfAway) {
-      // Toggle off: clear the away message.
-      const err = await Bridge.setAway("");
-      if (err) await alertDialog(err, { title: "Away" });
-      return;
-    }
-    const msg = await promptDialog("Away message:", "I am away from my computer.", { title: "Set away" });
-    if (msg === null) return;
-    const err = await Bridge.setAway(msg.trim() || "Away");
-    if (err) await alertDialog(err, { title: "Away" });
-  });
 
   Bridge.onStateEvent(handleStateEvent);
 
