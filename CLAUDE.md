@@ -161,6 +161,12 @@ is the person running the server. The argument that survives regardless is the
 secondary one: safety numbers churn on every device addition, which trains
 people to click through the warning meant to catch an attacker.
 
+**Decided:** cross-signing, chosen over one-key-per-account for blast radius.
+[`docs/keydir-v2-proposal.md`](docs/keydir-v2-proposal.md) is the wire-level
+design that follows from it, and supersedes `trust-model.md`'s sketch — it signs
+the device *manifest* rather than each device, which additionally blocks a server
+omitting a device or serving a stale list. Also a proposal, not built.
+
 ## Open questions to resolve early
 
 - UI framework / platform target (desktop-first? which toolkit?)
