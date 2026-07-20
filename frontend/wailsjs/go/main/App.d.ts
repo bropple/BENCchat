@@ -87,6 +87,8 @@ export function MinimizeWindow():Promise<void>;
 
 export function PendingRoomInvites():Promise<Array<main.RoomInviteInfo>>;
 
+export function PrepareConversation(arg1:string):Promise<boolean>;
+
 export function ReformRoom(arg1:string,arg2:Array<string>):Promise<string>;
 
 export function RemoveBuddy(arg1:string):Promise<string>;

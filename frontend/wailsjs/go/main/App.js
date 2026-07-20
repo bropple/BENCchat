@@ -170,6 +170,10 @@ export function PendingRoomInvites() {
   return window['go']['main']['App']['PendingRoomInvites']();
 }
 
+export function PrepareConversation(arg1) {
+  return window['go']['main']['App']['PrepareConversation'](arg1);
+}
+
 export function ReformRoom(arg1, arg2) {
   return window['go']['main']['App']['ReformRoom'](arg1, arg2);
 }

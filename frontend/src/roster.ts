@@ -506,21 +506,25 @@ export function renderRoster(
     // Guard against a slow reply after the user switched conversations.
     if (activeScreenName !== screenName || activeRoom) return;
 
-    chatEncEl.classList.remove("chat__enc--verified", "chat__enc--changed", "chat__enc--plain");
+    chatEncEl.classList.remove(
+      "chat__enc--verified",
+      "chat__enc--changed",
+      "chat__enc--plain",
+      "chat__enc--checking",
+    );
     if (!on) {
-      // Not encrypting. If their client told us what it supports and encryption
-      // wasn't among it, say so plainly — a silently unencrypted conversation
-      // that looks identical to an encrypted one is the failure worth avoiding.
-      const buddy = buddies.find((b) => b.key === normalizeScreenName(screenName));
-      if (buddy?.capsKnown && !buddy.e2eeCapable) {
-        chatEncEl.hidden = false;
-        chatEncEl.textContent = "⚠ not encrypted";
-        chatEncEl.classList.add("chat__enc--plain");
-        chatEncEl.title =
-          `${screenName}'s client doesn't support encryption — these messages are sent in the clear`;
-        return;
-      }
-      chatEncEl.hidden = true;
+      // Not encrypting, and we have looked (openConversation shows a neutral
+      // "checking" state until the key fetch finishes, so reaching here means we
+      // genuinely could not encrypt). Every BENCchat account publishes keys, so
+      // this is the unexpected case, and it must be impossible to miss: a
+      // conversation in the clear cannot look like one that isn't.
+      chatEncEl.hidden = false;
+      chatEncEl.textContent = "⚠ NOT ENCRYPTED";
+      chatEncEl.classList.add("chat__enc--plain");
+      chatEncEl.title =
+        `Messages with ${screenName} are NOT end-to-end encrypted — they are sent in the ` +
+        `clear and the server can read them. This is unexpected: their account may not have ` +
+        `finished setting up encryption. Don't send anything sensitive.`;
       return;
     }
     chatEncEl.hidden = false;
@@ -628,12 +632,15 @@ export function renderRoster(
     chatEmptyEl.hidden = true;
     chatActiveEl.hidden = false;
     chatWithEl.textContent = screenName;
-    void refreshEncBadge(screenName);
+    // Neutral "checking" until the key lookup finishes, so the red NOT ENCRYPTED
+    // alarm never flashes for the moment before we actually know.
+    chatEncEl.hidden = false;
+    chatEncEl.textContent = "checking…";
+    chatEncEl.className = "chat__enc chat__enc--checking";
     // Proactively learn the peer's keys — every BENCchat account has them — so
-    // the lock shows before the first message, not after. Refresh the badge once
-    // it lands rather than leaving it stale.
-    void Bridge.prepareConversation(screenName).then((enc) => {
-      if (activeScreenName === screenName && enc) void refreshEncBadge(screenName);
+    // the lock (or the warning) is right before the first message, not after.
+    void Bridge.prepareConversation(screenName).then(() => {
+      if (activeScreenName === screenName && !activeRoom) void refreshEncBadge(screenName);
     });
     renderChatStatus();
 

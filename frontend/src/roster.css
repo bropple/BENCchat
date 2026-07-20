@@ -638,11 +638,22 @@
   background: color-mix(in srgb, var(--benco-green) 15%, transparent);
 }
 
-/* Not encrypted, and we know the peer's client can't be: stated in the amber
-   warning voice rather than the green "secure" one. */
+/* Not encrypted. Deliberately the loudest state in the header: a conversation
+   that is in the clear must not be mistakable for one that is not, so it is red,
+   filled, and says so in words rather than a subtle colour shift. */
 .chat__enc--plain {
-  border-color: var(--benco-amber);
-  color: var(--benco-amber);
+  border-color: var(--benco-red);
+  color: var(--benco-red);
+  background: color-mix(in srgb, var(--benco-red) 18%, transparent);
+  font-weight: 600;
+}
+
+/* Shown only for the moment between opening a conversation and the key lookup
+   finishing, so the red "not encrypted" alarm never flashes before we actually
+   know. Quiet by design. */
+.chat__enc--checking {
+  border-color: var(--benco-border);
+  color: var(--benco-dim);
   background: transparent;
 }
 
