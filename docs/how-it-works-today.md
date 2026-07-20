@@ -345,9 +345,30 @@ the socket, with no wait for any ack (`client.go:238-245`).
 (`oscar/icbm.go:69`), `ICBMHostAck` has no case in `handleICBM`, and the message
 cookie is discarded (`client.go:235`).
 
-There is **no size check** on the outbound body. `MaxIncomingICBMLen` is declared
-in the wire package but never read. Since a v2 envelope adds ~72 bytes per
-recipient device on top of base64 expansion, the ceiling is currently untested.
+There is **no size check** on the outbound body, and the server's advertised
+limit disagrees with what it enforces. Measured against the live deployment by
+`TestLiveICBMSizeCeiling` (`internal/oscar/live_test.go`):
+
+| | Bytes |
+|---|---|
+| `MaxIncomingICBMLen`, as advertised | 512 |
+| Actually accepted and relayed intact | 65,000 |
+| FLAP's own ceiling (`wire.FLAPMaxPayload`) | 65,529 |
+
+The advertised value is the AIM-era number and BENCoscar does not enforce it.
+Nothing on the client reads it either.
+
+**This is already load-bearing.** A five-device v2 envelope runs slightly over
+512 bytes after base64, so ordinary multi-device messages exceed the advertised
+limit today and work only because nothing checks. If the server ever starts
+honouring what it advertises, multi-device messaging breaks — and with no
+client-side check, it breaks silently.
+
+The headroom is otherwise enormous, which matters for one specific future:
+post-quantum hybrid key wrapping would add ~1088 bytes per recipient device
+(ML-KEM-768 ciphertext), so a five-device account needs roughly 8 KB. That fits
+inside the measured ceiling with room to spare, so it would need no transport
+change.
 
 ### Receiving
 

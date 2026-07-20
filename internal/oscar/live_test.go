@@ -3,8 +3,10 @@ package oscar
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -851,4 +853,162 @@ func TestLiveKeyDirIsAccountScoped(t *testing.T) {
 		await(twoFrames, twoBodies, wire.BENCOKeyDirRestoreReply)
 	}
 	t.Log("cleanup: test key revoked and its tombstone lifted")
+}
+
+// TestLiveICBMSizeCeiling measures how large a message body this server will
+// actually carry.
+//
+// This gates whether post-quantum hybrid key wrapping can ride in the ordinary
+// IM body. ML-KEM-768 adds ~1088 bytes of ciphertext per recipient device, so a
+// five-device account needs roughly 8 KB after base64 — trivial by any modern
+// standard, but the limit here is a policy number inherited from the 1990s, not
+// a bandwidth constraint. FLAP itself allows 65529 bytes (wire.FLAPMaxPayload),
+// and MaxIncomingICBMLen is a uint16, so the protocol has ample headroom; the
+// question is entirely what BENCoscar enforces.
+//
+// Reports two numbers: what the server advertises, and what it demonstrably
+// accepts. They are not required to agree, and the second one is the real one.
+//
+//	BENCCHAT_LIVE_SERVER=host:port BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
+//	go test ./internal/oscar/ -run TestLiveICBMSizeCeiling -v
+func TestLiveICBMSizeCeiling(t *testing.T) {
+	addr := liveAddr(t)
+	sn, pw := os.Getenv("BENCCHAT_LIVE_SCREENNAME"), os.Getenv("BENCCHAT_LIVE_PASSWORD")
+	if sn == "" || pw == "" {
+		t.Skip("set BENCCHAT_LIVE_SCREENNAME and BENCCHAT_LIVE_PASSWORD")
+	}
+	ctx := context.Background()
+
+	res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	s, err := SignOn(ctx, res)
+	if err != nil {
+		t.Fatalf("SignOn: %v", err)
+	}
+	defer s.Close()
+
+	params := make(chan wire.SNAC_0x04_0x05_ICBMParameterReply, 1)
+	echoes := make(chan string, 8)
+	icbmErrs := make(chan uint16, 8)
+
+	s.Handler = func(f wire.SNACFrame, b []byte) {
+		if f.FoodGroup != wire.ICBM {
+			return
+		}
+		switch f.SubGroup {
+		case wire.ICBMParameterReply:
+			var p wire.SNAC_0x04_0x05_ICBMParameterReply
+			if err := wire.UnmarshalBE(&p, bytes.NewReader(b)); err == nil {
+				select {
+				case params <- p:
+				default:
+				}
+			}
+		case wire.ICBMChannelMsgToClient:
+			if msg, ok, derr := DecodeIncomingMessage(b); ok && derr == nil {
+				select {
+				case echoes <- msg.Text:
+				default:
+				}
+			}
+		case wire.ICBMErr:
+			// The error SNAC body is a bare uint16 code; there is no struct for
+			// it because the client never decodes one.
+			if len(b) >= 2 {
+				select {
+				case icbmErrs <- binary.BigEndian.Uint16(b[:2]):
+				default:
+				}
+			}
+		}
+	}
+	go func() { _ = s.Run(ctx) }()
+
+	// What the server claims.
+	if err := s.Send(wire.ICBM, wire.ICBMParameterQuery, nil); err != nil {
+		t.Fatalf("ICBMParameterQuery: %v", err)
+	}
+	var advertised int
+	select {
+	case p := <-params:
+		advertised = int(p.MaxIncomingICBMLen)
+		t.Logf("server advertises MaxIncomingICBMLen=%d, MaxSlots=%d, MinInterICBMInterval=%d",
+			p.MaxIncomingICBMLen, p.MaxSlots, p.MinInterICBMInterval)
+	case <-time.After(10 * time.Second):
+		t.Log("server did not answer ICBMParameterQuery; relying on the empirical probe alone")
+	}
+
+	// What the server does. A self-addressed message is relayed back to this
+	// same session, so delivery can be confirmed without a second account.
+	probe := func(n int) bool {
+		t.Helper()
+		for {
+			select {
+			case <-echoes:
+			case <-icbmErrs:
+			default:
+				goto drained
+			}
+		}
+	drained:
+		body := strings.Repeat("A", n)
+		if _, err := s.SendMessage(sn, body, false); err != nil {
+			t.Logf("  %6d bytes: send failed locally: %v", n, err)
+			return false
+		}
+		select {
+		case got := <-echoes:
+			ok := len(got) == n
+			if !ok {
+				t.Logf("  %6d bytes: echoed back TRUNCATED at %d", n, len(got))
+			}
+			return ok
+		case code := <-icbmErrs:
+			t.Logf("  %6d bytes: server returned ICBM error 0x%04x", n, code)
+			return false
+		case <-time.After(15 * time.Second):
+			t.Logf("  %6d bytes: no echo within 15s (treating as refused)", n)
+			return false
+		}
+	}
+
+	// Binary search between a size known to work and one that does not. Kept to
+	// a handful of probes: both stunnel and the server rate-limit, and a long
+	// sweep would measure throttling rather than the ceiling.
+	lo := 1024
+	if !probe(lo) {
+		t.Fatalf("a %d-byte message did not survive; something other than size is wrong", lo)
+	}
+	hi := 65000
+	if probe(hi) {
+		t.Logf("RESULT: %d bytes accepted — at or above the practical FLAP ceiling", hi)
+		t.Logf("post-quantum hybrid wrapping (~8 KB for five devices) fits with room to spare")
+		return
+	}
+	for hi-lo > 512 {
+		mid := lo + (hi-lo)/2
+		if probe(mid) {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+
+	t.Logf("RESULT: largest message that survived intact: %d bytes (refused at %d)", lo, hi)
+	if advertised > 0 && (lo < advertised-1024 || lo > advertised+1024) {
+		t.Logf("NOTE: that disagrees with the advertised %d — the advertised value is not the binding constraint",
+			advertised)
+	}
+	switch {
+	case lo >= 8192:
+		t.Logf("post-quantum hybrid wrapping (~8 KB for five devices) fits as-is")
+	case lo >= 2048:
+		t.Logf("hybrid wrapping does NOT fit at five devices; raising the server limit "+
+			"or moving the envelope off the IM body would be required (have %d, need ~8192)", lo)
+	default:
+		t.Logf("only %d bytes — even modest multi-device envelopes are tight", lo)
+	}
 }
