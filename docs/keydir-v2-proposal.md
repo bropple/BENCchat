@@ -312,28 +312,40 @@ making the server trustworthy:
   prove authenticity, not availability.
 - **It still sees all metadata** — who talks to whom, when, how many devices
   exist, and their labels if set.
-- **Tombstones become redundant.** The manifest counter supersedes them. Keeping
-  them is harmless defence in depth, but they are no longer load-bearing and
-  should not be treated as a security boundary.
+- **Tombstones are gone, not merely redundant.** The manifest counter supersedes
+  them, and since there is no migration to survive (§8) the v1 revoke/restore
+  machinery is deleted rather than kept as defence in depth.
 
-## 8. Migration
+## 8. Migration: there isn't one
 
-A flag day, as `trust-model.md` concluded. At a handful of accounts, carrying
-both formats is more risk than the cutover it avoids.
+**Revised.** This section originally specified a flag day with a period of
+v1/v2 coexistence, following `trust-model.md`. That is no longer the plan,
+because the premise turned out to be wrong: nobody uses this deployment beyond
+the owner's test accounts, and there is a script to wipe the database.
 
-1. BENCoscar learns v2 while still serving v1.
-2. Clients update, generate identity keys, and publish v2 manifests.
-3. Clients start **ignoring unsigned devices**. This is the flag day.
-4. v1 support is removed from the server.
+With no data to preserve and no third-party clients, coexistence buys nothing
+and costs a dispatch layer, a second cleanup pass later, and a window where two
+trust models are live at once. So:
 
-Safety numbers change once, at step 2, for everyone — and that is the last time
-they change for a device addition, which is the entire point.
+**v2 replaces v1 outright.** The v1 subgroups, structs, storage and service
+methods are deleted rather than deprecated. Revoke and Restore disappear as
+protocol operations, because revocation under v2 is simply a manifest at a
+higher counter without that device (§3) — the tombstone was v1's answer to a
+question v2 does not ask.
 
-**One thing to get right in step 2:** publishing a v2 manifest requires the
-identity key, which requires the recovery key to exist. So recovery-key
-generation has to happen at first v2 sign-on, before anything can be published.
-That makes it the first thing a user sees after updating, which is the correct
-place for it and worth designing rather than bolting on.
+The migration that creates the v2 tables also **drops** the `deviceKeys` table.
+That is destructive, and it is only acceptable because no account outside
+testing had published anything. It must be commented as such, so a future reader
+does not mistake it for a safe pattern to copy.
+
+**What still has to be right:** publishing a v2 manifest requires an identity
+key, which requires a recovery key to exist. So recovery-key generation happens
+at first v2 sign-on, before anything can be published — see §12. That ordering
+is unchanged, and it is the reason the first-run screen is the first thing a
+user meets.
+
+Safety numbers change once, when everyone re-bootstraps, and that is the last
+time they change for a device addition. Which was the entire point.
 
 ## 9. Resolved
 
