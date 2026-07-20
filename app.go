@@ -430,7 +430,11 @@ func signOnErrorMessage(err error) string {
 
 // transportHint explains the two ways a port and the TLS setting can disagree.
 // Both fail in a way that reads like a network fault while actually being a
-// one-checkbox misconfiguration, so the error says which checkbox.
+// misconfiguration, so the error names the actual cause.
+//
+// Neither hint points at a Settings control any more: TLS stopped being a
+// preference (see config.TLSOn), so the only way to be in the tlsOn=false case
+// is a hand-edited config.json, and that is what the message names.
 //
 // Plaintext at a TLS port is the quiet one: the connection succeeds, then both
 // ends wait — stunnel for a ClientHello, us for a FLAP hello — until the read
@@ -447,8 +451,10 @@ func transportHint(err error, tlsOn bool) string {
 		// in a live session don't come through sign-on.
 		if strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "timeout") {
 			return "The server accepted the connection but sent nothing back. " +
-				"That usually means this port expects TLS — turn on “Require an " +
-				"encrypted connection (TLS)” in Settings and try again."
+				"That usually means this port expects TLS, and TLS is off. It is " +
+				"on by default and there is no setting for it, so something has " +
+				"turned it off by hand — set \"tlsEnabled\" back to true in " +
+				"config.json, or remove the line, and try again."
 		}
 		return ""
 	}
@@ -462,9 +468,8 @@ func transportHint(err error, tlsOn bool) string {
 	}
 	if strings.Contains(msg, "first record does not look like a TLS handshake") ||
 		strings.Contains(msg, "tls: ") {
-		return "This port doesn't speak TLS. Use the server's TLS port, or turn " +
-			"off “Require an encrypted connection (TLS)” in Settings — which " +
-			"sends your login and buddy list in the clear."
+		return "This port doesn't speak TLS. Use the server's TLS port — 5191 " +
+			"on a BENCO server, which runs no plaintext listener at all."
 	}
 	return ""
 }

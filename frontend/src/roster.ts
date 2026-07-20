@@ -541,12 +541,26 @@ export function renderRoster(
       chatEncEl.classList.add("chat__enc--changed");
       chatEncEl.title = "This person's key changed since you verified it — click to review";
     } else if (status === "device-added") {
-      // Their key set grew rather than being replaced: a new machine, not a
-      // substitution. Still worth surfacing (the safety number moved), but in
-      // the neutral voice — crying wolf here trains people to ignore the real
-      // warning.
+      // Their device set grew rather than being replaced. Under cross-signing
+      // the safety number follows their ACCOUNT identity, not their machines,
+      // so nothing about it moved and there is nothing to re-check. What this
+      // status actually means is that the conversation was never verified in
+      // the first place and they happen to have added a machine — so the badge
+      // says that, neutrally. Raising an alarm over a change the signature
+      // already accounts for is exactly what teaches people to dismiss the
+      // warning that matters.
       chatEncEl.textContent = "🔒 new device";
-      chatEncEl.title = "They added a device — safety number changed; click to re-verify";
+      chatEncEl.title =
+        "They added a device — messages to them are encrypted to it too, and the safety " +
+        "number is unchanged. This conversation is still unverified; click to verify.";
+    } else if (status === "unavailable") {
+      // Encrypting, but there is no identity on one side yet, so there is no
+      // safety number to compare. Distinguished from plain "unverified"
+      // because "click to verify" would open a dialog with nothing in it.
+      chatEncEl.textContent = "🔒 encrypted";
+      chatEncEl.title =
+        "Encrypted, but there's no safety number to compare yet — that needs an account " +
+        "identity on both sides.";
     } else {
       chatEncEl.textContent = "🔒 encrypted";
       chatEncEl.title = "Encrypted (unverified) — click to verify";
@@ -1421,7 +1435,11 @@ export function renderRoster(
       return;
     }
     if (info.status === "unavailable") {
-      showToast("No encryption key for this person yet.", "info");
+      showToast(
+        "No safety number to compare yet — one is derived from both accounts' identities, " +
+          "and one of you doesn't have one set up.",
+        "info",
+      );
       return;
     }
 
@@ -1448,7 +1466,7 @@ export function renderRoster(
         status === "changed"
           ? `<div class="verify__alert">⚠ This person's key has changed since you last verified it. That's normal if they reinstalled BENCchat — but it can also mean someone is intercepting your messages. Compare the number again before trusting it.</div>`
           : status === "device-added"
-            ? `<div class="verify__note">${escapeHTML(screenName)} added a device — the keys you already knew are all still there, so this isn't a substitution. Messages are encrypted separately to each of their devices. The safety number changed as a result; compare it again to re-verify.</div>`
+            ? `<div class="verify__note">${escapeHTML(screenName)} added a device. Messages are encrypted separately to each of their machines, and the number below is unchanged — it is derived from their account's identity, not from the devices under it, so machines coming and going never move it. You haven't verified this conversation yet, which is the only reason this is mentioned at all.</div>`
             : "";
       const deviceNote =
         info.devices > 1

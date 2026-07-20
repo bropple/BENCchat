@@ -107,8 +107,10 @@ export interface Verification {
    *  thing to check. Matching either proves the same fact. Empty when there is
    *  nothing to compare yet. */
   safetyEmoji: SafetyEmoji[];
-  /** "device-added" is a key set that GREW — they set up another machine —
-   *  which is expected, unlike "changed" where a key we relied on is gone. */
+  /** "device-added" means never-verified AND their device set grew — they set
+   *  up another machine. It does NOT mean the safety number moved: that is
+   *  derived from account identities, so devices coming and going never touch
+   *  it. Only "changed" is an identity that is not the one we verified. */
   status: "unavailable" | "unverified" | "verified" | "changed" | "device-added";
   /** How many devices the peer publishes keys for. */
   devices: number;

@@ -213,7 +213,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <p class="benco-caption settings__hint"><strong>Always on, and not optional.</strong> The connection is TLS — sign-on <strong>fails</strong> rather than falling back to cleartext, which is what stops an attacker steering you onto a plaintext port. Messages between BENCchat users are additionally encrypted end-to-end (look for the 🔒); clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. TLS covers what end-to-end encryption can't — your login, buddy list, presence, profiles and who you talk to — though the server itself still sees that metadata. Your keys stay in this device's keychain. Group chats are <em>not</em> covered by end-to-end encryption.</p>
 
                 <div class="benco-caption settings__group-label">Your devices</div>
-                <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. Removing one rewrites the signed list of devices on your account, so it asks for your recovery key — the same key that links a device.</p>
+                <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. This list is signed by your account's identity, which is why both adding and removing a machine cost the recovery key — nothing else can sign it, and that is what stops the server adding a device of its own. An account holds at most five; at the limit BENCchat refuses to publish a sixth rather than quietly dropping one, so retire a machine you no longer use first.</p>
                 <div class="settings__devices" id="deviceList"></div>
 
                 <div class="benco-caption settings__group-label">Recovery key</div>
@@ -225,15 +225,13 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                      paid for that lesson once with safety-number churn. -->
                 <div class="settings__recovery" id="recoveryLine"></div>
                 <p class="benco-caption settings__hint">Checking actually decrypts your account's identity with the key you type, so the answer is real either way — there's no "yes, I still have it" to tick. Losing this key is a slow failure: your devices keep working, but you can't link a new one or remove an old one, and you'd normally find out the day you replace a laptop.</p>
-
-                <p class="benco-caption settings__hint"><strong>On by default.</strong> Messages between BENCchat users are encrypted end-to-end automatically (look for the 🔒). Clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. Your keys stay in this device's keychain. Group chats are <em>not</em> covered. Metadata — who you talk to and when — is hidden from the network by TLS above, but is still visible to the server itself.</p>
               </section>
             </div>
 
             <div class="settings__panel" data-panel="account">
               <section class="settings__section">
                 <div class="benco-label">Account</div>
-                <p class="benco-caption settings__hint">Change your password or email. Requires being signed on. Note: the connection is currently unencrypted.</p>
+                <p class="benco-caption settings__hint">Change your password or email. Requires being signed on. These travel over the TLS connection rather than in the clear, but they go to the server, which reads them — end-to-end encryption covers messages, not account changes.</p>
                 <div class="settings__acct">
                   <input class="benco-input" id="acctOldPw" type="password" placeholder="Current password" autocomplete="current-password" />
                   <input class="benco-input" id="acctNewPw" type="password" placeholder="New password" autocomplete="new-password" />
@@ -488,8 +486,9 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
             "Removing this device publishes a new signed list of devices for your account " +
               "without it. That's what makes the removal stick — the server can't put it " +
               "back — and it's why it needs your recovery key.\n\n" +
-              "The device will no longer be able to read messages sent to you, and your " +
-              "contacts will see your safety number change.",
+              "The device will no longer be able to read messages sent to you. Nobody you " +
+              "talk to sees anything change: safety numbers follow your account's identity, " +
+              "not the machines under it.",
             "",
             {
               title: "Remove device",
@@ -715,9 +714,6 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
       historyMsg.textContent = err || "History cleared.";
       window.setTimeout(() => (historyMsg.textContent = ""), 2000);
     });
-
-    // End-to-end encryption toggle. Enabling mints a keypair and republishes our
-    // profile with the public key; the roster reflects lock state per buddy.
 
     // Profile is only settable while signed on (it's session state, not config),
     // so the control degrades to a note when the bindings aren't available.

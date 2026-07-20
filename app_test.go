@@ -192,7 +192,9 @@ func TestSetupHistoryKeyMintsOnceThenReuses(t *testing.T) {
 }
 
 // A port/TLS mismatch fails in a way that reads like a network fault while
-// actually being one checkbox. The message has to say which.
+// actually being a misconfiguration. The message has to say which — and, since
+// TLS stopped being a preference, it must not send anyone to Settings for a
+// control that is not there.
 func TestTransportHint(t *testing.T) {
 	// The verbatim error from a Windows client speaking plaintext at the TLS
 	// port: the connection succeeded, then both ends waited for each other.
@@ -208,7 +210,9 @@ func TestTransportHint(t *testing.T) {
 		tlsOn  bool
 		expect string // substring the hint must contain; "" means no hint at all
 	}{
-		{"plaintext at a TLS port suggests turning TLS on", plainAtTLSPort, false, "turn on"},
+		// TLS is no longer a setting, so the hint must name config.json rather
+		// than a checkbox that was removed with the security toggles.
+		{"plaintext at a TLS port points at the config, not a checkbox", plainAtTLSPort, false, "config.json"},
 		{"TLS at a plaintext port names the port, not the setting", tlsAtPlainPort, true, "doesn't speak TLS"},
 		{"a bad certificate is not a wrong port", badCert, true, "certificate"},
 		{"an ordinary auth failure gets no transport advice", badPassword, false, ""},

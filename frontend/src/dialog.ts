@@ -196,8 +196,8 @@ export async function promptDialog(
  *  the field was prefilled with the display string (including its "🔒 TLS"
  *  suffix), so submitting it unedited produced a NaN port and a confusing
  *  error. Two fields make the shape of the answer obvious and the port
- *  mandatory — which matters because the port decides whether you land on the
- *  TLS listener or the plaintext one. */
+ *  mandatory — which matters because a BENCO server terminates TLS itself and
+ *  runs no plaintext listener, so the wrong port doesn't degrade, it hangs. */
 export async function serverDialog(
   host: string,
   port: number,
@@ -212,7 +212,7 @@ export async function serverDialog(
       message: "The address of the OSCAR server, and the port it listens on.",
       fields: [
         { name: "host", label: "Server", defaultValue: values.host, placeholder: "chat.example.com", flex: 3 },
-        { name: "port", label: "Port", defaultValue: values.port, placeholder: "5190", flex: 1, inputMode: "numeric" },
+        { name: "port", label: "Port", defaultValue: values.port, placeholder: "5191", flex: 1, inputMode: "numeric" },
       ],
       buttons: [
         { label: "Cancel", value: false },
