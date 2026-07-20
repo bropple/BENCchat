@@ -495,7 +495,13 @@ export function renderRoster(
     )
       return;
     const err = await Bridge.removeBuddy(screenName);
-    if (err) await alertDialog(err, { title: "Remove buddy" });
+    if (err) {
+      await alertDialog(err, { title: "Remove buddy" });
+      return;
+    }
+    // Removing severs the connection, so a conversation with them shouldn't sit
+    // open on screen as if you could still talk.
+    clearActiveIf(normalizeScreenName(screenName));
   }
 
   async function renameBuddy(screenName: string): Promise<void> {
@@ -819,18 +825,29 @@ export function renderRoster(
     chatStatusEl.classList.remove("chat__status--room");
   }
 
-  // Close (remove) a 1:1 thread without blocking the person.
-  async function closeConversation(sn: string): Promise<void> {
-    await Bridge.closeConversation(sn);
-    const key = normalizeScreenName(sn);
-    looseConvos.delete(key);
-    unread.delete(key);
+  // Reset the chat pane to the empty "select someone" state if the given key is
+  // the one on screen. Shared so closing a conversation and removing a buddy
+  // both leave the pane in a sane state rather than showing a dead thread.
+  function clearActiveIf(key: string): void {
     if (activeKey === key) {
       activeScreenName = null;
       activeKey = null;
       chatActiveEl.hidden = true;
       chatEmptyEl.hidden = false;
     }
+  }
+
+  // Close (remove) a 1:1 thread without blocking the person.
+  async function closeConversation(sn: string): Promise<void> {
+    const key = normalizeScreenName(sn);
+    // Reset the pane BEFORE awaiting the backend: closing emits
+    // conversationsChanged, whose handler re-renders the active conversation if
+    // activeScreenName is still set — so clear it first or it briefly redraws the
+    // thread we just closed.
+    clearActiveIf(key);
+    looseConvos.delete(key);
+    unread.delete(key);
+    await Bridge.closeConversation(sn);
     // The conversationsChanged event re-renders the list.
   }
 

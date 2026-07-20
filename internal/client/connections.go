@@ -69,8 +69,12 @@ func (c *Client) handleConnectionResponse(body []byte) {
 
 	// On accept, the buddy is no longer pending — presence will now flow. The
 	// server has already cleared its own pending row; reconcile the mirror and
-	// republish so the UI drops the "awaiting acceptance" marker. On decline the
-	// buddy stays as-is (still pending / unconnected).
+	// republish so the UI drops the "awaiting acceptance" marker.
+	//
+	// On DECLINE the request is over, so the pending buddy is removed rather than
+	// left marked pending forever. Off the read loop, since a feedbag delete is a
+	// network round trip and this handler must not block. The buddy-list refresh
+	// that follows clears it from the UI.
 	if res.Accepted {
 		c.mu.Lock()
 		session := c.session
@@ -78,6 +82,12 @@ func (c *Client) handleConnectionResponse(body []byte) {
 		if session != nil {
 			c.publishBuddyList(session.ClearBuddyPending(res.ScreenName))
 		}
+	} else {
+		go func() {
+			if err := c.RemoveBuddy(res.ScreenName); err != nil {
+				c.log.Warn("could not remove declined pending buddy", "screen_name", res.ScreenName, "err", err)
+			}
+		}()
 	}
 
 	c.conn.mu.Lock()
