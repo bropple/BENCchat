@@ -38,10 +38,9 @@ const (
 	// the count fits in one byte on the wire.
 	maxDevices = 32
 
+	// The v2 and v3 profile markers are no longer written — see StripMarkerAll.
+	// They remain here only so an old bio can be recognized and stripped.
 	profileMarkerOpenV2 = "<!--BENCO-E2EE:v2:"
-	// v3 publishes an Ed25519 signing key beside each device's encryption key,
-	// as "boxkey|signkey", so room messages can be attributed to a sender rather
-	// than merely to "somebody holding the group key".
 	profileMarkerOpenV3 = "<!--BENCO-E2EE:v3:"
 	envelopePrefixV2    = "\x1bBENCO-E2EE:v2:"
 
@@ -54,110 +53,11 @@ const (
 // yet, not because anything is corrupt.
 var ErrNotForUs = errors.New("e2ee: message was not encrypted to this device")
 
-// ProfileMarkerFor builds the hidden profile marker publishing a device set.
-//
-// A single key still emits the v1 marker, so a peer running an older BENCchat
-// keeps working; the v2 list form appears only once there's genuinely more than
-// one device to advertise.
-func ProfileMarkerFor(keys [][32]byte) string {
-	keys = dedupeKeys(keys)
-	switch len(keys) {
-	case 0:
-		return ""
-	case 1:
-		return ProfileMarker(keys[0])
-	}
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = EncodeKey(k)
-	}
-	return profileMarkerOpenV2 + strings.Join(parts, ",") + profileMarkerClose
-}
-
 // Device is one of an account's machines: its encryption key and, from marker
 // v3 onward, the signing key it uses for room messages.
 type Device struct {
 	Box  [32]byte
 	Sign ed25519.PublicKey // nil for a peer publishing an older marker
-}
-
-// ProfileMarkerForDevices builds the v3 marker publishing encryption and
-// signing keys together. Falls back to the older forms when no signing keys are
-// present, so an account that hasn't generated one yet still publishes.
-func ProfileMarkerForDevices(devices []Device) string {
-	var anySign bool
-	for _, d := range devices {
-		if len(d.Sign) > 0 {
-			anySign = true
-			break
-		}
-	}
-	if !anySign {
-		keys := make([][32]byte, 0, len(devices))
-		for _, d := range devices {
-			keys = append(keys, d.Box)
-		}
-		return ProfileMarkerFor(keys)
-	}
-	sorted := make([]Device, len(devices))
-	copy(sorted, devices)
-	sort.Slice(sorted, func(i, j int) bool {
-		return string(sorted[i].Box[:]) < string(sorted[j].Box[:])
-	})
-	parts := make([]string, 0, len(sorted))
-	for _, d := range sorted {
-		entry := EncodeKey(d.Box)
-		if len(d.Sign) > 0 {
-			entry += "|" + EncodeSigningKey(d.Sign)
-		}
-		parts = append(parts, entry)
-	}
-	return profileMarkerOpenV3 + strings.Join(parts, ",") + profileMarkerClose
-}
-
-// ExtractDevices pulls a peer's full device set — encryption keys plus signing
-// keys where published — from their profile, accepting any marker version.
-func ExtractDevices(profile string) ([]Device, bool) {
-	if i := strings.Index(profile, profileMarkerOpenV3); i >= 0 {
-		rest := profile[i+len(profileMarkerOpenV3):]
-		j := strings.Index(rest, profileMarkerClose)
-		if j < 0 {
-			return nil, false
-		}
-		var out []Device
-		for _, part := range strings.Split(rest[:j], ",") {
-			boxPart, signPart, _ := strings.Cut(part, "|")
-			box, err := DecodeKey(boxPart)
-			if err != nil {
-				continue // skip a corrupt entry rather than losing the set
-			}
-			d := Device{Box: box}
-			if signPart != "" {
-				if sk, serr := DecodeSigningKey(signPart); serr == nil {
-					d.Sign = sk
-				}
-			}
-			out = append(out, d)
-			if len(out) == maxDevices {
-				break
-			}
-		}
-		if len(out) == 0 {
-			return nil, false
-		}
-		return out, true
-	}
-	// Older markers carry encryption keys only; such a peer's room messages are
-	// readable but not attributable.
-	keys, ok := ExtractKeys(profile)
-	if !ok {
-		return nil, false
-	}
-	out := make([]Device, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, Device{Box: k})
-	}
-	return out, true
 }
 
 // SigningKeysOf returns just the signing keys from a device set.
@@ -180,49 +80,10 @@ func BoxKeysOf(devices []Device) [][32]byte {
 	return dedupeKeys(out)
 }
 
-// ExtractKeys pulls a peer's published device keys from their profile,
-// accepting either marker version. Returns keys in sorted order so callers can
-// compare sets without worrying about publication order.
-func ExtractKeys(profile string) ([][32]byte, bool) {
-	// A v3 marker carries the same encryption keys with signing keys appended;
-	// reading it through the device parser keeps one source of truth.
-	if strings.Contains(profile, profileMarkerOpenV3) {
-		devices, ok := ExtractDevices(profile)
-		if !ok {
-			return nil, false
-		}
-		return BoxKeysOf(devices), true
-	}
-	if i := strings.Index(profile, profileMarkerOpenV2); i >= 0 {
-		rest := profile[i+len(profileMarkerOpenV2):]
-		j := strings.Index(rest, profileMarkerClose)
-		if j < 0 {
-			return nil, false
-		}
-		var out [][32]byte
-		for _, part := range strings.Split(rest[:j], ",") {
-			k, err := DecodeKey(part)
-			if err != nil {
-				continue // skip a corrupt entry rather than losing the whole set
-			}
-			out = append(out, k)
-			if len(out) == maxDevices {
-				break
-			}
-		}
-		if len(out) == 0 {
-			return nil, false
-		}
-		return dedupeKeys(out), true
-	}
-	// Fall back to the single-key v1 marker.
-	if k, ok := ExtractKey(profile); ok {
-		return [][32]byte{k}, true
-	}
-	return nil, false
-}
-
 // StripMarkerAll removes any marker version from a profile.
+//
+// Nothing writes these markers any more, but a profile written before the key
+// directory existed still carries one, and it must not render as bio text.
 func StripMarkerAll(profile string) string {
 	if i := strings.Index(profile, profileMarkerOpenV3); i >= 0 {
 		rest := profile[i:]

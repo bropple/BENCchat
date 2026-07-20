@@ -53,7 +53,7 @@ type Client struct {
 	// End-to-end encryption. e2eeKP/e2eeHasKP is our keypair (loaded on sign-on if
 	// one exists); e2eeOn is whether to encrypt outbound (decryption always
 	// happens when we have a keypair). e2eeKeys caches peers' public keys learned
-	// from their profiles. Guarded by e2eeMu.
+	// from the key directory. Guarded by e2eeMu.
 	e2eeMu    sync.Mutex
 	e2eeOn    bool
 	e2eeHasKP bool
@@ -66,8 +66,6 @@ type Client struct {
 	onPeerKey func(screenName string, keys, prev [][32]byte)
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
-	// ownKeyWait receives a self-directed locate reply for FetchOwnPublishedKeys.
-	ownKeyWait chan ownKeyReply
 	// onDeviceMessage handles device-linking traffic from our own other sessions.
 	onDeviceMessage func(kind string, keys [][32]byte)
 	// keyDirWait correlates device key directory replies to their requests.
@@ -477,22 +475,9 @@ func (c *Client) handleLocate(frame wire.SNACFrame, body []byte) {
 		c.notePeerCapability(reply.ScreenName, capable)
 	}
 	if reply.HasProfile {
-		devices, hasPub := e2ee.ExtractDevices(reply.Profile)
-		pubs := e2ee.BoxKeysOf(devices)
-		// A reply about ourselves is not a peer: routing it through learnPeerKey
-		// would file a trust entry against our own account and warn us that our
-		// own key had changed. It goes to whoever is checking what this account
-		// currently has published — see FetchOwnPublishedKey.
-		if c.isSelf(reply.ScreenName) {
-			c.deliverOwnKey(pubs, hasPub)
-			return
-		}
-		// A peer's profile may carry their E2EE public key in a hidden marker;
-		// learn it and strip it so it isn't shown as profile text.
-		if hasPub {
-			c.learnPeerKeys(reply.ScreenName, pubs)
-			c.learnPeerSigningKeys(reply.ScreenName, e2ee.SigningKeysOf(devices))
-		}
+		// Profiles no longer carry keys — the key directory is the only source.
+		// Markers are still stripped for display, because an account that has
+		// not republished since the change still has one sitting in its bio.
 		c.store.SetBuddyProfile(reply.ScreenName, e2ee.StripMarkerAll(reply.Profile))
 	}
 }

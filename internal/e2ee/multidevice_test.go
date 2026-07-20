@@ -118,43 +118,16 @@ func TestTamperedBodyFails(t *testing.T) {
 	}
 }
 
-// TestProfileMarkerRoundTrip covers publication and discovery of a device set,
-// including that a single device still uses the v1 marker.
-func TestDeviceSetMarkerRoundTrip(t *testing.T) {
-	one, two, three := mustKey(t), mustKey(t), mustKey(t)
-
-	single := ProfileMarkerFor([][32]byte{one.Public})
-	if !strings.Contains(single, "v1:") {
-		t.Errorf("single-device marker = %q, want the v1 form", single)
-	}
-	got, ok := ExtractKeys("bio\n" + single)
-	if !ok || len(got) != 1 || got[0] != one.Public {
-		t.Fatalf("single-device extract = %v (ok=%v)", got, ok)
-	}
-
-	multi := ProfileMarkerFor([][32]byte{one.Public, two.Public, three.Public})
-	if !strings.Contains(multi, "v2:") {
-		t.Errorf("multi-device marker = %q, want the v2 form", multi)
-	}
-	got, ok = ExtractKeys("bio\n" + multi)
-	if !ok || len(got) != 3 {
-		t.Fatalf("multi-device extract returned %d keys (ok=%v), want 3", len(got), ok)
-	}
-
-	// Extraction is order-independent: publication order must not change the set.
-	other, _ := ExtractKeys("bio\n" + ProfileMarkerFor([][32]byte{three.Public, one.Public, two.Public}))
-	if EncodeKeys(got) != EncodeKeys(other) {
-		t.Error("the same device set extracted differently depending on publication order")
-	}
-}
-
-// TestStripMarkerAllHidesBothVersions: the key marker must never be shown to a
-// user as profile text.
-func TestStripMarkerAllHidesBothVersions(t *testing.T) {
+// TestStripMarkerAllHidesEveryVersion: BENCchat no longer publishes profile
+// markers, but every version it once wrote is still sitting in some account's
+// bio, and none of them may be shown to a user as profile text.
+func TestStripMarkerAllHidesEveryVersion(t *testing.T) {
 	one, two := mustKey(t), mustKey(t)
+	signer := mustSigner(t)
 	for _, marker := range []string{
-		ProfileMarkerFor([][32]byte{one.Public}),
-		ProfileMarkerFor([][32]byte{one.Public, two.Public}),
+		profileMarkerOpen + EncodeKey(one.Public) + profileMarkerClose,
+		profileMarkerOpenV2 + EncodeKey(one.Public) + "," + EncodeKey(two.Public) + profileMarkerClose,
+		profileMarkerOpenV3 + EncodeKey(one.Public) + "|" + EncodeSigningKey(signer.Public) + profileMarkerClose,
 	} {
 		got := StripMarkerAll("my bio\n" + marker)
 		if strings.Contains(got, "BENCO-E2EE") {

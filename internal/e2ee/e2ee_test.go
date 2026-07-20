@@ -83,25 +83,25 @@ func TestKeyEncodeRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProfileMarkerRoundTrip(t *testing.T) {
+// TestStripMarkerHidesLegacyV1: nothing publishes profile markers any more, but
+// accounts that signed on under the old scheme still carry one in their bio and
+// it must never render as profile text.
+func TestStripMarkerHidesLegacyV1(t *testing.T) {
 	kp, _ := GenerateKeyPair()
 	bio := "R. Triy — BENCO roster mascot."
-	profile := bio + "\n" + ProfileMarker(kp.Public)
+	profile := bio + "\n" + profileMarkerOpen + EncodeKey(kp.Public) + profileMarkerClose
 
-	got, ok := ExtractKey(profile)
-	if !ok || got != kp.Public {
-		t.Fatalf("ExtractKey failed: ok=%v", ok)
-	}
 	if stripped := StripMarker(profile); stripped != bio {
 		t.Fatalf("StripMarker = %q, want %q", stripped, bio)
 	}
-
-	// A profile with no marker yields no key and is returned unchanged.
-	if _, ok := ExtractKey(bio); ok {
-		t.Fatal("ExtractKey found a key where there is none")
-	}
+	// A profile with no marker is returned unchanged.
 	if StripMarker(bio) != bio {
 		t.Fatal("StripMarker altered a marker-free profile")
+	}
+	// An unterminated marker must still not leak: better to lose the tail of a
+	// corrupt profile than to show base64 to the user.
+	if got := StripMarker(bio + "\n" + profileMarkerOpen + "truncated"); got != bio {
+		t.Fatalf("unterminated marker survived stripping: %q", got)
 	}
 }
 

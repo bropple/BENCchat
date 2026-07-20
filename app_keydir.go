@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/state"
@@ -29,32 +28,36 @@ func (a *App) ownPublishedKeys() (keys [][32]byte, has bool, ok bool) {
 	}
 
 	// The directory answers from storage, so it lists every device including
-	// machines that are currently offline. The profile only ever showed devices
-	// online at that moment, which is why the local record had to be merged in.
-	if a.client.SupportsKeyDir() {
-		devices, queried := a.client.QueryDevices(self)
-		if queried {
-			return e2ee.BoxKeysOf(devices), len(devices) > 0, true
-		}
-		slog.Default().Warn("key directory query for our own devices failed; falling back to the profile")
+	// machines that are currently offline.
+	if !a.client.SupportsKeyDir() {
+		slog.Default().Error("server has no key directory; cannot read our own published devices")
+		return nil, false, false
 	}
-
-	return a.client.FetchOwnPublishedKeys(5 * time.Second)
+	devices, queried := a.client.QueryDevices(self)
+	if !queried {
+		// Report failure rather than "no devices". A query that did not complete
+		// is not evidence that nothing is published, and treating it as such
+		// would invite the caller to republish over a set it could not read.
+		slog.Default().Warn("key directory query for our own devices failed")
+		return nil, false, false
+	}
+	return e2ee.BoxKeysOf(devices), len(devices) > 0, true
 }
 
-// publishDevices publishes this account's device set.
+// publishDevices publishes this account's device set to the key directory.
 //
-// It writes to the directory when the server has one AND still writes the
-// profile marker. The marker is transitional: a peer running an older BENCchat
-// reads only profiles, and dropping it would make this account unreachable to
-// them. It can go once every client speaks the directory.
+// The profile is no longer part of key publication. It is still written here so
+// that an account whose profile carries a marker from an older BENCchat gets it
+// overwritten on the next publish rather than leaving a stale key on display.
 func (a *App) publishDevices(boxKeys [][32]byte) (accepted int, selfRefused bool) {
-	// The profile is written regardless — it is also where the away message and
-	// user-visible profile text live, so this is not purely about keys.
 	a.publishProfile()
 
 	if !a.client.SupportsKeyDir() {
-		return len(boxKeys), false
+		// Without a directory there is nowhere left to publish keys. Say so
+		// rather than reporting success: the caller's count would otherwise
+		// claim devices are reachable when no peer can discover them.
+		slog.Default().Error("server has no key directory; device keys cannot be published")
+		return 0, false
 	}
 
 	// Only this device's signing key is ours to publish. We learned other

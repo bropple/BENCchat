@@ -190,43 +190,43 @@ func TestSigningKeySeedRoundTrip(t *testing.T) {
 	}
 }
 
-// TestDeviceMarkerV3RoundTrip covers publishing encryption and signing keys
-// together, and reading older markers.
-func TestDeviceMarkerV3RoundTrip(t *testing.T) {
-	box1, box2 := mustKey(t), mustKey(t)
+// TestDeviceKeySplit covers pulling the two kinds of key back out of a device
+// set: the encryption path wants box keys, the room-signing path wants signing
+// keys, and a device set may legitimately mix devices that publish a signing key
+// with ones that don't.
+func TestDeviceKeySplit(t *testing.T) {
+	box1, box2, box3 := mustKey(t), mustKey(t), mustKey(t)
 	sign1, sign2 := mustSigner(t), mustSigner(t)
 
-	marker := ProfileMarkerForDevices([]Device{
+	devices := []Device{
 		{Box: box1.Public, Sign: sign1.Public},
 		{Box: box2.Public, Sign: sign2.Public},
-	})
-	if !strings.Contains(marker, "v3:") {
-		t.Fatalf("marker = %q, want the v3 form", marker)
+		// A device from a client that never generated a signing key: its room
+		// messages are readable but not attributable.
+		{Box: box3.Public},
 	}
 
-	devices, ok := ExtractDevices("bio\n" + marker)
-	if !ok || len(devices) != 2 {
-		t.Fatalf("extracted %d devices (ok=%v), want 2", len(devices), ok)
+	if got := BoxKeysOf(devices); len(got) != 3 {
+		t.Errorf("BoxKeysOf returned %d keys, want 3", len(got))
 	}
-	if len(SigningKeysOf(devices)) != 2 {
-		t.Error("signing keys did not survive publication")
+	signing := SigningKeysOf(devices)
+	if len(signing) != 2 {
+		t.Fatalf("SigningKeysOf returned %d keys, want 2", len(signing))
 	}
-	if len(BoxKeysOf(devices)) != 2 {
-		t.Error("encryption keys did not survive publication")
-	}
-	// ExtractKeys must still work against a v3 marker, since the encryption
-	// path uses it.
-	keys, ok := ExtractKeys("bio\n" + marker)
-	if !ok || len(keys) != 2 {
-		t.Errorf("ExtractKeys on a v3 marker returned %d keys (ok=%v)", len(keys), ok)
-	}
-	if strings.Contains(StripMarkerAll("bio\n"+marker), "BENCO-E2EE") {
-		t.Error("the v3 marker was shown as profile text")
+	for _, want := range []ed25519.PublicKey{sign1.Public, sign2.Public} {
+		var found bool
+		for _, got := range signing {
+			if got.Equal(want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("a published signing key was dropped")
+		}
 	}
 
-	// A peer on an older marker yields devices with no signing key.
-	old, ok := ExtractDevices("bio\n" + ProfileMarkerFor([][32]byte{box1.Public}))
-	if !ok || len(old) != 1 || len(old[0].Sign) != 0 {
-		t.Errorf("older marker parsed wrongly: %+v (ok=%v)", old, ok)
+	// Duplicate devices must not produce duplicate envelope slots.
+	if got := BoxKeysOf(append(devices, Device{Box: box1.Public})); len(got) != 3 {
+		t.Errorf("BoxKeysOf did not dedupe: %d keys, want 3", len(got))
 	}
 }

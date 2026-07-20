@@ -715,3 +715,140 @@ func TestLiveKeyDirectory(t *testing.T) {
 	}
 	t.Logf("restored device published again — removal is reversible")
 }
+
+// TestLiveKeyDirIsAccountScoped answers the question left open when the profile
+// key path was removed: does a SECOND device on the same account see what the
+// first one published?
+//
+// This used to be answered for profiles, and the answer was no — a self-directed
+// Locate reply came from the asking instance, so device 2 could not see device 1
+// (see TestLiveSelfLookupIsInstanceScoped, now skipped). wire/keydir.go
+// describes the directory as account-scoped storage instead, but nothing had
+// verified that against a real server, and multi-device is built on it being
+// true.
+//
+// The two devices are sequential, not simultaneous, so this holds whether or not
+// the server permits concurrent sessions for one account.
+//
+//	BENCCHAT_LIVE_SERVER=host:port BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
+//	go test ./internal/oscar/ -run TestLiveKeyDirIsAccountScoped -v
+func TestLiveKeyDirIsAccountScoped(t *testing.T) {
+	addr := liveAddr(t)
+	sn, pw := os.Getenv("BENCCHAT_LIVE_SCREENNAME"), os.Getenv("BENCCHAT_LIVE_PASSWORD")
+	if sn == "" || pw == "" {
+		t.Skip("set BENCCHAT_LIVE_SCREENNAME and BENCCHAT_LIVE_PASSWORD")
+	}
+	ctx := context.Background()
+
+	deviceKey := func(b byte) []byte {
+		k := make([]byte, 32)
+		for i := range k {
+			k[i] = b
+		}
+		return k
+	}
+
+	// signOn brings up one "device": a fresh BOS session on the same account.
+	signOn := func(label string) (*Session, chan wire.SNACFrame, chan []byte) {
+		res, err := Login(ctx, addr, Credentials{ScreenName: sn, Password: pw}, liveTransport(t))
+		if err != nil {
+			t.Fatalf("Login(%s): %v", label, err)
+		}
+		s, err := SignOn(ctx, res)
+		if err != nil {
+			t.Fatalf("SignOn(%s): %v", label, err)
+		}
+		frames, bodies := make(chan wire.SNACFrame, 16), make(chan []byte, 16)
+		s.Handler = func(f wire.SNACFrame, b []byte) {
+			if f.FoodGroup == wire.BENCOKeyDir {
+				frames <- f
+				bodies <- append([]byte(nil), b...)
+			}
+		}
+		go func() { _ = s.Run(ctx) }()
+		return s, frames, bodies
+	}
+
+	await := func(frames chan wire.SNACFrame, bodies chan []byte, want uint16) []byte {
+		t.Helper()
+		for {
+			select {
+			case f := <-frames:
+				b := <-bodies
+				if f.SubGroup == want {
+					return b
+				}
+				if f.SubGroup == wire.BENCOKeyDirErr {
+					t.Fatalf("server returned a key directory error awaiting subgroup 0x%04x", want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("timed out awaiting key directory subgroup 0x%04x", want)
+			}
+		}
+	}
+
+	// Device one publishes and signs off.
+	one, oneFrames, oneBodies := signOn("device one")
+	if !one.SupportsKeyDir() {
+		_ = one.Close()
+		t.Fatalf("server does not advertise the key directory; foodgroups=%v", one.FoodGroups())
+	}
+	if _, err := one.PublishDeviceKeys([]wire.BENCODevice{
+		{BoxKey: deviceKey(0x11), SignKey: deviceKey(0xB1)},
+	}); err != nil {
+		t.Fatalf("device one publish: %v", err)
+	}
+	pub, err := DecodeKeyDirPublishReply(await(oneFrames, oneBodies, wire.BENCOKeyDirPublishReply))
+	if err != nil {
+		t.Fatalf("decode device one publish reply: %v", err)
+	}
+	if pub.Accepted != 1 {
+		t.Fatalf("device one publish: accepted=%d, want 1", pub.Accepted)
+	}
+	_ = one.Close()
+	t.Log("device one published its key and signed off")
+
+	// Device two: a different session on the same account, querying its own
+	// screen name. It deliberately does NOT publish first — publication is a full
+	// replace, so publishing before reading would destroy exactly what we are
+	// checking for, which is also why the app reads before it writes.
+	two, twoFrames, twoBodies := signOn("device two")
+	defer two.Close()
+
+	if _, err := two.QueryDeviceKeys(sn); err != nil {
+		t.Fatalf("device two self query: %v", err)
+	}
+	got, err := DecodeKeyDirQueryReply(await(twoFrames, twoBodies, wire.BENCOKeyDirQueryReply))
+	if err != nil {
+		t.Fatalf("decode device two self query: %v", err)
+	}
+
+	var found *wire.BENCODevice
+	for i := range got.Devices {
+		if bytes.Equal(got.Devices[i].BoxKey, deviceKey(0x11)) {
+			found = &got.Devices[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("device two saw %d device(s) but not the one device one published: "+
+			"the directory is instance-scoped, not account-scoped, and multi-device "+
+			"cannot work on top of it", len(got.Devices))
+	}
+	if !bytes.Equal(found.SignKey, deviceKey(0xB1)) {
+		t.Errorf("signing key did not survive: got %x", found.SignKey)
+	}
+	t.Logf("device two read back device one's key — the directory is account-scoped")
+
+	// Leave the account as we found it.
+	if _, err := two.RevokeDeviceKey(deviceKey(0x11)); err != nil {
+		t.Logf("cleanup: revoke failed: %v", err)
+		return
+	}
+	await(twoFrames, twoBodies, wire.BENCOKeyDirRevokeReply)
+	if _, err := two.RestoreDeviceKey(deviceKey(0x11)); err == nil {
+		await(twoFrames, twoBodies, wire.BENCOKeyDirRestoreReply)
+	}
+	t.Log("cleanup: test key revoked and its tombstone lifted")
+}

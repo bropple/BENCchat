@@ -381,30 +381,11 @@ func (a *App) notePeerKey(screenName string, keys, _ [][32]byte) {
 	a.store.Notify(state.NoticeWarn, msg)
 }
 
-// wireProfile is the profile as sent to the server: the user's bio, plus the
-// hidden E2EE key marker when encryption is on.
+// wireProfile is the profile as sent to the server: the user's bio, and nothing
+// else. Device keys used to be appended here as a hidden marker; they now live
+// solely in the key directory (foodgroup 0xBE00).
 func (a *App) wireProfile() string {
-	p := a.cfg.Profile
-	if a.cfg.E2EEOn() && a.e2eeHasKey {
-		boxKeys := a.deviceKeys()
-		if len(boxKeys) == 0 {
-			boxKeys = [][32]byte{a.e2eePub}
-		}
-		// Publish this device's signing key alongside its encryption key. Other
-		// devices' signing keys aren't ours to publish — we only ever learned
-		// their encryption keys — so they appear without one until they
-		// republish for themselves.
-		devices := make([]e2ee.Device, 0, len(boxKeys))
-		for _, k := range boxKeys {
-			d := e2ee.Device{Box: k}
-			if k == a.e2eePub && a.hasSignKey {
-				d.Sign = a.signPub
-			}
-			devices = append(devices, d)
-		}
-		p = strings.TrimRight(p, " \n\r\t") + "\n" + e2ee.ProfileMarkerForDevices(devices)
-	}
-	return p
+	return a.cfg.Profile
 }
 
 // publishProfile pushes the current wire profile to the server (a no-op when

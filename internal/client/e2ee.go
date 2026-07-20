@@ -2,7 +2,6 @@ package client
 
 import (
 	"errors"
-	"time"
 
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/oscar"
@@ -189,57 +188,6 @@ func (c *Client) retryPendingDecrypts(screenName string) {
 		}
 		return plain, true
 	})
-}
-
-// ownKeyReply carries what this account currently has published in its profile.
-type ownKeyReply struct {
-	keys [][32]byte
-	has  bool
-}
-
-// deliverOwnKey hands a self-directed locate reply to a waiting
-// FetchOwnPublishedKey, if any. Non-blocking: with nobody waiting it's dropped.
-func (c *Client) deliverOwnKey(keys [][32]byte, has bool) {
-	c.e2eeMu.Lock()
-	ch := c.ownKeyWait
-	c.e2eeMu.Unlock()
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- ownKeyReply{keys: keys, has: has}:
-	default:
-	}
-}
-
-// FetchOwnPublishedKeys asks the server which device keys this account
-// currently advertises. That set is what we merge our own key into, so a second
-// machine adds itself rather than overwriting the first. Returns has=false if
-// nothing is published or the reply doesn't arrive in time — the caller must
-// treat a timeout as "unknown", never as "nothing there".
-func (c *Client) FetchOwnPublishedKeys(timeout time.Duration) (keys [][32]byte, has bool, ok bool) {
-	self := c.store.Self().ScreenName
-	if self == "" || !c.SignedOn() {
-		return nil, false, false
-	}
-
-	ch := make(chan ownKeyReply, 1)
-	c.e2eeMu.Lock()
-	c.ownKeyWait = ch
-	c.e2eeMu.Unlock()
-	defer func() {
-		c.e2eeMu.Lock()
-		c.ownKeyWait = nil
-		c.e2eeMu.Unlock()
-	}()
-
-	c.RequestUserInfo(self)
-	select {
-	case r := <-ch:
-		return r.keys, r.has, true
-	case <-time.After(timeout):
-		return nil, false, false
-	}
 }
 
 // setLocateCapsProbe installs a test hook fired with the capabilities carried

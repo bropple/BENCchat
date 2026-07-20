@@ -194,14 +194,29 @@ func locateReplyBody(t *testing.T, screenName, profile string) []byte {
 	return buf.Bytes()
 }
 
-// TestSelfProfileIsNotTreatedAsAPeer is the guard on multi-device detection.
+// keyDirQueryReplyBody builds a key directory query reply carrying a device set.
+func keyDirQueryReplyBody(t *testing.T, screenName string, keys ...[32]byte) []byte {
+	t.Helper()
+	reply := wire.SNAC_0xBE00_0x0005_BENCOKeyDirQueryReply{ScreenName: screenName}
+	for _, k := range keys {
+		key := k
+		reply.Devices = append(reply.Devices, wire.BENCODevice{BoxKey: key[:]})
+	}
+	var buf bytes.Buffer
+	if err := wire.MarshalBE(reply, &buf); err != nil {
+		t.Fatalf("marshal key directory reply: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestSelfKeysAreNotTreatedAsAPeer is the guard on multi-device detection.
 //
-// Fetching our own profile to see what key this account advertises means a
-// locate reply arrives bearing OUR screen name. If that were handled like any
-// peer's it would file a trust entry against our own account and — once a
-// second device published a different key — warn us that our own key had
-// changed, which is both alarming and meaningless.
-func TestSelfProfileIsNotTreatedAsAPeer(t *testing.T) {
+// Asking the directory what this account publishes means a reply arrives bearing
+// OUR screen name. If that were handled like any peer's it would file a trust
+// entry against our own account and — once a second device published a different
+// key — warn us that our own key had changed, which is both alarming and
+// meaningless.
+func TestSelfKeysAreNotTreatedAsAPeer(t *testing.T) {
 	c, store := newTestClient(t)
 	store.SetSelf("alice")
 
@@ -215,51 +230,21 @@ func TestSelfProfileIsNotTreatedAsAPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.handleSNAC(
-		wire.SNACFrame{FoodGroup: wire.Locate, SubGroup: wire.LocateUserInfoReply},
-		locateReplyBody(t, "alice", "hi\n"+e2ee.ProfileMarker(other.Public)),
+		wire.SNACFrame{FoodGroup: wire.BENCOKeyDir, SubGroup: wire.BENCOKeyDirQueryReply},
+		keyDirQueryReplyBody(t, "alice", other.Public),
 	)
 
 	if len(warned) != 0 {
-		t.Errorf("our own profile was handled as a peer key change for %v", warned)
+		t.Errorf("our own device set was handled as a peer key change for %v", warned)
 	}
 	if _, ok := c.PeerKeys("alice"); ok {
 		t.Error("our own account was cached as a peer key")
 	}
 }
 
-// TestSelfProfileReachesTheDeviceCheck: the same reply must still be delivered
-// to a waiting FetchOwnPublishedKey, or multi-device detection sees nothing.
-func TestSelfProfileReachesTheDeviceCheck(t *testing.T) {
-	c, store := newTestClient(t)
-	store.SetSelf("alice")
-
-	other, err := e2ee.GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := make(chan ownKeyReply, 1)
-	c.e2eeMu.Lock()
-	c.ownKeyWait = got
-	c.e2eeMu.Unlock()
-
-	c.handleSNAC(
-		wire.SNACFrame{FoodGroup: wire.Locate, SubGroup: wire.LocateUserInfoReply},
-		locateReplyBody(t, "alice", "hi\n"+e2ee.ProfileMarker(other.Public)),
-	)
-
-	select {
-	case r := <-got:
-		if !r.has || len(r.keys) != 1 || r.keys[0] != other.Public {
-			t.Errorf("delivered keys = %v (has=%v), want the other device's key", r.keys, r.has)
-		}
-	default:
-		t.Fatal("the self reply never reached the device check")
-	}
-}
-
-// TestPeerProfileStillLearnsKey guards the other direction: the self-routing
-// must not swallow ordinary peers.
-func TestPeerProfileStillLearnsKey(t *testing.T) {
+// TestPeerKeysAreLearnedFromTheDirectory guards the other direction: the
+// self-routing must not swallow ordinary peers.
+func TestPeerKeysAreLearnedFromTheDirectory(t *testing.T) {
 	c, store := newTestClient(t)
 	store.SetSelf("alice")
 	store.ReplaceBuddyList([]state.Buddy{{ScreenName: "bob", Key: "bob", Group: "BENCO"}}, []string{"BENCO"})
@@ -269,16 +254,44 @@ func TestPeerProfileStillLearnsKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.handleSNAC(
-		wire.SNACFrame{FoodGroup: wire.Locate, SubGroup: wire.LocateUserInfoReply},
-		locateReplyBody(t, "bob", "hello\n"+e2ee.ProfileMarker(peer.Public)),
+		wire.SNACFrame{FoodGroup: wire.BENCOKeyDir, SubGroup: wire.BENCOKeyDirQueryReply},
+		keyDirQueryReplyBody(t, "bob", peer.Public),
 	)
 
 	gotKeys, ok := c.PeerKeys("bob")
 	if !ok || len(gotKeys) != 1 || gotKeys[0] != peer.Public {
 		t.Fatal("a peer's published key was not learned")
 	}
-	if b, _ := store.Buddy("bob"); strings.Contains(b.Profile, "BENCO-E2EE") {
-		t.Error("the key marker leaked into the displayed profile text")
+}
+
+// TestLegacyProfileMarkerIsNotDisplayed: keys no longer live in profiles, but an
+// account that has not signed on since the change still carries a marker in its
+// bio, and it must not render as profile text.
+func TestLegacyProfileMarkerIsNotDisplayed(t *testing.T) {
+	c, store := newTestClient(t)
+	store.SetSelf("alice")
+	store.ReplaceBuddyList([]state.Buddy{{ScreenName: "bob", Key: "bob", Group: "BENCO"}}, []string{"BENCO"})
+
+	peer, err := e2ee.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := "hello\n<!--BENCO-E2EE:v1:" + e2ee.EncodeKey(peer.Public) + "-->"
+	c.handleSNAC(
+		wire.SNACFrame{FoodGroup: wire.Locate, SubGroup: wire.LocateUserInfoReply},
+		locateReplyBody(t, "bob", legacy),
+	)
+
+	b, _ := store.Buddy("bob")
+	if strings.Contains(b.Profile, "BENCO-E2EE") {
+		t.Errorf("the key marker leaked into the displayed profile text: %q", b.Profile)
+	}
+	if !strings.Contains(b.Profile, "hello") {
+		t.Errorf("stripping ate the profile text: %q", b.Profile)
+	}
+	// And a profile must never be a source of keys any more.
+	if _, ok := c.PeerKeys("bob"); ok {
+		t.Error("a key was learned from a profile marker")
 	}
 }
 
@@ -346,28 +359,24 @@ func TestMultiDeviceSenderIsIdentified(t *testing.T) {
 	}
 }
 
-// TestMultiDeviceProfileMergePreservesOthers: parsing a peer's v2 marker must
-// yield every device, not just the first — the regression that would silently
-// reduce multi-device back to single-device.
-func TestMultiDeviceProfileMergePreservesOthers(t *testing.T) {
+// TestMultiDeviceDirectoryReplyPreservesOthers: a directory reply listing
+// several devices must yield every one of them, not just the first — the
+// regression that would silently reduce multi-device back to single-device.
+func TestMultiDeviceDirectoryReplyPreservesOthers(t *testing.T) {
 	c, store := newTestClient(t)
 	store.SetSelf("alice")
 	store.ReplaceBuddyList([]state.Buddy{{ScreenName: "bob", Key: "bob", Group: "BENCO"}}, []string{"BENCO"})
 
 	one, _ := e2ee.GenerateKeyPair()
 	two, _ := e2ee.GenerateKeyPair()
-	marker := e2ee.ProfileMarkerFor([][32]byte{one.Public, two.Public})
 
 	c.handleSNAC(
-		wire.SNACFrame{FoodGroup: wire.Locate, SubGroup: wire.LocateUserInfoReply},
-		locateReplyBody(t, "bob", "bio\n"+marker),
+		wire.SNACFrame{FoodGroup: wire.BENCOKeyDir, SubGroup: wire.BENCOKeyDirQueryReply},
+		keyDirQueryReplyBody(t, "bob", one.Public, two.Public),
 	)
 
 	got, ok := c.PeerKeys("bob")
 	if !ok || len(got) != 2 {
 		t.Fatalf("learned %d device keys for bob, want 2", len(got))
-	}
-	if b, _ := store.Buddy("bob"); strings.Contains(b.Profile, "BENCO-E2EE") {
-		t.Error("the v2 marker leaked into the displayed profile")
 	}
 }

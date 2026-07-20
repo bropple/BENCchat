@@ -27,7 +27,7 @@ import (
 
 // Live tests talk to a real OSCAR server and are opt-in:
 //
-//	BENCCHAT_LIVE_SERVER=oscar.example.com:5190 \
+//	BENCCHAT_LIVE_SERVER=oscar.example.com:5191 BENCCHAT_LIVE_TLS=1 \
 //	BENCCHAT_LIVE_SCREENNAME=... BENCCHAT_LIVE_PASSWORD=... \
 //	go test ./internal/client/ -run TestLive -v
 func liveCreds(t *testing.T) (addr, sn, pw string) {
@@ -39,6 +39,31 @@ func liveCreds(t *testing.T) (addr, sn, pw string) {
 		t.Skip("set BENCCHAT_LIVE_SERVER/SCREENNAME/PASSWORD to run live tests")
 	}
 	return addr, sn, pw
+}
+
+// liveTransport mirrors the helper in internal/oscar so these tests can reach a
+// TLS-only deployment. Without it every test here dialed plaintext, which
+// against a stunnel port connects and then hangs waiting for a FLAP hello that
+// never arrives — an i/o timeout that looks nothing like "wrong transport".
+//
+//	BENCCHAT_LIVE_TLS=1          verify the certificate normally
+//	BENCCHAT_LIVE_TLS=insecure   skip verification, for a self-signed dev server
+//
+// Two rate limiters sit in front of a live run: stunnel's (30/min per IP, burst
+// 40) and the server's own sign-on limiter. The whole suite does not fit in one
+// window. The server's limiter says so plainly; stunnel's does not — it drops
+// the connection, which surfaces as an i/o timeout during the FLAP hello and
+// looks exactly like a framing bug. Run in batches before concluding otherwise.
+func liveTransport(t *testing.T) []oscar.Transport {
+	t.Helper()
+	switch os.Getenv("BENCCHAT_LIVE_TLS") {
+	case "1", "true", "yes":
+		return []oscar.Transport{{TLS: true}}
+	case "insecure":
+		return []oscar.Transport{{TLS: true, InsecureSkipVerify: true}}
+	default:
+		return nil
+	}
 }
 
 // TestLiveChatRoom exercises the entire multi-connection chat-room path against
@@ -53,7 +78,7 @@ func TestLiveChatRoom(t *testing.T) {
 	c := New(store, nil)
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
@@ -146,7 +171,7 @@ func TestLiveChatRoomListen(t *testing.T) {
 	defer unsub()
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
@@ -205,7 +230,7 @@ func TestLiveDMEcho(t *testing.T) {
 	defer unsub()
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
@@ -238,7 +263,7 @@ func TestLiveDirectorySearch(t *testing.T) {
 	defer unsub()
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
@@ -302,7 +327,7 @@ func TestLiveWarnDriver(t *testing.T) {
 	defer unsub()
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
@@ -391,23 +416,26 @@ func TestLiveE2EEDriver(t *testing.T) {
 	defer unsub()
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
 
 	// Publish our key so the other side can discover it, then ask for theirs.
-	if err := c.SetProfile("bob, BENCO coworker.\n" + e2ee.ProfileMarker(kp.Public)); err != nil {
-		t.Fatalf("SetProfile (publishing our key): %v", err)
+	if err := c.SetProfile("bob, BENCO coworker."); err != nil {
+		t.Fatalf("SetProfile: %v", err)
+	}
+	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: kp.Public}}); !ok {
+		t.Fatal("could not publish our device key to the key directory")
 	}
 	t.Logf("our public key: %s", e2ee.EncodeKey(kp.Public))
-	// The peer's key arrives on the profile reply. Re-request on a slow loop for
-	// a minute rather than polling once: the human on the other end may still be
-	// turning encryption on, which is what republishes their profile.
+	// Re-request on a slow loop for a minute rather than polling once: the human
+	// on the other end may still be turning encryption on, which is what
+	// publishes their keys.
 	var peer [][32]byte
 	var havePeer bool
 	for i := 0; i < 20; i++ {
-		c.RequestUserInfo(target)
+		c.RefreshPeerKeys(target)
 		for j := 0; j < 12; j++ {
 			if peer, havePeer = c.PeerKeys(target); havePeer {
 				break
@@ -419,7 +447,7 @@ func TestLiveE2EEDriver(t *testing.T) {
 		}
 	}
 	if !havePeer {
-		t.Logf("no E2EE key found in %q's profile yet — is encryption enabled on that side?", target)
+		t.Logf("no E2EE key published by %q yet — is encryption enabled on that side?", target)
 	} else {
 		t.Logf("learned %q's key(s): %s", target, e2ee.EncodeKeys(peer))
 		t.Logf("SAFETY NUMBER (both sides must match):\n\t%s", e2ee.SafetyNumberSet([][32]byte{kp.Public}, peer))
@@ -448,7 +476,7 @@ func TestLiveCapabilities(t *testing.T) {
 	c := New(store, nil)
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v — a malformed capabilities blob drops the connection here", err)
 	}
 	defer func() { _ = c.SignOff() }()
@@ -480,65 +508,28 @@ func TestLiveCapabilities(t *testing.T) {
 	}
 }
 
-// TestLiveSelfLookupIsInstanceScoped pins down the server behaviour that
-// decides how multi-device has to work.
+// TestLiveSelfLookupIsInstanceScoped recorded the server behaviour that used to
+// decide how multi-device had to work.
 //
 // open-oscar-server answers a self-directed UserInfoQuery from the asking
-// INSTANCE's profile, not the account's (foodgroup/locate.go: "if looking up
-// own profile, return this instance's profile for consistency"). A second
-// machine therefore cannot discover the first machine's published key by
-// looking the account up — even with both signed on at once.
+// INSTANCE's profile, not the account's (foodgroup/locate.go: "if looking up own
+// profile, return this instance's profile for consistency"). While device keys
+// lived in the profile, that meant a second machine could not discover the
+// first's key by looking the account up, which is why linking needed an explicit
+// step.
 //
-// That rules out automatic device-set merging and is why linking a device needs
-// an explicit step. If this test ever starts failing because a second session's
-// keys DO show up, the automatic merge becomes possible and this constraint can
-// be revisited. Run:
+// Keys now live in the server's key directory, which is account-scoped storage
+// and answers a query for our own screen name (see wire/keydir.go). The
+// constraint this test pinned down therefore no longer governs anything, and the
+// API it probed — FetchOwnPublishedKeys — is gone.
 //
-//	BENCCHAT_LIVE_SERVER=... SCREENNAME=... PASSWORD=... \
-//	go test ./internal/client/ -run TestLiveSelfLookupIsInstanceScoped -v -timeout 120s
+// Left skipped rather than deleted because the question it replaces is still
+// worth answering against a live server: does the directory show device 2 the
+// key device 1 published? Rewriting it that way needs a run against the real
+// deployment to confirm the expected answer, so it is not guessed at here.
 func TestLiveSelfLookupIsInstanceScoped(t *testing.T) {
-	addr, sn, pw := liveCreds(t)
-
-	signOn := func(label string) *Client {
-		store := state.NewStore()
-		c := New(store, nil)
-		if err := c.SignOn(context.Background(), addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
-			t.Fatalf("%s SignOn: %v", label, err)
-		}
-		return c
-	}
-
-	laptopKey, err := e2ee.GenerateKeyPair()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	laptop := signOn("device 1")
-	defer func() { _ = laptop.SignOff() }()
-	if err := laptop.SetProfile("device test\n" + e2ee.ProfileMarkerFor([][32]byte{laptopKey.Public})); err != nil {
-		t.Fatalf("device 1 SetProfile: %v", err)
-	}
-	got, has, ok := laptop.FetchOwnPublishedKeys(8 * time.Second)
-	if !ok || !has || len(got) != 1 {
-		t.Fatalf("device 1 cannot see its own published key (ok=%v has=%v n=%d)", ok, has, len(got))
-	}
-	t.Log("device 1 sees its own key, as expected")
-
-	// Second session on the same account, first still connected.
-	phone := signOn("device 2")
-	defer func() { _ = phone.SignOff() }()
-	got, has, _ = phone.FetchOwnPublishedKeys(8 * time.Second)
-	if has && len(got) > 0 {
-		t.Errorf("device 2 CAN see device 1's key (%d found) — self-lookup is no longer "+
-			"instance-scoped, so automatic device merging is now possible", len(got))
-	} else {
-		t.Log("device 2 sees nothing: self-lookup is instance-scoped, so a device " +
-			"cannot discover its siblings. Linking must be explicit.")
-	}
-
-	if err := laptop.SetProfile("device test"); err != nil {
-		t.Logf("cleanup SetProfile: %v", err)
-	}
+	t.Skip("obsolete: device keys moved from the Locate profile to the key directory; " +
+		"needs rewriting as a directory self-query, verified against a live server")
 }
 
 // TestLiveSelfMessageRelay asks whether the server relays an instant message
@@ -570,7 +561,7 @@ func TestLiveSelfMessageRelay(t *testing.T) {
 				}
 			}
 		})
-		if err := c.SignOn(context.Background(), addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+		if err := c.SignOn(context.Background(), addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 			t.Fatalf("%s SignOn: %v", label, err)
 		}
 		return s
@@ -652,7 +643,7 @@ func TestLiveDeviceLinkHandshake(t *testing.T) {
 			default:
 			}
 		})
-		if err := c.SignOn(context.Background(), addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+		if err := c.SignOn(context.Background(), addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 			t.Fatalf("%s SignOn: %v", label, err)
 		}
 		return d
@@ -1062,14 +1053,17 @@ func TestLiveRoomDriver(t *testing.T) {
 	}
 	defer func() { _ = c.SignOff() }()
 
-	if err := c.SetProfile("bob, BENCO coworker.\n" + e2ee.ProfileMarkerFor([][32]byte{kp.Public})); err != nil {
-		t.Fatalf("publishing our key failed: %v", err)
+	if err := c.SetProfile("bob, BENCO coworker."); err != nil {
+		t.Fatalf("SetProfile: %v", err)
+	}
+	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: kp.Public}}); !ok {
+		t.Fatal("publishing our key to the key directory failed")
 	}
 	target := os.Getenv("BENCCHAT_LIVE_TARGET")
 	if target == "" {
 		t.Skip("set BENCCHAT_LIVE_TARGET to the screen name to talk to")
 	}
-	c.RequestUserInfo(target)
+	c.RefreshPeerKeys(target)
 	time.Sleep(2 * time.Second)
 	if err := c.SendMessage(target, "bob online with a fresh key — invite me to an encrypted room when ready."); err != nil {
 		t.Logf("opening DM failed: %v", err)
@@ -1357,9 +1351,11 @@ func TestLiveRoomHost(t *testing.T) {
 
 	// Publish BOTH keys so the invitee can encrypt to us and verify our
 	// signatures.
-	marker := e2ee.ProfileMarkerForDevices([]e2ee.Device{{Box: boxKP.Public, Sign: signKP.Public}})
-	if err := c.SetProfile("bob, BENCO coworker.\n" + marker); err != nil {
-		t.Fatalf("publishing our keys failed: %v", err)
+	if err := c.SetProfile("bob, BENCO coworker."); err != nil {
+		t.Fatalf("SetProfile: %v", err)
+	}
+	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: boxKP.Public, Sign: signKP.Public}}); !ok {
+		t.Fatal("publishing our keys to the key directory failed")
 	}
 	t.Logf("published signing key, signer id %s", e2ee.SignerID(signKP.Public))
 
@@ -1367,7 +1363,7 @@ func TestLiveRoomHost(t *testing.T) {
 	// encrypted 1:1 message, so we cannot invite them without it.
 	var haveTheirs bool
 	for i := 0; i < 20 && !haveTheirs; i++ {
-		c.RequestUserInfo(target)
+		c.RefreshPeerKeys(target)
 		for j := 0; j < 10; j++ {
 			if _, ok := c.PeerKeys(target); ok {
 				haveTheirs = true
@@ -1513,13 +1509,16 @@ func TestLiveDeviceWatch(t *testing.T) {
 	defer unsub()
 
 	ctx := context.Background()
-	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}); err != nil {
+	if err := c.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
 		t.Fatalf("SignOn: %v", err)
 	}
 	defer func() { _ = c.SignOff() }()
 
-	if err := c.SetProfile("cmaximus, BENCO coworker.\n" + e2ee.ProfileMarker(kp.Public)); err != nil {
+	if err := c.SetProfile("cmaximus, BENCO coworker."); err != nil {
 		t.Fatalf("SetProfile: %v", err)
+	}
+	if _, _, ok := c.PublishDevices([]e2ee.Device{{Box: kp.Public}}); !ok {
+		t.Fatal("could not publish our device key to the key directory")
 	}
 	ours := [][32]byte{kp.Public}
 
@@ -1528,7 +1527,7 @@ func TestLiveDeviceWatch(t *testing.T) {
 	// the first message in the clear — which is exactly what happened the first
 	// time this driver ran.
 	for i := 0; i < 20; i++ {
-		c.RequestUserInfo(target)
+		c.RefreshPeerKeys(target)
 		if keys, ok := c.PeerKeys(target); ok && len(keys) > 0 {
 			t.Logf("learned %d key(s) for %q before sending", len(keys), target)
 			break
@@ -1545,12 +1544,12 @@ func TestLiveDeviceWatch(t *testing.T) {
 	}
 	t.Logf("online as %q, watching %q for %ds", sn, target, secs)
 
-	// Poll the profile. The server keeps a BUCP client's keys on the live
-	// session, so a re-request is the only way to observe a change.
+	// Poll the directory: a re-query is the only way to observe the target
+	// adding or removing a device while we watch.
 	var last [][32]byte
 	deadline := time.Now().Add(time.Duration(secs) * time.Second)
 	for time.Now().Before(deadline) {
-		c.RequestUserInfo(target)
+		c.RefreshPeerKeys(target)
 		time.Sleep(3 * time.Second)
 
 		keys, ok := c.PeerKeys(target)

@@ -113,36 +113,15 @@ func Seal(message string, recipientPub, senderPriv [32]byte) (string, error) {
 	return envelopePrefix + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
-// Profiles carry a peer's public key inside an HTML comment, so it rides in the
-// existing Locate profile field with no server change and stays invisible in
-// clients that render the profile as HTML (BENCchat strips comments too).
+// BENCchat used to publish device keys inside the Locate profile, hidden in an
+// HTML comment. That path is gone — keys live in the server's key directory now
+// — but accounts that signed on under the old scheme still carry a marker in
+// their bio, so the markers must still be recognized well enough to strip them
+// before a profile is shown.
 const (
 	profileMarkerOpen  = "<!--BENCO-E2EE:v1:"
 	profileMarkerClose = "-->"
 )
-
-// ProfileMarker builds the hidden marker to append to a profile to publish pub.
-func ProfileMarker(pub [32]byte) string {
-	return profileMarkerOpen + EncodeKey(pub) + profileMarkerClose
-}
-
-// ExtractKey pulls a published public key out of a profile, if present.
-func ExtractKey(profile string) ([32]byte, bool) {
-	i := strings.Index(profile, profileMarkerOpen)
-	if i < 0 {
-		return [32]byte{}, false
-	}
-	rest := profile[i+len(profileMarkerOpen):]
-	j := strings.Index(rest, profileMarkerClose)
-	if j < 0 {
-		return [32]byte{}, false
-	}
-	key, err := DecodeKey(rest[:j])
-	if err != nil {
-		return [32]byte{}, false
-	}
-	return key, true
-}
 
 // StripMarker removes the E2EE marker (and any surrounding whitespace) from a
 // profile so it isn't shown to the user.
