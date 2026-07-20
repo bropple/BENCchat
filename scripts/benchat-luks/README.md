@@ -288,7 +288,24 @@ and the second case is the one that is well understood. If unlock fails while
 
 ## Revoking
 
-The property this whole bundle exists for. On the Tang host:
+The property this whole bundle exists for.
+
+> **⚠ UNTESTED. Rehearse this before you need it.**
+>
+> The procedure below is written from Tang's documented behaviour, not from
+> having watched it work. The specific thing to verify is the distinction in the
+> comment: a **leading dot** on a key file is documented as un-advertising it
+> while leaving existing bindings functional, whereas **moving the file away**
+> is what actually breaks them. If that is backwards, or if `tangd` caches keys
+> across a restart, then a revocation you believe succeeded did nothing — and
+> you would only discover it at the exact moment it mattered.
+>
+> Rehearse it on a scratch volume: bind, confirm it unlocks, revoke, confirm it
+> now **fails**, then restore the key and confirm it unlocks again. Fifteen
+> minutes, once, and this section stops being a promise and becomes a fact.
+> Delete this box when you have.
+
+On the Tang host:
 
 ```bash
 cd /var/db/tang
