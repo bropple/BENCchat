@@ -879,12 +879,18 @@ func (a *App) DeclineDevice(keyB64 string) string {
 
 	a.rememberKnownDevice(key)
 
-	// Tell it. Every session on this account hears this, and only the device
-	// whose key matches acts on it.
-	//
-	// Guarded: declining is also reachable with no session (and in tests), and
-	// the decline itself must still be recorded even when nobody can be told.
 	if a.client != nil && a.client.SignedOn() {
+		// Record the refusal on the server FIRST. The live message below only
+		// reaches a device that is connected right now, so on its own a denial
+		// evaporates if that machine happened to be offline — and it would ask
+		// again on its next sign-on as though nothing had been decided. A
+		// tombstone makes the answer outlive the moment it was given: the device
+		// is refused whenever it next tries to publish.
+		a.revokeDevices([][32]byte{key})
+
+		// Then tell it, so a connected device finds out immediately rather than
+		// discovering it at some later sign-on. Every session on this account
+		// hears this; only the one whose key matches acts on it.
 		if err := a.client.SendDeviceMessage(e2ee.DeviceDeny, [][32]byte{key}); err != nil {
 			slog.Default().Warn("could not tell the device it was denied", "err", err)
 		}
