@@ -60,6 +60,36 @@ This collapses most of the machinery we have been building:
   arbitrate; once signatures arbitrate, a malicious or rolled-back server cannot
   undo a revocation.
 
+### What this actually buys, given the operator can still reset the password
+
+A fair objection: if an operator can reset the password, what has been gained?
+
+**Not "the operator cannot get in."** Nobody can promise that — they control the
+server and the account. What changes is that they can no longer do it *quietly*.
+
+Today: reset the password, sign in, publish a device, read everything sent from
+then on. The account keeps working, so the owner may never notice. Contacts see
+a safety number change — but they see one every time the owner adds a laptop, so
+the intrusion is camouflaged by a routine event.
+
+After: the same reset gets them a session and nothing else. They cannot sign a
+device under an identity key they do not hold, so every client ignores their
+device and they receive nothing readable. Their only route is to clear the
+identity binding and start a new one, which is immediately visible to the owner —
+their devices stop working — and unambiguous to contacts, because safety numbers
+no longer change for device additions. An identity change is the only thing that
+moves one.
+
+Stated as a property:
+
+> An operator can **destroy** an identity or **replace** it, but cannot
+> **become** someone without everyone finding out.
+
+The second-order effect is the more valuable one. Removing routine
+safety-number churn is what makes the warning mean anything: an alert that fires
+every time someone buys a laptop is an alert people learn to click through, and
+then it is not there when it matters.
+
 ### Recovery
 
 The identity key is backed up encrypted under a key derived from a **recovery
