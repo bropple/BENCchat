@@ -135,10 +135,17 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          # Stamp the build so the sign-on screen can report exactly what commit
+          # a client came from. A stale client that predates a wire change fails
+          # against the server cryptically; this makes the mismatch visible.
+          VERSION="$(git describe --tags --always 2>/dev/null || echo dev)"
+          COMMIT="$(git rev-parse --short HEAD)"
+          LDFLAGS="-X main.version=${VERSION} -X main.commit=${COMMIT}"
+          echo "build stamp: ${VERSION} (${COMMIT})"
           if [ -n "${{ matrix.tags }}" ]; then
-            wails build -platform ${{ matrix.platform }} -tags ${{ matrix.tags }} -clean
+            wails build -platform ${{ matrix.platform }} -tags ${{ matrix.tags }} -ldflags "$LDFLAGS" -clean
           else
-            wails build -platform ${{ matrix.platform }} -clean
+            wails build -platform ${{ matrix.platform }} -ldflags "$LDFLAGS" -clean
           fi
 
       # Windows Defender flags unsigned Go GUI binaries as a matter of course

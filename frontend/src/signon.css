@@ -89,6 +89,15 @@
   color: var(--benco-phosphor);
 }
 
+/* Quiet by design: present for when a sign-on misbehaves and someone needs to
+   confirm the build, not competing with the form for attention. */
+.signon__build {
+  margin-top: 6px;
+  font-size: 0.8em;
+  color: var(--benco-dim);
+  opacity: 0.7;
+}
+
 .signon__actions {
   display: flex;
   gap: 10px;

@@ -66,6 +66,8 @@ export function renderSignOn(root: HTMLElement, onSignedOn: () => void): void {
           </div>
           <button class="settings-gear" id="settingsBtn" title="Settings">⚙ Settings</button>
         </div>
+
+        <div class="signon__build benco-caption" id="buildValue" title="Client build — check this matches the server if a sign-on fails oddly"></div>
       </div>
 
       <img class="signon__logo" src="${bencoLogo}" alt="BENCO Holdings" aria-hidden="true" />
@@ -112,6 +114,11 @@ export function renderSignOn(root: HTMLElement, onSignedOn: () => void): void {
       serverValue.textContent = `${s.host}:${s.port}${
         s.tls ? (s.tlsInsecure ? " 🔓 TLS (unverified)" : " 🔒 TLS") : " (not encrypted)"
       }`;
+      // The build string is here so a version-skewed client -- one that predates
+      // a wire change and gets booted with a cryptic error -- can be identified
+      // at a glance instead of from the server log.
+      const buildEl = document.getElementById("buildValue");
+      if (buildEl && s.build) buildEl.textContent = `build ${s.build}`;
       // Default "stay signed in" on unless the user previously turned it off by
       // signing off (which clears the remembered flag on an otherwise-fresh run).
       rememberMe.checked = s.remembered || !s.lastScreenName;

@@ -16,6 +16,17 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// Build identity, stamped at link time with -ldflags "-X main.version=... -X
+// main.commit=...". The defaults are what an un-stamped local build reports, and
+// they are deliberately obvious: a client that cannot talk to the server because
+// it predates a wire change looks identical to a healthy one until you can read
+// its build off the sign-on screen, which is exactly the failure this exists to
+// make visible.
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
 // Application/tray icons, rendered from the R. Triy mark
 // (assets/brand/benco-roster-triy.svg).
 // appIconPNG doubles as the Linux window icon; the tray uses PNG on Linux/macOS

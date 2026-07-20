@@ -15,6 +15,9 @@ export interface ServerSettings {
   tls: boolean;
   /** Certificate verification is disabled — testing only. */
   tlsInsecure: boolean;
+  /** This client's version and short commit, e.g. "dev (a1b2c3d)". Shown on the
+   *  sign-on screen so a stale build is visible before it fails cryptically. */
+  build: string;
 }
 
 /** Sign-on lifecycle state. Mirrors app.go's SessionStatus. */

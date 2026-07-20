@@ -1763,3 +1763,5 @@ func TestLiveCrossSigning(t *testing.T) {
 		t.Error("a manifest with a flipped byte still verified")
 	}
 }
+
+func liveCredsObj(sn, pw string) oscar.Credentials { return oscar.Credentials{ScreenName: sn, Password: pw} }

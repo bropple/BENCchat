@@ -255,6 +255,11 @@ type ServerSettings struct {
 	// Remembered reports whether a password is saved for auto-login, so the
 	// sign-on form can reflect the "stay signed in" state.
 	Remembered bool `json:"remembered"`
+	// Build is this client's version and short commit, stamped at link time.
+	// Shown on the sign-on screen so a stale build -- one that predates a wire
+	// change and cannot talk to the server -- is visible at a glance rather than
+	// surfacing as a cryptic disconnect.
+	Build string `json:"build"`
 }
 
 // GetServerSettings returns the current server address and remembered screen
@@ -267,6 +272,7 @@ func (a *App) GetServerSettings() ServerSettings {
 		TLS:            a.cfg.TLSOn(),
 		TLSInsecure:    a.cfg.TLSInsecure,
 		Remembered:     a.cfg.RememberedScreenName != "",
+		Build:          version + " (" + commit + ")",
 	}
 }
 

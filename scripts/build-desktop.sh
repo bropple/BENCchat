@@ -29,13 +29,19 @@ command -v wails >/dev/null || {
   exit 1
 }
 
-LDFLAGS=""
+# Stamp the build so a running client can report exactly what it was built from.
+# A stale client that predates a wire change fails against the server in a way
+# that is invisible without this -- see the sign-on screen's build line.
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+LDFLAGS="-X main.version=${VERSION} -X main.commit=${COMMIT}"
 if [[ -n "${AUTH_HOST:-}" ]]; then
-  LDFLAGS="-X github.com/benco-holdings/benchat/internal/config.DefaultAuthHost=${AUTH_HOST}"
+  LDFLAGS="${LDFLAGS} -X github.com/benco-holdings/benchat/internal/config.DefaultAuthHost=${AUTH_HOST}"
   echo "==> building with a baked-in host — keep these binaries to yourself"
 else
   echo "==> building with no server address (enter it on the sign-on screen)"
 fi
+echo "==> build stamp: ${VERSION} (${COMMIT})"
 
 build() {
   local platform="$1" label="$2"
