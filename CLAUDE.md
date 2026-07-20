@@ -131,6 +131,17 @@ silently overriding it.
   fields; if BENCchat needs something OSCAR can't express, that's a real
   design decision to surface, not something to sneak into a TLV.
 
+## Trust model
+
+The current model roots everything in the account password, which means anyone
+holding it owns the account outright — approval dialogs, device removal and any
+server-side policy are advisory on top of that. See
+[`docs/trust-model.md`](docs/trust-model.md) for why, and for the proposed fix
+(an account identity key that cross-signs device keys). That document is a
+proposal, not built; read it before designing anything else in this area,
+because most obvious ideas here have already been ruled out for reasons worth
+knowing.
+
 ## Open questions to resolve early
 
 - UI framework / platform target (desktop-first? which toolkit?)
