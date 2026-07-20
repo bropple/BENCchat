@@ -203,6 +203,34 @@ type SNAC_0xBE00_0x000D_GetBackupReply struct {
 The KDF parameters travel with the blob so they can be raised later without
 stranding existing backups.
 
+`PutBackupReply{Stored uint8}` and `GetBackupRequest{Version uint16}` complete
+the pairs.
+
+**`GetBackupRequest` carries no screen name, and that is a security boundary
+rather than an omission.** §1 concedes the blob is attackable offline with no
+rate limiting once someone holds it — so serving one account's backup to another
+would reduce a takeover to an unhurried dictionary attack. The screen name comes
+from the session, as it does for publish.
+
+### Gaps found during implementation
+
+Four things this document did not say, discovered building the server. Recorded
+here so it describes what exists.
+
+- **Reserved algorithms are refused, not ignored.** A server receiving `0x03` or
+  `0x04` rejects the request. Accepting a signature it cannot verify, while
+  reporting that it verified one, is worse than refusing outright.
+- **Counter `0` is invalid.** Reserving it keeps "no manifest published" and
+  "the first manifest" from being the same value downstream.
+- **Counters above `MaxInt64` are refused.** SQLite's `INTEGER` is signed, so an
+  unguarded `uint64` near the top of its range wraps negative and then compares
+  *backwards* — silently inverting the rollback defence rather than breaking it
+  visibly. This is the sharpest edge in the whole design and it is invisible
+  until it fires.
+- **`IssuedAt` is stored and returned unvalidated.** Correct per the advisory
+  rule above, but worth stating: the server cannot help a client that ignores
+  it.
+
 ## 5. Identity-key custody
 
 **Who holds the identity private key, and for how long?** **Decided: (b),
