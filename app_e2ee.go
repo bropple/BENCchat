@@ -128,6 +128,7 @@ func (a *App) publishAfterDeviceCheck() {
 	// approve us — which the user otherwise has no way of knowing, since the
 	// approval happens on the other device entirely.
 	published, has, ok := a.ownPublishedKeys()
+	notLinked := false
 
 	// Where the device list comes from, and why it is NOT always a merge.
 	//
@@ -171,7 +172,10 @@ func (a *App) publishAfterDeviceCheck() {
 			}
 		}
 		if !known && len(published) > 0 {
-			a.setLinkPending()
+			// Quietly: the explanation waits until publishDevices reports
+			// whether this device was refused, so the user gets one reason
+			// rather than two contradictory ones.
+			notLinked = a.setLinkPendingQuiet()
 		}
 		merged = append(merged, published...)
 	}
@@ -207,7 +211,12 @@ func (a *App) publishAfterDeviceCheck() {
 		strings.Split(e2ee.EncodeKeys(devices), ","), seen); err != nil {
 		slog.Default().Warn("could not remember device keys", "err", err)
 	}
-	a.publishDevices(devices)
+	// publishDevices reports whether THIS device was refused, which means it was
+	// removed rather than merely new — a different situation needing different
+	// words, already explained by onRevokedDeviceReturned.
+	if wasRefused := a.publishDevices(devices); notLinked && !wasRefused {
+		a.notifyNotLinked()
+	}
 	// Say hello to any other session on this account, so a new machine can be
 	// linked without typing codes.
 	a.announceDevice()
@@ -251,6 +260,9 @@ func (a *App) ForgetOtherDevices() string {
 	// Revoke before republishing, so the account never briefly advertises a
 	// device that was just removed. See RemoveDevice.
 	a.revokeDevices(gone)
+	for _, k := range gone {
+		a.forgetLinkPrompt(k)
+	}
 	a.publishDevices([][32]byte{a.e2eePub})
 	a.store.Notify(state.NoticeInfo,
 		"Other devices removed. Your contacts will see your safety number change.")
@@ -591,6 +603,12 @@ func (a *App) RemoveDevice(keyB64 string) string {
 	// then tombstone it, leaving the account briefly advertising a device the
 	// user just took away.
 	a.revokeDevices([][32]byte{target})
+	// Let this device ask again. markLinkPrompted suppresses a second dialog
+	// for a device already prompted this session, which is right for a sibling
+	// reconnecting — but after a REMOVAL the next announcement is exactly the
+	// one the user needs to see, and swallowing it makes the "approve it again"
+	// advice impossible to follow.
+	a.forgetLinkPrompt(target)
 	a.publishDevices(kept)
 	a.store.Notify(state.NoticeInfo,
 		"Device removed. Your contacts will see your safety number change.")
@@ -696,38 +714,44 @@ func (a *App) resetLinkState() {
 // and tells the user how — including this device's own code, which the
 // approving machine asks them to compare against.
 func (a *App) setLinkPending() {
+	if a.setLinkPendingQuiet() {
+		a.notifyNotLinked()
+	}
+}
+
+// setLinkPendingQuiet records the pending state without explaining it, returning
+// whether this is the first time this session.
+//
+// Split out because "unlinked" has two causes that need different words: a
+// genuinely NEW device, and one that was REMOVED. Which applies is only known
+// after the publish either succeeds or is refused, so the state is recorded
+// first and the explanation chosen afterwards. Emitting during the read is what
+// produced two contradictory notices at the same instant.
+func (a *App) setLinkPendingQuiet() bool {
 	a.linkMu.Lock()
 	already := a.linkPending
 	a.linkPending = true
-	quiet := a.linkNoticeSuppressed
 	a.linkMu.Unlock()
 	if already {
-		return
+		return false
 	}
 	a.emitLinkState()
-	if quiet {
-		// A more specific notice has already explained this state — see
-		// suppressLinkPendingNotice. The pending flag still matters (the UI uses
-		// it), only the duplicate explanation is dropped.
-		return
-	}
+	return true
+}
+
+// notifyNotLinked explains the NEW-device case.
+func (a *App) notifyNotLinked() {
 	a.store.Notify(state.NoticeWarn, fmt.Sprintf(
 		"This device isn't linked yet, so it can't read messages encrypted to your "+
 			"other devices. Approve it from a device that's already signed in — its "+
 			"code is %s.", e2ee.Fingerprint(a.e2eePub)))
 }
 
-// suppressLinkPendingNotice stops the next setLinkPending from emitting its
-// generic "isn't linked yet" text.
-//
-// Being unlinked because you are NEW and being unlinked because you were REMOVED
-// are the same state to the code and different situations to the user. Both
-// notices firing at the same instant — which is what happened — offers two
-// explanations at once, and the generic one is the wrong mental model for a
-// machine that used to be linked.
-func (a *App) suppressLinkPendingNotice() {
+// forgetLinkPrompt lets a device raise the approval dialog again.
+func (a *App) forgetLinkPrompt(k [32]byte) {
 	a.linkMu.Lock()
-	a.linkNoticeSuppressed = true
+	delete(a.linkPrompted, k)
+	delete(a.linkDeclined, k)
 	a.linkMu.Unlock()
 }
 

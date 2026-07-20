@@ -48,13 +48,13 @@ func (a *App) ownPublishedKeys() (keys [][32]byte, has bool, ok bool) {
 // profile marker. The marker is transitional: a peer running an older BENCchat
 // reads only profiles, and dropping it would make this account unreachable to
 // them. It can go once every client speaks the directory.
-func (a *App) publishDevices(boxKeys [][32]byte) {
+func (a *App) publishDevices(boxKeys [][32]byte) (selfRefused bool) {
 	// The profile is written regardless — it is also where the away message and
 	// user-visible profile text live, so this is not purely about keys.
 	a.publishProfile()
 
 	if !a.client.SupportsKeyDir() {
-		return
+		return false
 	}
 
 	// Only this device's signing key is ours to publish. We learned other
@@ -72,15 +72,19 @@ func (a *App) publishDevices(boxKeys [][32]byte) {
 	refused, ok := a.client.PublishDevices(devices)
 	if !ok {
 		slog.Default().Warn("could not publish device keys to the directory; the profile marker still carries them")
-		return
+		return false
 	}
 
 	// A refused key is a device the user removed announcing itself again. The
 	// server declined to resurrect it — that refusal is what makes "remove
 	// device" durable — so this is a question for the user, not a retry.
 	for _, d := range refused {
+		if d.Box == a.e2eePub {
+			selfRefused = true
+		}
 		a.onRevokedDeviceReturned(d.Box)
 	}
+	return selfRefused
 }
 
 // publishedDeviceCount reports how many devices the SERVER actually holds.
@@ -120,7 +124,6 @@ func (a *App) onRevokedDeviceReturned(box [32]byte) {
 		// different explanations at the same instant, one of which ("approve
 		// this new device") is the wrong mental model for a device that used to
 		// be linked and was removed.
-		a.suppressLinkPendingNotice()
 		a.store.Notify(state.NoticeWarn,
 			"This device was removed from your account, so it can no longer receive encrypted "+
 				"messages. Approve it again from another signed-in device to restore it.")
