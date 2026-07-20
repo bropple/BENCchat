@@ -20,8 +20,10 @@ import (
 //	go build -ldflags "-X github.com/benco-holdings/benchat/internal/config.DefaultAuthHost=oscar.example.com"
 var DefaultAuthHost = ""
 
-// DefaultAuthPort is the standard OSCAR port, which is not sensitive.
-const DefaultAuthPort = 5190
+// DefaultAuthPort is the port a BENCO server listens on, which is not
+// sensitive. 5191 rather than OSCAR's traditional 5190: BENCoscar terminates
+// TLS itself and runs no plaintext listener, so 5190 would only ever time out.
+const DefaultAuthPort = 5191
 
 // Config is the persisted client configuration.
 type Config struct {
@@ -116,14 +118,24 @@ func (c Config) SoundOn() bool {
 	return c.SoundEnabled == nil || *c.SoundEnabled
 }
 
-// TLSOn reports the effective transport setting, defaulting to true on first
-// run. There is no fallback to plaintext: when this is on, sign-on fails rather
-// than connecting in the clear.
+// TLSOn reports whether the transport is encrypted. It always is.
+//
+// This is no longer a preference. A BENCO server terminates TLS itself and runs
+// no plaintext listener, so turning it off could only ever produce a timeout,
+// and offering the choice invited someone to "fix" a connection problem by
+// disabling the thing protecting the login handshake, buddy list, presence and
+// who they talk to. Sign-on fails rather than connecting in the clear.
+//
+// The stored field is still read so a hand-edited config can turn it off for
+// development against a plaintext server; there is simply no way to do it by
+// accident from the UI.
 func (c Config) TLSOn() bool {
 	return c.TLSEnabled == nil || *c.TLSEnabled
 }
 
-// E2EEOn reports the effective encryption setting, defaulting to true.
+// E2EEOn reports whether messages are end-to-end encrypted. They always are,
+// where the other side supports it — a peer that does not is marked rather than
+// quietly downgraded, so there is nothing a user gains by switching this off.
 func (c Config) E2EEOn() bool {
 	return c.E2EEEnabled == nil || *c.E2EEEnabled
 }

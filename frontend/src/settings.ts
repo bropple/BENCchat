@@ -208,21 +208,8 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
               </section>
 
               <section class="settings__section">
-                <div class="benco-label">End-to-End Encryption</div>
-                <label class="settings__toggle">
-                  <input type="checkbox" id="e2eeToggle" ${p.e2eeEnabled ? "checked" : ""} />
-                  <span>Encrypt 1:1 messages when the other person supports it</span>
-                </label>
-                <div class="benco-caption settings__group-label">Connection</div>
-                <label class="settings__toggle">
-                  <input type="checkbox" id="tlsToggle" />
-                  <span>Require an encrypted connection (TLS)</span>
-                </label>
-                <label class="settings__toggle">
-                  <input type="checkbox" id="tlsInsecureToggle" />
-                  <span>Skip the certificate check — testing only</span>
-                </label>
-                <p class="benco-caption settings__hint"><strong>On by default.</strong> TLS protects everything end-to-end encryption can't: your login handshake, buddy list, presence, profiles, chat rooms, and who you talk to. There is no fallback: with this on, sign-on <strong>fails</strong> rather than connecting in the clear, which is what stops an attacker steering you onto the plaintext port. The server needs a TLS listener, usually on its own port — if a server only speaks plaintext, sign-on will fail until you turn this off. Skipping the certificate check defeats the point of TLS — it accepts any server claiming to be this one — so use it only against a self-signed test server. <strong>Takes effect on your next sign-on.</strong></p>
+                <div class="benco-label">Encryption</div>
+                <p class="benco-caption settings__hint"><strong>Always on, and not optional.</strong> The connection is TLS — sign-on <strong>fails</strong> rather than falling back to cleartext, which is what stops an attacker steering you onto a plaintext port. Messages between BENCchat users are additionally encrypted end-to-end (look for the 🔒); clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. TLS covers what end-to-end encryption can't — your login, buddy list, presence, profiles and who you talk to — though the server itself still sees that metadata. Your keys stay in this device's keychain. Group chats are <em>not</em> covered by end-to-end encryption.</p>
 
                 <div class="benco-caption settings__group-label">Your devices</div>
                 <div class="settings__link-pending" id="linkPending" hidden></div>
@@ -459,25 +446,6 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
       btn.addEventListener("click", () => previewSound(btn.dataset.sound as SoundKey, activePack));
     }
 
-    // Connection security. Applies on next sign-on, since the transport is
-    // fixed for the life of a session.
-    const tlsToggle = overlay.querySelector<HTMLInputElement>("#tlsToggle")!;
-    const tlsInsecure = overlay.querySelector<HTMLInputElement>("#tlsInsecureToggle")!;
-    void Bridge.getServerSettings()
-      .then((srv) => {
-        tlsToggle.checked = srv.tls;
-        tlsInsecure.checked = srv.tlsInsecure;
-        tlsInsecure.disabled = !srv.tls;
-      })
-      .catch(() => {});
-    const applyTLS = (): void => {
-      tlsInsecure.disabled = !tlsToggle.checked;
-      if (!tlsToggle.checked) tlsInsecure.checked = false;
-      void Bridge.setTLS(tlsToggle.checked, tlsInsecure.checked);
-    };
-    tlsToggle.addEventListener("change", applyTLS);
-    tlsInsecure.addEventListener("change", applyTLS);
-
     // Device list. Rendered on open and after any removal.
     const deviceListEl = overlay.querySelector<HTMLDivElement>("#deviceList")!;
     // Until another device approves this one, it can't read anything encrypted
@@ -693,10 +661,6 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
 
     // End-to-end encryption toggle. Enabling mints a keypair and republishes our
     // profile with the public key; the roster reflects lock state per buddy.
-    const e2eeToggle = overlay.querySelector<HTMLInputElement>("#e2eeToggle")!;
-    e2eeToggle.addEventListener("change", () => {
-      void Bridge.setE2EEEnabled(e2eeToggle.checked);
-    });
 
     // Profile is only settable while signed on (it's session state, not config),
     // so the control degrades to a note when the bindings aren't available.

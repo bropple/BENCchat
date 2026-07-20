@@ -2,6 +2,8 @@ package main
 
 import (
 	"embed"
+	"fmt"
+	"os"
 
 	"github.com/benco-holdings/benchat/internal/tray"
 	"github.com/wailsapp/wails/v2"
@@ -35,6 +37,19 @@ var trayBadgePNG []byte
 var trayBadgeICO []byte
 
 func main() {
+	// Refuse to start a second copy. Two instances share one config file, one
+	// history, one trust record and one device key — they overwrite each
+	// other's device list and each looks to the server like the other has gone
+	// rogue. Checked before any window appears, so the duplicate exits rather
+	// than flashing up and dying.
+	if !claimSingleInstance() {
+		fmt.Fprintln(os.Stderr, "BENCchat is already running.")
+		// Windows launches from Explorer with no console, so stderr alone would
+		// be invisible; the dialog is the only way the user finds out there.
+		notifyAlreadyRunning()
+		return
+	}
+
 	app := NewApp()
 	app.trayIcons = tray.Icons{
 		NormalPNG: trayIconPNG,
