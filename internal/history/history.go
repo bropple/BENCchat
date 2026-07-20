@@ -11,11 +11,15 @@
 package history
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"golang.org/x/crypto/nacl/secretbox"
 
 	"github.com/benco-holdings/benchat/internal/state"
 )
@@ -75,7 +79,11 @@ func path(account string) (string, error) {
 
 // Load reads an account's persisted scrollback (conversations + rooms). A
 // missing file is the first-run case and returns a zero Data, not an error.
-func Load(account string) (Data, error) {
+//
+// key is the account's history encryption key. A file written by an older
+// BENCchat is plaintext JSON and is read as such — see decode — so upgrading
+// does not lose history. It is re-encrypted on the next save.
+func Load(account string, key *[32]byte) (Data, error) {
 	p, err := path(account)
 	if err != nil {
 		return Data{}, err
@@ -87,6 +95,27 @@ func Load(account string) (Data, error) {
 		}
 		return Data{}, err
 	}
+	return decode(raw, key, p)
+}
+
+// decode reads either on-disk shape: the sealed envelope, or the bare JSON that
+// earlier versions wrote.
+func decode(raw []byte, key *[32]byte, p string) (Data, error) {
+	if sealed, ok := parseSealed(raw); ok {
+		if key == nil {
+			return Data{}, errors.New("history: file is encrypted but no key is available")
+		}
+		var nonce [24]byte
+		copy(nonce[:], sealed[:24])
+		plain, ok := secretbox.Open(nil, sealed[24:], &nonce, key)
+		if !ok {
+			// Wrong key, or a damaged file. Refusing is the only safe answer:
+			// returning empty would look like "no history yet" and the next save
+			// would overwrite the real file with nothing.
+			return Data{}, fmt.Errorf("history: could not decrypt %s (wrong key or corrupt file)", p)
+		}
+		raw = plain
+	}
 	var f fileFormat
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return Data{}, fmt.Errorf("history: parse %s: %w", p, err)
@@ -96,20 +125,61 @@ func Load(account string) (Data, error) {
 
 // Save writes an account's scrollback atomically (temp file then rename) so a
 // crash mid-write can't corrupt an existing history.
-func Save(account string, d Data) error {
+//
+// A nil key is a programming error rather than a licence to write plaintext:
+// these are personal messages, and the whole point of the key is that they do
+// not sit readable on disk. Callers that cannot obtain a key must not persist.
+func Save(account string, d Data, key *[32]byte) error {
+	if key == nil {
+		return errors.New("history: refusing to save without an encryption key")
+	}
 	p, err := path(account)
 	if err != nil {
 		return err
 	}
-	raw, err := json.MarshalIndent(fileFormat{Version: currentVersion, Data: d}, "", "  ")
+	raw, err := json.Marshal(fileFormat{Version: currentVersion, Data: d})
 	if err != nil {
 		return err
 	}
+
+	var nonce [24]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return fmt.Errorf("history: nonce: %w", err)
+	}
+	out := append([]byte(sealedMagic), nonce[:]...)
+	out = secretbox.Seal(out, raw, &nonce, key)
+
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, p)
+}
+
+// NewKey mints a history encryption key.
+func NewKey() (*[32]byte, error) {
+	var k [32]byte
+	if _, err := rand.Read(k[:]); err != nil {
+		return nil, fmt.Errorf("history: key: %w", err)
+	}
+	return &k, nil
+}
+
+// sealedMagic prefixes an encrypted history file. A plaintext file from an
+// earlier version starts with '{', so the two shapes can never be confused and
+// no version field is needed to tell them apart — the version lives inside,
+// where it describes the data rather than the container.
+const sealedMagic = "BENCHIST1"
+
+// parseSealed returns the nonce+ciphertext body if raw is a sealed file.
+func parseSealed(raw []byte) ([]byte, bool) {
+	if len(raw) < len(sealedMagic)+24+secretbox.Overhead {
+		return nil, false
+	}
+	if string(raw[:len(sealedMagic)]) != sealedMagic {
+		return nil, false
+	}
+	return raw[len(sealedMagic):], true
 }
 
 // Clear removes an account's history file. A missing file is not an error.

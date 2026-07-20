@@ -42,6 +42,16 @@ type App struct {
 	histMu      sync.Mutex
 	histAccount string
 	histTimer   *time.Timer
+	// histKey seals the account's history file at rest. A nil key means history
+	// persistence is OFF for this session — the key could not be read, or the
+	// file could not be decrypted with it. Saving anyway is not an option: the
+	// only ways to do it are to write plaintext (which defeats the point) or to
+	// seal with a fresh key (which orphans the history already on disk).
+	histKey *[32]byte
+	// histNoticeShown keeps the explanation for that to one per sign-on. Saves
+	// are debounced every couple of seconds, so a keyring that is down would
+	// otherwise become an unending stream of identical notices.
+	histNoticeShown bool
 
 	// End-to-end encryption: our current public key (for publishing in the
 	// profile) and whether a keypair is loaded. The private key never lives here
@@ -142,6 +152,9 @@ func (a *App) startup(ctx context.Context) {
 		// with the now-empty store. (flushHistory also skips an empty set.)
 		a.histMu.Lock()
 		a.histAccount = ""
+		// The key goes with the session it was loaded for. Keeping it around
+		// would leave a stale key paired with whatever account signs on next.
+		a.histKey = nil
 		if a.histTimer != nil {
 			a.histTimer.Stop()
 			a.histTimer = nil
@@ -332,12 +345,24 @@ func (a *App) AutoSignIn() {
 func (a *App) doSignOn(screenName, password string, remember bool) error {
 	a.emitStatus(SessionStatus{State: "signing-on", Message: "Connecting…"})
 
+	// Establish the key that seals this account's history BEFORE reading the
+	// file: Load needs it to decrypt, and every later save needs it too.
+	a.setupHistoryKey(screenName)
+
 	// Restore local history BEFORE signing on, so offline messages delivered
 	// during sign-on append onto the existing scrollback rather than replacing it.
 	// Rooms come back as re-joinable "recents" with their past messages.
 	if a.cfg.HistoryOn() {
-		if d, err := history.Load(screenName); err != nil {
+		if d, err := history.Load(screenName, a.historyKey()); err != nil {
+			// A file we cannot read is NOT the same as no file. Carrying on as if
+			// the history were empty would leave the next save free to overwrite
+			// a real (merely undecryptable) file with nothing, turning a recoverable
+			// problem — wrong key, damaged file — into permanent data loss.
 			slog.Default().Warn("could not load chat history", "err", err)
+			a.disableHistoryPersistence(
+				"Your saved message history couldn't be read, so BENCchat has stopped " +
+					"saving history for this session. It will NOT overwrite the existing " +
+					"file — if your keychain was locked, unlock it and sign in again.")
 		} else {
 			d = history.Prune(d, a.retentionCutoff())
 			a.store.RestoreConversations(d.Conversations)
@@ -709,6 +734,131 @@ func (a *App) GetPreferences() Preferences {
 
 // --- Local chat history ---
 
+// setupHistoryKey loads (or, for an account that has never had one, generates)
+// the key that encrypts this account's history file, for the duration of the
+// session.
+//
+// The rules are setupE2EE's, for the same reason. A keyring read that FAILED and
+// a store that holds nothing are different answers, and only one of them means
+// "generate a key". Minting one on failure would seal new history under a key
+// that has nothing to do with the file already on disk — and since the old key
+// is then overwritten in the keyring, every message the user has ever saved
+// becomes permanently unreadable. A transiently locked keychain must not be able
+// to do that.
+//
+// So a failed read disables history persistence for the session instead. Nothing
+// is written, and in particular nothing is written in the clear: personal
+// messages sitting readable on disk is the thing this whole mechanism exists to
+// prevent, so there is no plaintext fallback.
+func (a *App) setupHistoryKey(screenName string) {
+	a.histMu.Lock()
+	a.histKey = nil
+	a.histNoticeShown = false
+	a.histMu.Unlock()
+
+	// With history saving off, no file will be read or written, so there is no
+	// reason to reach for the keychain — or to make the user unlock one — on
+	// behalf of a feature they have turned off. SetHistoryEnabled runs this again
+	// if they turn it back on.
+	if !a.cfg.HistoryOn() {
+		return
+	}
+
+	stored, err := secret.RetrieveHistoryKey(screenName)
+	if err != nil {
+		slog.Default().Warn("could not read the history key from the secret store", "err", err)
+		a.disableHistoryPersistence(
+			"Message history won't be saved this session: your keychain couldn't be " +
+				"reached, so BENCchat can't load the key your saved history is encrypted " +
+				"with. It will NOT create a new one — that would make everything already " +
+				"saved unreadable. Unlock your keychain and sign in again.")
+		return
+	}
+
+	if stored != "" {
+		raw, derr := base64.StdEncoding.DecodeString(stored)
+		if derr == nil && len(raw) == 32 {
+			var k [32]byte
+			copy(k[:], raw)
+			a.setHistoryKey(&k)
+			return
+		}
+		// A stored value we can't make sense of is the failed-read case wearing a
+		// different hat: there IS a key, we just can't use it, and replacing it
+		// would strand the file it wrote.
+		slog.Default().Warn("the stored history key is unusable", "err", derr, "len", len(raw))
+		a.disableHistoryPersistence(
+			"Message history won't be saved this session: the key your saved history " +
+				"is encrypted with is damaged. BENCchat won't replace it, since that " +
+				"would discard everything already saved. Clear history in Privacy & " +
+				"Security to start fresh.")
+		return
+	}
+
+	// Nothing stored: this account has no history key yet, which is the genuine
+	// first-run case. Any file on disk is either absent or plaintext from an
+	// older BENCchat, and both are readable without a key — so a new key strands
+	// nothing, and the next save re-encrypts what was plaintext.
+	k, err := history.NewKey()
+	if err != nil {
+		slog.Default().Warn("could not generate a history key", "err", err)
+		a.disableHistoryPersistence(
+			"Message history won't be saved this session: BENCchat couldn't generate " +
+				"a key to encrypt it with.")
+		return
+	}
+	if serr := secret.StoreHistoryKey(screenName, base64.StdEncoding.EncodeToString(k[:])); serr != nil {
+		// Using a key we couldn't store would write a file nothing can ever open
+		// again — worse than not writing one, so don't.
+		slog.Default().Warn("could not save the history key", "err", serr)
+		a.disableHistoryPersistence(
+			"Message history won't be saved this session: BENCchat couldn't store the " +
+				"key in your keychain, and history sealed with a key that isn't saved " +
+				"could never be read back.")
+		return
+	}
+	a.setHistoryKey(k)
+}
+
+// setHistoryKey installs the session's history key.
+func (a *App) setHistoryKey(k *[32]byte) {
+	a.histMu.Lock()
+	a.histKey = k
+	a.histMu.Unlock()
+}
+
+// historyKey returns the session's history key, or nil when persistence is off.
+func (a *App) historyKey() *[32]byte {
+	a.histMu.Lock()
+	defer a.histMu.Unlock()
+	return a.histKey
+}
+
+// historySession returns the account whose history we persist and the key that
+// seals it, read together so a save can't pair one session's account with
+// another's key. An empty account or a nil key means: do not write.
+func (a *App) historySession() (string, *[32]byte) {
+	a.histMu.Lock()
+	defer a.histMu.Unlock()
+	return a.histAccount, a.histKey
+}
+
+// disableHistoryPersistence stops saving for the rest of the session and says
+// why — once. Saves then skip silently: the reason doesn't change, and repeating
+// it on every debounce tick is how a single locked keychain becomes a wall of
+// identical notices. Staying quiet is only acceptable because the user was told
+// the first time.
+func (a *App) disableHistoryPersistence(msg string) {
+	a.histMu.Lock()
+	a.histKey = nil
+	first := !a.histNoticeShown
+	a.histNoticeShown = true
+	a.histMu.Unlock()
+	if first {
+		a.store.Notify(state.NoticeError, msg)
+	}
+}
+
 // retentionCutoff is the oldest timestamp to keep, or the zero time when
 // retention is disabled (keep forever).
 func (a *App) retentionCutoff() time.Time {
@@ -737,13 +887,14 @@ func (a *App) scheduleHistorySave() {
 
 // flushHistory writes the current conversations to the signed-on account's file,
 // applying retention. It is a no-op when signed off, when history is disabled,
-// or when there is nothing to save — the last guard is what stops a sign-off
-// race (store already reset) from clobbering the file with an empty set.
+// when there is no key, or when there is nothing to save — the last guard is what
+// stops a sign-off race (store already reset) from clobbering the file with an
+// empty set.
 func (a *App) flushHistory() {
-	a.histMu.Lock()
-	account := a.histAccount
-	a.histMu.Unlock()
-	if account == "" || !a.cfg.HistoryOn() {
+	account, key := a.historySession()
+	// No key means persistence was disabled for this session and the user has
+	// already been told once. Skip in silence rather than logging every tick.
+	if account == "" || key == nil || !a.cfg.HistoryOn() {
 		return
 	}
 	d := history.Prune(history.Data{
@@ -753,7 +904,7 @@ func (a *App) flushHistory() {
 	if len(d.Conversations) == 0 && len(d.Rooms) == 0 {
 		return
 	}
-	if err := history.Save(account, d); err != nil {
+	if err := history.Save(account, d, key); err != nil {
 		slog.Default().Warn("could not save chat history", "err", err)
 	}
 }
@@ -770,10 +921,12 @@ func (a *App) CloseConversation(screenName string) {
 // flushHistory's skip-if-empty guard exists only to survive the sign-off race
 // where the store is momentarily reset.
 func (a *App) persistHistoryNow() {
-	a.histMu.Lock()
-	account := a.histAccount
-	a.histMu.Unlock()
-	if account == "" || !a.cfg.HistoryOn() {
+	account, key := a.historySession()
+	// Without a key this does nothing at all — not even the Clear below. We may
+	// be unable to READ the file (locked keychain, wrong key), and deleting
+	// history we merely failed to open is a far worse outcome than a removal that
+	// doesn't stick. ClearHistory is the deliberate route to wiping the file.
+	if account == "" || key == nil || !a.cfg.HistoryOn() {
 		return
 	}
 	d := history.Prune(history.Data{
@@ -784,7 +937,7 @@ func (a *App) persistHistoryNow() {
 		_ = history.Clear(account)
 		return
 	}
-	if err := history.Save(account, d); err != nil {
+	if err := history.Save(account, d, key); err != nil {
 		slog.Default().Warn("could not save chat history", "err", err)
 	}
 }
@@ -797,6 +950,13 @@ func (a *App) SetHistoryEnabled(enabled bool) string {
 		return err.Error()
 	}
 	if enabled {
+		// Switching history on is the moment to retry a key setup that failed at
+		// sign-on: the usual cause is a locked keychain, which the user may well
+		// have unlocked since. Without this, persistence would stay off — silently,
+		// because the one notice was already spent — until the next sign-on.
+		if account, key := a.historySession(); account != "" && key == nil {
+			a.setupHistoryKey(account)
+		}
 		a.scheduleHistorySave()
 	} else {
 		a.histMu.Lock()
@@ -839,6 +999,20 @@ func (a *App) ClearHistory() string {
 	}
 	if err := history.Clear(account); err != nil {
 		return err.Error()
+	}
+	// The key only ever existed to open the file we just destroyed, so it goes
+	// too — leaving it behind means the keychain keeps an entry for data that no
+	// longer exists. Best-effort on purpose: a keyring that can't be reached must
+	// not turn a successful wipe into a reported failure, and a stale key is
+	// harmless anyway (the next sign-on simply reuses it to seal fresh history).
+	if err := secret.ClearHistoryKey(account); err != nil {
+		slog.Default().Warn("could not clear the history key", "err", err)
+	}
+	// Mint a replacement straight away when a session is live, so the rest of it
+	// keeps saving. Without this, clearing history would quietly switch
+	// persistence off until the next sign-on.
+	if live, _ := a.historySession(); live != "" {
+		a.setupHistoryKey(live)
 	}
 	return ""
 }

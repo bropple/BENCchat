@@ -545,15 +545,39 @@ says so explicitly.
 | What | Where | Protection |
 |---|---|---|
 | Config | `UserConfigDir/BENCchat/config.json` | mode 0600 |
-| Message history | `UserConfigDir/BENCchat/history/<account>.json` | mode 0600, **plaintext JSON** |
+| Message history | `UserConfigDir/BENCchat/history/<account>.json` | mode 0600, **encrypted** (secretbox) |
 | Trust + own device list | `UserConfigDir/BENCchat/trust/<account>.json` | mode 0600 |
 | Room keys | per-account JSON | mode 0600 |
 | Passwords, device keys | OS keyring | OS-provided |
 
-**History is not encrypted.** Message plaintext is persisted; only file
-permissions protect it. Ciphertext is *not* persisted — `Envelope` and `Cipher`
-are `json:"-"` (`state.go:108,113`) — but the decrypted text is. At-rest
-encryption is the outstanding item in the security stack.
+**History is encrypted at rest.** The file is sealed with NaCl secretbox under a
+random per-account key held in the OS keyring as `hist:<account>` — namespaced
+separately from the E2EE key, because that one is an identity peers verify and
+this is a local file key with a different lifecycle.
+
+Sealed files carry a `BENCHIST1` magic prefix. Plaintext files from before this
+change start with `{`, so the two shapes can't be confused, migration needs no
+version negotiation, and existing history is re-encrypted on the next save.
+
+Three deliberate refusals, all mirroring what `setupE2EE` does for encryption
+keys (`app.go:753`):
+
+- A keyring read that **fails** does not mint a key. Persistence stops for the
+  session and the user is told once. Minting would strand every existing file.
+- A stored key that **won't decode** is treated the same way — there is a key,
+  it just can't be used, and replacing it destroys what it wrote.
+- `history.Save` returns an error rather than writing plaintext when it has no
+  key, and `persistHistoryNow`'s nil-key guard sits *above* its `Clear` branch:
+  deleting history we merely failed to open is worse than a removal that doesn't
+  stick.
+
+A failed decrypt is an error, never an empty `Data` — otherwise a wrong key
+would read as "no history yet" and the next save would overwrite the real file
+with nothing.
+
+Note that ciphertext is *not* persisted — `Envelope` and `Cipher` are `json:"-"`
+(`state.go:108,113`) — so an undecrypted message is stranded at its placeholder
+across a restart.
 
 Saves are debounced 2 seconds (`app.go:723-736`), with synchronous flushes on
 shutdown, sign-off, and explicit removals. `flushHistory` skips empty sets

@@ -80,3 +80,36 @@ func ClearPrivateKey(account string) error {
 	}
 	return nil
 }
+
+// historyUser namespaces the key that encrypts an account's on-disk scrollback.
+// Separate from the E2EE key on purpose: that one is an identity peers verify,
+// this one is a local file key with an entirely different lifecycle. Rotating or
+// losing one must not disturb the other.
+func historyUser(account string) string { return "hist:" + account }
+
+// StoreHistoryKey saves an account's history-file encryption key (base64).
+func StoreHistoryKey(account, keyB64 string) error {
+	return keyring.Set(service, historyUser(account), keyB64)
+}
+
+// RetrieveHistoryKey returns the stored history key, or "" if none is stored.
+//
+// The caller must distinguish "" from an error: a keyring that could not be
+// reached is not the same answer as an account that has no key yet, and only
+// one of them means "generate one". Getting that wrong would mint a fresh key
+// over readable history and make it permanently unreadable.
+func RetrieveHistoryKey(account string) (string, error) {
+	k, err := keyring.Get(service, historyUser(account))
+	if errors.Is(err, keyring.ErrNotFound) {
+		return "", nil
+	}
+	return k, err
+}
+
+// ClearHistoryKey removes an account's history key. Missing is not an error.
+func ClearHistoryKey(account string) error {
+	if err := keyring.Delete(service, historyUser(account)); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return err
+	}
+	return nil
+}
