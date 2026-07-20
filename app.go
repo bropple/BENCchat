@@ -73,6 +73,9 @@ type App struct {
 	linkPrompted map[[32]byte]bool
 	linkDeclined map[[32]byte]bool
 	linkPending  bool
+	// knownDevices are devices this account has linked before, so one that
+	// returns after removal is not announced as brand new.
+	knownDevices map[[32]byte]bool
 	// announcedDevices maps a device's displayed code to its key, for linking
 	// by code — a fingerprint is a hash and cannot be reversed.
 	announcedDevices map[string][32]byte

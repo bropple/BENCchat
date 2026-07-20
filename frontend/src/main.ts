@@ -76,11 +76,25 @@ window.addEventListener("DOMContentLoaded", () => {
     askingAbout.add(req.key);
     void (async () => {
       try {
+        // A device that was removed and is coming back is a different event
+        // from one appearing for the first time. Calling a machine you have used
+        // for weeks "new" invites approving it without checking the code, which
+        // is the one moment that check actually matters.
+        const returning = req.returning === "1";
         const ok = await confirmDialog(
-          `A new device wants to link to your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
-            `Check that this matches the code shown on that device. If it doesn't — or you're ` +
-            `not setting up a device right now — decline: approving lets it read your encrypted messages.`,
-          { title: "Link a new device?", okLabel: "Approve", cancelLabel: "Decline", danger: true },
+          (returning
+            ? `A device you previously removed is asking to rejoin your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
+              `Approving it undoes the removal. Check the code matches the one shown on that device — ` +
+              `if it doesn't, or you didn't just sign in there, decline.`
+            : `A new device wants to link to your account.\n\nDevice code:\n${req.fingerprint}\n\n` +
+              `Check that this matches the code shown on that device. If it doesn't — or you're ` +
+              `not setting up a device right now — decline: approving lets it read your encrypted messages.`),
+          {
+            title: returning ? "Rejoin this device?" : "Link a new device?",
+            okLabel: returning ? "Restore" : "Approve",
+            cancelLabel: "Decline",
+            danger: true,
+          },
         );
         if (!ok) {
           // Tell the backend, so the same device announcing again this session

@@ -375,9 +375,11 @@ export const Bridge = {
     window.runtime?.EventsOn("device:link-state", (data) => cb(data as DeviceLinkState));
   },
 
-  onDeviceLinkRequest(cb: (req: { key: string; fingerprint: string }) => void): void {
+  onDeviceLinkRequest(
+    cb: (req: { key: string; fingerprint: string; returning?: string }) => void,
+  ): void {
     window.runtime?.EventsOn("device:link-request", (data) =>
-      cb(data as { key: string; fingerprint: string }),
+      cb(data as { key: string; fingerprint: string; returning?: string }),
     );
   },
   setCustomSound: (key: string, data: string) => app().SetCustomSound(key, data),

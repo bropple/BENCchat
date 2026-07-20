@@ -14,6 +14,10 @@ export function ApproveDevice(arg1) {
   return window['go']['main']['App']['ApproveDevice'](arg1);
 }
 
+export function ApproveDeviceByCode(arg1) {
+  return window['go']['main']['App']['ApproveDeviceByCode'](arg1);
+}
+
 export function AutoSignIn() {
   return window['go']['main']['App']['AutoSignIn']();
 }

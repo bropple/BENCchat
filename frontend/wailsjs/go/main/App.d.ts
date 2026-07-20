@@ -9,6 +9,8 @@ export function AddBuddy(arg1:string,arg2:string):Promise<string>;
 
 export function ApproveDevice(arg1:string):Promise<string>;
 
+export function ApproveDeviceByCode(arg1:string):Promise<string>;
+
 export function AutoSignIn():Promise<void>;
 
 export function BlockBuddy(arg1:string):Promise<string>;

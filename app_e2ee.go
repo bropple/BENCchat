@@ -267,6 +267,7 @@ func (a *App) ForgetOtherDevices() string {
 	a.revokeDevices(gone)
 	for _, k := range gone {
 		a.forgetLinkPrompt(k)
+		a.rememberKnownDevice(k)
 	}
 	a.publishDevices([][32]byte{a.e2eePub})
 	a.store.Notify(state.NoticeInfo,
@@ -614,6 +615,10 @@ func (a *App) RemoveDevice(keyB64 string) string {
 	// one the user needs to see, and swallowing it makes the "approve it again"
 	// advice impossible to follow.
 	a.forgetLinkPrompt(target)
+	// Remember we knew it. A device coming back after removal is a different
+	// event from a device appearing for the first time, and the approving side
+	// has no other way to tell them apart — the announcement looks identical.
+	a.rememberKnownDevice(target)
 	a.publishDevices(kept)
 	a.store.Notify(state.NoticeInfo,
 		"Device removed. Your contacts will see your safety number change.")
@@ -635,6 +640,25 @@ func (a *App) announceDevice() {
 // account.
 func (a *App) handleDeviceMessage(kind string, keys [][32]byte) {
 	switch kind {
+	case e2ee.DeviceDeny:
+		if len(keys) != 1 || keys[0] != a.e2eePub {
+			return // aimed at a different device
+		}
+		// Sign out rather than sit here unusable. Clearing the saved password
+		// matters as much as the message: otherwise the next launch signs
+		// straight back in and asks to be approved all over again, which looks
+		// like the denial did nothing.
+		//
+		// This is a courtesy, not a boundary — whoever is here still knows the
+		// password and can sign in again. What it buys is that a person who was
+		// refused finds out, instead of wondering why nothing decrypts.
+		a.store.Notify(state.NoticeError,
+			"Your request to link this device was denied, so it can't read encrypted "+
+				"messages. You have been signed out and your saved password cleared.")
+		a.forgetRemembered()
+		go a.SignOff()
+		return
+
 	case e2ee.DeviceAnnounce:
 		if len(keys) != 1 {
 			return
@@ -667,9 +691,19 @@ func (a *App) handleDeviceMessage(kind string, keys [][32]byte) {
 		}
 		// Otherwise the user has to approve it. Password knowledge alone must not
 		// be enough to silently join an account and read everything.
+		// Say whether this is a device we have linked before. A machine coming
+		// back after being removed is a different event from one appearing for
+		// the first time, and calling a laptop you have used for weeks "new"
+		// invites approving it without looking — which is the one moment the
+		// code comparison actually matters.
+		returning := "0"
+		if a.wasKnownDevice(newKey) {
+			returning = "1"
+		}
 		runtime.EventsEmit(a.ctx, "device:link-request", map[string]string{
 			"key":         e2ee.EncodeKey(newKey),
 			"fingerprint": e2ee.Fingerprint(newKey),
+			"returning":   returning,
 		})
 
 	case e2ee.DeviceShare:
@@ -842,6 +876,19 @@ func (a *App) DeclineDevice(keyB64 string) string {
 	}
 	a.linkDeclined[key] = true
 	a.linkMu.Unlock()
+
+	a.rememberKnownDevice(key)
+
+	// Tell it. Every session on this account hears this, and only the device
+	// whose key matches acts on it.
+	//
+	// Guarded: declining is also reachable with no session (and in tests), and
+	// the decline itself must still be recorded even when nobody can be told.
+	if a.client != nil && a.client.SignedOn() {
+		if err := a.client.SendDeviceMessage(e2ee.DeviceDeny, [][32]byte{key}); err != nil {
+			slog.Default().Warn("could not tell the device it was denied", "err", err)
+		}
+	}
 	return ""
 }
 
@@ -955,4 +1002,22 @@ func (a *App) ApproveDeviceByCode(code string) string {
 			"device (or sign it out and back in), then try again."
 	}
 	return a.ApproveDevice(e2ee.EncodeKey(key))
+}
+
+// rememberKnownDevice records a device this account has linked before, so its
+// return can be described as a return.
+func (a *App) rememberKnownDevice(k [32]byte) {
+	a.linkMu.Lock()
+	defer a.linkMu.Unlock()
+	if a.knownDevices == nil {
+		a.knownDevices = map[[32]byte]bool{}
+	}
+	a.knownDevices[k] = true
+}
+
+// wasKnownDevice reports whether this account has linked that device before.
+func (a *App) wasKnownDevice(k [32]byte) bool {
+	a.linkMu.Lock()
+	defer a.linkMu.Unlock()
+	return a.knownDevices[k]
 }

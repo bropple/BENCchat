@@ -465,6 +465,10 @@ const (
 	DeviceAnnounce = "announce"
 	// DeviceShare carries the approving device's full known device list back.
 	DeviceShare = "share"
+	// DeviceDeny tells a device its link request was refused. Without it the
+	// refused machine sits signed in and unable to read anything, with nothing
+	// on screen explaining why — the approval happened somewhere else entirely.
+	DeviceDeny = "deny"
 )
 
 // IsDeviceMessage reports whether a message body is device-linking traffic
