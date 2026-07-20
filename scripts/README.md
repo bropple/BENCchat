@@ -9,12 +9,14 @@ Nothing here has a hostname baked in. Pass yours explicitly.
 ## `benchat-tls/`
 
 Puts **stunnel** in front of `open-oscar-server` so clients can connect over
-TLS, encrypting everything end-to-end encryption cannot: the login handshake,
-buddy list, presence, profiles, chat rooms, and who talks to whom.
+TLS, encrypting everything end-to-end encryption cannot: the password, which
+travels in the clear inside the OSCAR session, plus buddy list, presence,
+profiles, chat rooms, and who talks to whom.
 
 The OSCAR server is not modified and does not need restarting — stunnel listens
-on a new port and forwards to the existing plaintext one on loopback, which
-stays open for period AIM clients.
+on a new port and forwards to the existing plaintext one on loopback. That
+plaintext port keeps listening locally but is closed at the firewall: the
+deployment is TLS-only, and period AIM clients cannot connect at all.
 
 ```bash
 ./scripts/build-tls-bundle.sh          # produces benchat-tls.tar.gz
@@ -28,6 +30,33 @@ sudo ./ratelimit.sh                                # slow down password guessing
 
 See `benchat-tls/README.md` for the full walkthrough, including the cloud
 firewall rule that is easy to forget.
+
+## `benchat-luks/`
+
+**Optional, and honest about being narrow.** Puts the database on a separate
+LUKS volume that unlocks automatically from a **Tang** server running somewhere
+else, so a leaked block-storage snapshot is not a readable database.
+
+Message bodies are already end-to-end encrypted and backups are already
+asymmetric, so what this protects is **metadata** — buddy lists, profiles, who
+talked to whom. And a snapshot is not undecryptable: what you gain is
+*revocability* (rotate Tang's keys and every bound copy stops unlocking),
+*detectability* (Tang logs the request), and no offline attack. "Leaked until
+you notice and revoke", not "leaked forever".
+
+```bash
+# on the KEY host — a Pi, home server, or second VPS, NOT the OSCAR host:
+sudo ./tang-install.sh
+
+# on the OSCAR host, with a new empty volume attached:
+sudo ./bind-volume.sh          # interactive device picker, refuses non-empty disks
+sudo ./migrate-db.sh           # moves the DB and installs the mount guard
+```
+
+Read `benchat-luks/README.md` first, in particular why `migrate-db.sh` adds
+`RequiresMountsFor=` to the server's unit: without it a failed mount leaves an
+empty directory, SQLite creates a fresh database on it, and the next backup
+overwrites a good file with an empty one.
 
 ## `backup-db.sh`
 

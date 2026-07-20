@@ -1,8 +1,12 @@
 # BENCchat TLS front-end
 
 Puts **stunnel** in front of `open-oscar-server` so BENCchat can connect over
-TLS. It encrypts everything end-to-end encryption can't: the BUCP login
-handshake, your buddy list, presence, profiles, chat rooms, and who you talk to.
+TLS. It encrypts everything end-to-end encryption can't: your password, which
+travels in the clear inside the OSCAR session, plus your buddy list, presence,
+profiles, chat rooms, and who you talk to.
+
+TLS is not optional for this reason. The client sends a plaintext password, so
+without the tunnel the credential is on the wire.
 
 ## Does open-oscar-server need restarting?
 
@@ -19,8 +23,10 @@ whenever TLS is on, precisely so a proxy-fronted server can't downgrade the rest
 of the session. All the core OSCAR services share the one listener, so one
 stunnel port covers BOS, ChatNav, and Chat together.
 
-Port 5190 stays open and unchanged, so legacy AIM clients keep working exactly
-as they do today.
+Port 5190 keeps listening on the VM, but it is **closed at the firewall** — the
+deployment is TLS-only and 5191 is the only port that answers from outside.
+Period AIM clients therefore cannot connect at all: they predate TLS and cannot
+reach 5191. That capability is given up deliberately, not merely unused.
 
 ## Install
 
@@ -104,7 +110,10 @@ purpose, and cannot affect open-oscar-server since nothing here ever touched it.
   SSLv2-format ClientHello that modern OpenSSL rejects. Don't weaken this
   listener to accommodate them — run a second one if you ever need it.
 - **TLS is hop-by-hop.** It protects the leg between one client and the server.
-  It doesn't stop the *server* reading messages — that's what E2EE is for — and a
-  legacy client on 5190 has an unencrypted leg regardless of yours.
-- Still not covered: data at rest on the VM. That's the separate
-  SQLCipher/LUKS item.
+  It doesn't stop the *server* reading messages — that's what E2EE is for. If you
+  ever reopen 5190, note that anything arriving there has an unencrypted leg
+  regardless of yours, password included.
+- Data at rest on the VM is covered separately and optionally by
+  [`scripts/benchat-luks/`](../benchat-luks/README.md) — a LUKS data volume
+  unlocked from a Tang server. Read its "What this actually protects" section
+  first; the prize is metadata, since message bodies are already E2EE.
