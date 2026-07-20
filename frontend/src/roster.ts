@@ -55,6 +55,7 @@ export function renderRoster(
           <button class="benco-button benco-button--ghost roster__act-btn" id="findUser">🔍 Find</button>
         </div>
         <div class="roster__scroll">
+          <div class="roster__invites" id="connreqs"></div>
           <div class="roster__invites" id="invites"></div>
           <div class="roster__convos" id="convos"></div>
           <div class="roster__buddies" id="buddies"></div>
@@ -131,6 +132,7 @@ export function renderRoster(
   const buddiesEl = el<HTMLDivElement>("buddies");
   const convosEl = el<HTMLDivElement>("convos");
   const invitesEl = el<HTMLDivElement>("invites");
+  const connReqsEl = el<HTMLDivElement>("connreqs");
   const roomsEl = el<HTMLDivElement>("rooms");
   const meNameEl = el<HTMLSpanElement>("meName");
   const chatEmptyEl = el<HTMLDivElement>("chatEmpty");
@@ -181,6 +183,62 @@ export function renderRoster(
   // modal: one can arrive before you have verified the sender, and demanding an
   // immediate yes/no about someone you haven't checked is the wrong prompt at
   // the wrong moment.
+  async function renderConnectionRequests(): Promise<void> {
+    let reqs: Awaited<ReturnType<typeof Bridge.pendingConnectionRequests>> = [];
+    try {
+      reqs = (await Bridge.pendingConnectionRequests()) ?? [];
+    } catch {
+      reqs = [];
+    }
+    if (!reqs.length) {
+      connReqsEl.innerHTML = "";
+      return;
+    }
+    connReqsEl.innerHTML = `
+      <div class="roster__group-head roster__section-head">
+        <span class="benco-label">Requests <span class="roster__invite-dot"></span></span>
+        <span class="benco-caption">${reqs.length}</span>
+      </div>
+      ${reqs
+        .map(
+          (r) => `
+        <div class="roster__invite" data-sn="${escapeAttr(r.screenName)}">
+          <div class="roster__invite-what">
+            <span class="roster__invite-room">👤 ${escapeHTML(r.screenName)}</span>
+            <span class="benco-caption">wants to connect${r.reason ? ` — ${escapeHTML(r.reason)}` : ""}</span>
+          </div>
+          <div class="roster__invite-acts">
+            <button class="benco-button roster__invite-yes" data-conn-yes="${escapeAttr(r.screenName)}">Accept</button>
+            <button class="benco-button benco-button--ghost roster__invite-no" data-conn-no="${escapeAttr(r.screenName)}">✕</button>
+          </div>
+        </div>`,
+        )
+        .join("")}`;
+
+    for (const btn of connReqsEl.querySelectorAll<HTMLButtonElement>("[data-conn-yes]")) {
+      btn.addEventListener("click", async () => {
+        const sn = btn.dataset.connYes!;
+        // Accepting is mutual: it connects you both, so you'll see each other's
+        // presence and can message. Say so, since it's more than "let them in".
+        const ok = await confirmDialog(
+          `Connect with ${sn}?\n\nYou'll be able to message each other and see when the other is online.`,
+          { title: "Accept connection", okLabel: "Connect" },
+        );
+        if (!ok) return;
+        const err = await Bridge.approveConnectionRequest(sn);
+        if (err) void alertDialog(err, { title: "Couldn't connect" });
+        void renderConnectionRequests();
+        void refreshBuddies();
+      });
+    }
+    for (const btn of connReqsEl.querySelectorAll<HTMLButtonElement>("[data-conn-no]")) {
+      btn.addEventListener("click", async () => {
+        await Bridge.declineConnectionRequest(btn.dataset.connNo!);
+        void renderConnectionRequests();
+      });
+    }
+  }
+
   async function renderInvites(): Promise<void> {
     let invites: Awaited<ReturnType<typeof Bridge.pendingRoomInvites>> = [];
     try {
@@ -294,6 +352,7 @@ export function renderRoster(
         ${buddyIconImg(b)}
         <span class="roster__name" data-open="${sn}">${escapeHTML(b.alias || b.screenName)}</span>
         ${b.blocked ? `<span class="roster__blocked-tag">blocked</span>` : ""}
+        ${b.pending && !b.blocked ? `<span class="roster__pending-tag" title="Waiting for them to accept your connection request">pending</span>` : ""}
         ${badge}
         <button class="roster__act roster__menu-btn" title="More…"
                 data-menu-sn="${sn}" data-menu-kind="${onList ? "onlist" : "offlist"}"
@@ -2038,6 +2097,22 @@ export function renderRoster(
     playAlert();
   });
   void renderInvites();
+
+  // A connection request arriving is worth the same quiet nudge as a room invite:
+  // surface it in its section, dot the tray, play the alert — never seize the screen.
+  Bridge.onConnectionRequest(() => {
+    void renderConnectionRequests();
+    markTrayNotify();
+    playAlert();
+  });
+  // A request we sent was answered (or one we handled): refresh both the request
+  // list and the buddy list, since an accept clears a pending buddy.
+  Bridge.onConnectionUpdate(() => {
+    void renderConnectionRequests();
+    void refreshBuddies();
+  });
+  void renderConnectionRequests();
+
   void refreshSelf();
   // Load buddies, then seed conversation state so restored local history's
   // off-list threads are openable from the first render.

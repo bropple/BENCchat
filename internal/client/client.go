@@ -95,6 +95,10 @@ type Client struct {
 	// roomCrypto holds per-room group keys and participant capability findings.
 	roomCrypto roomCrypto
 
+	// conn holds the consensual-connection callbacks (someone wants to connect /
+	// a request we made was answered). See connections.go.
+	conn connHandlers
+
 	// OnDisconnect is called when the session ends, with the reason. It fires
 	// for both clean sign-offs (io.EOF) and faults.
 	OnDisconnect func(error)
@@ -441,6 +445,7 @@ func (c *Client) publishBuddyList(list oscar.BuddyList) {
 			Group:      b.Group,
 			Alias:      b.Alias,
 			Blocked:    b.Blocked,
+			Pending:    b.Pending,
 		})
 	}
 	c.store.ReplaceBuddyList(buddies, list.Groups)
@@ -516,27 +521,65 @@ func (c *Client) isSelf(screenName string) bool {
 	return self != "" && state.NormalizeScreenName(self) == state.NormalizeScreenName(screenName)
 }
 
-// handleFeedbag observes the server's acknowledgement of a buddy-list edit. The
-// edit is applied optimistically at send time, so this is confirmation rather
-// than the source of truth — but a non-success code is worth logging.
+// handleFeedbag routes inbound feedbag traffic: edit acknowledgements and the
+// consensual-connection SNACs (someone wants to connect / an answer to a
+// request we made).
 func (c *Client) handleFeedbag(frame wire.SNACFrame, body []byte) {
-	if frame.SubGroup != wire.FeedbagStatus {
-		return
+	switch frame.SubGroup {
+	case wire.FeedbagStatus:
+		c.handleFeedbagStatus(frame, body)
+	case wire.FeedbagRequestAuthorizeToClient:
+		c.handleConnectionRequest(body)
+	case wire.FeedbagRespondAuthorizeToClient:
+		c.handleConnectionResponse(body)
 	}
+}
+
+// handleFeedbagStatus observes the server's acknowledgement of a buddy-list
+// edit. The edit is applied optimistically at send time, so this is
+// confirmation rather than the source of truth — except for the auth-required
+// case, which the client must act on.
+func (c *Client) handleFeedbagStatus(frame wire.SNACFrame, body []byte) {
 	var status wire.SNAC_0x13_0x0E_FeedbagStatus
 	if err := wire.UnmarshalBE(&status, bytes.NewReader(body)); err != nil {
 		return
 	}
+	authRequired := false
 	for _, code := range status.Results {
 		switch code {
 		case wire.FeedbagStatusSuccess:
 		case wire.FeedbagStatusAuthRequired:
-			// The buddy exists but requires authorization before presence flows.
-			c.log.Info("buddy added; awaiting authorization")
+			authRequired = true
 		default:
 			c.log.Warn("buddy-list edit rejected", "code", code)
 		}
 	}
+
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return
+	}
+	// Was this the reply to a buddy add we tracked? If not, nothing more to do.
+	target, ok := session.TakeAuthTarget(frame.RequestID)
+	if !ok || !authRequired {
+		return
+	}
+
+	// The server refused to store the buddy until the target authorizes. Re-add
+	// it WITH the pending tag so a pending row is kept and the buddy shows as
+	// "awaiting acceptance". Done off the read loop: the re-add SNAC can block on
+	// rate pacing, which must never stall the read loop.
+	go func() {
+		list, err := session.ReAddBuddyPending(target)
+		if err != nil {
+			c.log.Warn("pending re-add failed", "buddy", target, "err", err)
+			return
+		}
+		c.publishBuddyList(list)
+		c.log.Info("buddy add awaiting authorization", "buddy", target)
+	}()
 }
 
 func (c *Client) handleBuddy(frame wire.SNACFrame, body []byte) {

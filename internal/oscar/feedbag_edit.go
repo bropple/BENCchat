@@ -1,12 +1,18 @@
 package oscar
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/benco-holdings/benchat/internal/wire"
 )
+
+// ErrAlreadyBuddy reports an add of someone already on the list. It is a
+// sentinel so callers (e.g. the approve-connection flow, which adds
+// reciprocally) can treat "already there" as success rather than a failure.
+var ErrAlreadyBuddy = errors.New("oscar: already on the buddy list")
 
 // Feedbag is a client-side mirror of the server-stored buddy list, holding the
 // raw items with their group/item IDs so edits can be expressed as the
@@ -77,7 +83,7 @@ func (f *Feedbag) AddBuddy(screenName, group string) ([]editOp, error) {
 		group = DefaultGroupName
 	}
 	if f.findBuddy(screenName) >= 0 {
-		return nil, fmt.Errorf("oscar: %q is already on your buddy list", screenName)
+		return nil, fmt.Errorf("%q: %w", screenName, ErrAlreadyBuddy)
 	}
 
 	itemID := f.nextItemID()
@@ -230,8 +236,23 @@ func (f *Feedbag) RenameBuddy(screenName, alias string) ([]editOp, error) {
 // --- Session integration ---
 
 // AddBuddy adds a buddy to the server-stored list and returns the updated list.
+//
+// The insert's request ID is tracked so a FeedbagStatusAuthRequired reply — the
+// server refusing to store the buddy until they authorize — can be tied back to
+// this screen name for the pending re-add (see ReAddBuddyPending).
 func (s *Session) AddBuddy(screenName, group string) (BuddyList, error) {
-	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.AddBuddy(screenName, group) })
+	if s.feedbag == nil {
+		return BuddyList{}, fmt.Errorf("oscar: buddy list not loaded")
+	}
+	ops, err := s.feedbag.AddBuddy(screenName, group)
+	if err != nil {
+		return BuddyList{}, err
+	}
+	if err := s.sendEditsTracking(ops, screenName); err != nil {
+		return BuddyList{}, err
+	}
+	s.buddyList = s.feedbag.BuddyList()
+	return s.buddyList, nil
 }
 
 // RemoveBuddy removes a buddy from the list.
@@ -274,9 +295,22 @@ func (s *Session) applyEdit(mutate func() ([]editOp, error)) (BuddyList, error) 
 
 // sendEdits transmits a sequence of feedbag edit SNACs in order.
 func (s *Session) sendEdits(ops []editOp) error {
+	return s.sendEditsTracking(ops, "")
+}
+
+// sendEditsTracking is sendEdits that, when trackName is set, records the
+// request ID of the first InsertItem op (the one carrying the buddy) so its
+// FeedbagStatus can later be matched. A single add inserts at most one buddy,
+// so only the first insert is tracked.
+func (s *Session) sendEditsTracking(ops []editOp, trackName string) error {
 	for _, op := range ops {
-		if err := s.Send(wire.Feedbag, op.subGroup, op.body); err != nil {
+		reqID, err := s.sendPaced(wire.Feedbag, op.subGroup, op.body)
+		if err != nil {
 			return fmt.Errorf("oscar: send feedbag edit (subgroup 0x%04x): %w", op.subGroup, err)
+		}
+		if trackName != "" && op.subGroup == wire.FeedbagInsertItem {
+			s.recordAuthReq(reqID, trackName)
+			trackName = ""
 		}
 	}
 	return nil

@@ -374,6 +374,17 @@
   color: var(--benco-red);
 }
 
+/* A buddy you added who hasn't accepted yet — muted, not alarming; it's a
+   normal waiting state, not an error. */
+.roster__pending-tag {
+  flex: none;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--benco-dim);
+  font-style: italic;
+}
+
 /* --- Conversation --------------------------------------------------------- */
 
 .chat {

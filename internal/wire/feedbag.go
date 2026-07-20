@@ -97,6 +97,59 @@ const (
 	FeedbagStatusAuthRequired uint16 = 0x000E
 )
 
+// --- Buddy authorization (consensual connections) ---------------------------
+//
+// These mirror open-oscar-server's wire structs byte-for-byte (its
+// wire/snacs.go SNAC_0x13_0x18..0x1B). The BENCchat server requires a target's
+// authorization before an AIM buddy add is stored, and gates messaging on the
+// same grant, so a connection is consensual in both directions.
+//
+// The two "ToClient" SNACs (0x19, 0x1B) are sent by the server with the SNAC
+// SNACFlagsExtendedInfo flag, meaning their leading TLVLBlock is the
+// extended-info block that the transport (DecodeSNAC) strips before dispatch.
+// The block is kept in these structs for on-wire fidelity — decode helpers
+// account for the strip; see internal/oscar/feedbag_auth.go.
+
+// SNAC_0x13_0x18_FeedbagRequestAuthorizationToHost is a client's request to be
+// allowed to add ScreenName (client → server). BENCchat does not send this
+// directly — a buddy add drives the flow — but it is defined for completeness
+// and to match the server's dialect.
+type SNAC_0x13_0x18_FeedbagRequestAuthorizationToHost struct {
+	ScreenName string `oscar:"len_prefix=uint8"`
+	Reason     string `oscar:"len_prefix=uint16"`
+	Unknown    uint16
+}
+
+// SNAC_0x13_0x19_FeedbagRequestAuthorizeToClient tells us ScreenName wants to
+// connect (server → client). This is the inbound "X wants to connect".
+type SNAC_0x13_0x19_FeedbagRequestAuthorizeToClient struct {
+	TLVLBlock         // extended-info block, present for client compat
+	ScreenName string `oscar:"len_prefix=uint8"`
+	Reason     string `oscar:"len_prefix=uint16"`
+	Unknown    uint16
+}
+
+// SNAC_0x13_0x1A_FeedbagRespondAuthorizeToHost is our answer to a request
+// (client → server): Accepted is 1 to approve, 0 to decline.
+type SNAC_0x13_0x1A_FeedbagRespondAuthorizeToHost struct {
+	ScreenName string `oscar:"len_prefix=uint8"`
+	Accepted   uint8
+	Reason     string `oscar:"len_prefix=uint16"`
+}
+
+// SNAC_0x13_0x1B_FeedbagRespondAuthorizeToClient notifies us that ScreenName
+// answered a request we made (server → client).
+//
+// Nullterm is a trailing uint16 the server emits that the task spec omitted;
+// the server is the source of truth, so it is mirrored here.
+type SNAC_0x13_0x1B_FeedbagRespondAuthorizeToClient struct {
+	TLVLBlock         // extended-info block, present for client compat
+	ScreenName string `oscar:"len_prefix=uint8"`
+	Accepted   uint8
+	Reason     string `oscar:"len_prefix=uint16"`
+	Nullterm   uint16
+}
+
 // SNAC_0x13_0x02_FeedbagRightsQuery asks for list limits. The server parses the
 // body and then ignores it entirely, so an empty block is fine.
 type SNAC_0x13_0x02_FeedbagRightsQuery struct {

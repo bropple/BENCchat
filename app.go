@@ -125,6 +125,11 @@ type App struct {
 	// starts with that person as a known member to ask for history.
 	pendingInviteFrom map[string]string
 
+	// connReqs holds inbound connection (buddy-authorization) requests waiting for
+	// a decision, keyed by normalized screen name. Guarded by connReqMu.
+	connReqMu sync.Mutex
+	connReqs  map[string]oscar.ConnectionRequest
+
 	// desktopIcon is the app icon (PNG) written into the icon theme on Linux so
 	// the desktop entry — and thus the window/taskbar icon — resolves to it.
 	desktopIcon []byte

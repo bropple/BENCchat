@@ -107,6 +107,8 @@ func (a *App) setupE2EE(screenName string) {
 	a.client.SetPeerKeyHandler(a.notePeerKey)
 	a.client.SetRoomInviteHandler(a.handleRoomInvite)
 	a.client.SetCatchupHandler(a.handleCatchup)
+	a.client.SetConnectionRequestHandler(a.handleConnectionRequest)
+	a.client.SetConnectionResponseHandler(a.handleConnectionResponse)
 	a.restoreRoomKeys()
 
 	// Off the sign-on path: it makes directory round trips, and a slow or

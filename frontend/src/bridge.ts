@@ -40,6 +40,9 @@ export interface Buddy {
   awayMessage?: string;
   profile?: string;
   blocked?: boolean;
+  /** We added them but they haven't accepted the connection yet — presence and
+   *  messaging stay gated until they do. */
+  pending?: boolean;
   /** Hex MD5 of the buddy's icon (BART), empty/absent if none. Changes when the
    *  buddy swaps icons; the image itself is fetched via Bridge.getBuddyIcon. */
   iconHash?: string;
@@ -123,6 +126,12 @@ export interface Verification {
 export interface RoomInviteInfo {
   room: string;
   from: string;
+}
+
+/** An incoming request to connect. Mirrors app.ConnectionRequestInfo. */
+export interface ConnectionRequestInfo {
+  screenName: string;
+  reason: string;
 }
 
 /** Encryption state of a chat room. Mirrors app.RoomSecurity. */
@@ -284,6 +293,9 @@ interface AppBindings {
   RoomSecurityInfo(cookie: string): Promise<RoomSecurity>;
   InviteToRoom(cookie: string, screenName: string): Promise<string>;
   PendingRoomInvites(): Promise<RoomInviteInfo[] | null>;
+  PendingConnectionRequests(): Promise<ConnectionRequestInfo[] | null>;
+  ApproveConnectionRequest(screenName: string): Promise<string>;
+  DeclineConnectionRequest(screenName: string): Promise<string>;
   AcceptRoomInvite(roomName: string): Promise<string>;
   DeclineRoomInvite(roomName: string): Promise<void>;
   RotateRoomKey(cookie: string, drop: string[]): Promise<string>;
@@ -400,6 +412,22 @@ export const Bridge = {
   onRoomInvite(cb: (req: { from: string; room: string }) => void): void {
     window.runtime?.EventsOn("room:invite", (data) =>
       cb(data as { from: string; room: string }),
+    );
+  },
+
+  pendingConnectionRequests: () => app().PendingConnectionRequests(),
+  approveConnectionRequest: (screenName: string) => app().ApproveConnectionRequest(screenName),
+  declineConnectionRequest: (screenName: string) => app().DeclineConnectionRequest(screenName),
+  /** Someone wants to connect (add you). */
+  onConnectionRequest(cb: (req: ConnectionRequestInfo) => void): void {
+    window.runtime?.EventsOn("connection:request", (data) =>
+      cb(data as ConnectionRequestInfo),
+    );
+  },
+  /** A request we sent, or one we're handling, changed state. */
+  onConnectionUpdate(cb: (u: { screenName: string; accepted?: boolean; handled?: boolean }) => void): void {
+    window.runtime?.EventsOn("connection:update", (data) =>
+      cb(data as { screenName: string; accepted?: boolean; handled?: boolean }),
     );
   },
   leaveRoom: (cookie: string) => app().LeaveRoom(cookie),

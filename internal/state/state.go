@@ -52,6 +52,10 @@ type Buddy struct {
 	Profile string `json:"profile,omitempty"`
 	// Blocked reports whether this buddy is on our deny list.
 	Blocked bool `json:"blocked,omitempty"`
+	// Pending reports whether this buddy was added by us but hasn't yet approved
+	// the connection. Until they do, no presence flows, so the UI marks them as
+	// awaiting acceptance rather than showing them permanently offline.
+	Pending bool `json:"pending,omitempty"`
 	// IconHash is the hex MD5 of the buddy's icon (BART), empty if they have
 	// none. The image bytes are fetched separately and cached in the Store; the
 	// UI reads them via the app's GetBuddyIcon. The hash changing is the signal

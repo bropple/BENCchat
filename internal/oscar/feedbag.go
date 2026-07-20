@@ -19,6 +19,11 @@ type BuddyEntry struct {
 	Alias string
 	// Blocked reports whether this buddy is on the deny list.
 	Blocked bool
+	// Pending reports whether this buddy is awaiting authorization — added by us
+	// but not yet approved by them, so no presence flows. Derived from the
+	// FeedbagAttributesPending tag the server stores on a pending row, so it
+	// survives reconnects.
+	Pending bool
 }
 
 // BuddyList is a parsed feedbag: the buddies plus the group display order.
@@ -150,6 +155,7 @@ func parseFeedbagItems(items []wire.FeedbagItem) BuddyList {
 			Group:      group,
 			Alias:      alias,
 			Blocked:    blocked[normName(item.Name)],
+			Pending:    item.HasTag(wire.FeedbagAttributesPending),
 		})
 	}
 

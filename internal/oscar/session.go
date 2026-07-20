@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/benco-holdings/benchat/internal/wire"
@@ -60,6 +61,13 @@ type Session struct {
 
 	reqID  uint32
 	closed chan struct{}
+
+	// authByReq correlates a buddy-add's request ID to the screen name it added,
+	// so the server's asynchronous FeedbagStatus (which echoes the request ID)
+	// can be tied back to the buddy when authorization turns out to be required.
+	// Guarded by authMu.
+	authMu    sync.Mutex
+	authByReq map[uint32]string
 }
 
 // Transport returns how this session connected, for spawning further
@@ -263,6 +271,14 @@ func (s *Session) waitFor(fg, sg uint16) (wire.SNACFrame, []byte, error) {
 // keep this SNAC class's moving average out of the server's drop zone. The sleep
 // is abandoned if the session closes, so a sign-off never hangs behind pacing.
 func (s *Session) Send(fg, sg uint16, body any) error {
+	_, err := s.sendPaced(fg, sg, body)
+	return err
+}
+
+// sendPaced is Send, but returns the request ID it assigned. Unlike service.go's
+// SendReq it applies rate pacing, so it suits edit traffic (buddy adds) that can
+// arrive in bursts while still needing its reply correlated by request ID.
+func (s *Session) sendPaced(fg, sg uint16, body any) (uint32, error) {
 	if s.rateLimiter != nil {
 		if d := s.rateLimiter.reserve(fg, sg); d > 0 {
 			t := time.NewTimer(d)
@@ -270,15 +286,43 @@ func (s *Session) Send(fg, sg uint16, body any) error {
 			case <-t.C:
 			case <-s.closed:
 				t.Stop()
-				return errors.New("oscar: session closed while pacing a send")
+				return 0, errors.New("oscar: session closed while pacing a send")
 			}
 		}
 	}
-	return s.conn.WriteSNAC(wire.SNACFrame{
+	reqID := s.nextReqID()
+	if err := s.conn.WriteSNAC(wire.SNACFrame{
 		FoodGroup: fg,
 		SubGroup:  sg,
-		RequestID: s.nextReqID(),
-	}, body)
+		RequestID: reqID,
+	}, body); err != nil {
+		return 0, err
+	}
+	return reqID, nil
+}
+
+// recordAuthReq remembers that request reqID added screenName, so a later
+// FeedbagStatus can be matched to the buddy that may need authorization.
+func (s *Session) recordAuthReq(reqID uint32, screenName string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if s.authByReq == nil {
+		s.authByReq = make(map[uint32]string)
+	}
+	s.authByReq[reqID] = screenName
+}
+
+// TakeAuthTarget returns and forgets the buddy screen name a buddy-add request
+// carried, matched by the request ID the server echoed on its FeedbagStatus.
+// The second result is false when this reply was not a tracked buddy add.
+func (s *Session) TakeAuthTarget(reqID uint32) (string, bool) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	name, ok := s.authByReq[reqID]
+	if ok {
+		delete(s.authByReq, reqID)
+	}
+	return name, ok
 }
 
 // Run drives the session read loop until the connection closes or ctx is
