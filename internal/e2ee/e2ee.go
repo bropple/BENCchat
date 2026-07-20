@@ -1,8 +1,9 @@
 // Package e2ee provides opt-in end-to-end encryption for 1:1 messages using
 // NaCl box (X25519 key agreement + XSalsa20-Poly1305 authenticated encryption).
 //
-// Keys are exchanged out of band via profiles (see the client layer); the server
-// only ever relays the resulting ciphertext, so it never sees plaintext. This is
+// Public keys are published to the server's device key directory, foodgroup
+// 0xBE00 (see the client layer); the server only ever relays the resulting
+// ciphertext, so it never sees plaintext. This is
 // deliberately simple: static keys (no forward secrecy) and trust-on-first-use
 // key discovery. It protects message content from the server and the network,
 // not metadata (who talks to whom, when).

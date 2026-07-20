@@ -10,10 +10,10 @@ import (
 
 // App-layer use of the BENCO device key directory (foodgroup 0xBE00).
 //
-// The directory replaces publishing device keys inside the Locate profile. Every
-// path here degrades: when the server does not advertise the foodgroup, BENCchat
-// falls back to the profile marker exactly as before, so it still works against
-// a stock open-oscar-server.
+// The directory replaced publishing device keys inside the Locate profile, and
+// is now the only place they live. There is no longer a fallback: a server that
+// does not advertise the foodgroup cannot carry keys at all, and the paths here
+// say so rather than reporting a success no peer can act on.
 
 // ownPublishedKeys reads what this account currently advertises.
 //
@@ -74,8 +74,10 @@ func (a *App) publishDevices(boxKeys [][32]byte) (accepted int, selfRefused bool
 
 	accepted, refused, ok := a.client.PublishDevices(devices)
 	if !ok {
-		slog.Default().Warn("could not publish device keys to the directory; the profile marker still carries them")
-		return len(boxKeys), false
+		// Nothing else carries keys now, so a failed publish means this device is
+		// undiscoverable. Report zero accepted rather than the count we hoped for.
+		slog.Default().Error("could not publish device keys to the directory; they are published nowhere")
+		return 0, false
 	}
 
 	// A refused key is a device the user removed announcing itself again. The

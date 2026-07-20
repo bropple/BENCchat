@@ -11,10 +11,10 @@ import (
 
 // Client access to the BENCO device key directory (foodgroup 0xBE00).
 //
-// This replaces publishing device keys inside the Locate profile. Everything
-// here degrades: if the server does not advertise the foodgroup, SupportsKeyDir
-// is false and callers keep using profile markers, so BENCchat still works
-// against a stock open-oscar-server.
+// This replaced publishing device keys inside the Locate profile, and is now the
+// only place they live. If the server does not advertise the foodgroup,
+// SupportsKeyDir is false and there is nowhere left to publish or read keys —
+// callers report that rather than silently degrading to plaintext.
 
 // keyDirTimeout bounds a directory round trip.
 //
@@ -170,16 +170,16 @@ func (c *Client) RevokeDevice(box [32]byte) (changed bool, ok bool) {
 	}
 }
 
-// RefreshPeerKeys learns a peer's device keys, preferring the directory.
+// RefreshPeerKeys learns a peer's device keys from the directory.
 //
-// It falls back to a Locate profile fetch in two cases: the server does not
-// offer the directory, or it does and the peer has published nothing there. The
-// second case matters during the transition — a peer running an older BENCchat
-// still advertises only a profile marker, and treating an empty directory answer
-// as "this peer has no keys" would strand the conversation in plaintext.
+// The trailing Locate fetch is no longer a key-learning fallback: profiles stop
+// carrying keys as of the commit that made the directory the sole source, and
+// handleLocate does not parse them. It survives because the same round trip also
+// refreshes capabilities, away text and profile text, which the UI wants anyway
+// when a conversation turns out to have no keys.
 //
-// Blocking, because the directory round trip has to complete before we know
-// whether to fall back. Callers run it in a goroutine.
+// Blocking, because the directory round trip has to complete first. Callers run
+// it in a goroutine.
 func (c *Client) RefreshPeerKeys(screenName string) {
 	if c.SupportsKeyDir() {
 		if devices, ok := c.QueryDevices(screenName); ok && len(devices) > 0 {

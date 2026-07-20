@@ -17,8 +17,8 @@ import (
 // This is the graceful-degradation check. The foodgroup sits above wire.MDir, so
 // it cannot take part in OSCAR's foodgroup version negotiation; the server
 // advertises it in the HostOnline list instead. A server that does not list it —
-// a stock open-oscar-server, or a BENCoscar older than the directory — means we
-// must keep publishing keys in the Locate profile.
+// a stock open-oscar-server, or a BENCoscar older than the directory — cannot
+// carry device keys at all, since the Locate profile no longer does.
 func (s *Session) SupportsKeyDir() bool {
 	for _, fg := range s.FoodGroups() {
 		if fg == wire.BENCOKeyDir {
