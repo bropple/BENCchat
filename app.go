@@ -73,6 +73,9 @@ type App struct {
 	linkPrompted map[[32]byte]bool
 	linkDeclined map[[32]byte]bool
 	linkPending  bool
+	// linkNoticeShown ensures ONE explanation per sign-on for why this device
+	// cannot read encrypted messages; "new" and "removed" describe one state.
+	linkNoticeShown bool
 
 	// System tray. Icons are injected from main (embedded assets). quitting
 	// distinguishes a real quit (tray "Quit") from a window close, which hides to

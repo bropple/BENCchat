@@ -124,10 +124,15 @@ func (a *App) onRevokedDeviceReturned(box [32]byte) {
 		// different explanations at the same instant, one of which ("approve
 		// this new device") is the wrong mental model for a device that used to
 		// be linked and was removed.
-		a.store.Notify(state.NoticeWarn,
-			"This device was removed from your account, so it can no longer receive encrypted "+
-				"messages. Approve it again from another signed-in device to restore it.")
-		a.setLinkPending()
+		// Claim before setLinkPending, which would otherwise emit the generic
+		// "you are new" wording for the same state.
+		if a.claimLinkNotice() {
+			a.store.Notify(state.NoticeWarn,
+				"This device was removed from your account, so it can no longer receive "+
+					"encrypted messages. Approve it again from another signed-in device to "+
+					"restore it.")
+		}
+		a.setLinkPendingQuiet()
 		return
 	}
 

@@ -707,6 +707,7 @@ func (a *App) resetLinkState() {
 	a.linkPrompted = map[[32]byte]bool{}
 	a.linkDeclined = map[[32]byte]bool{}
 	a.linkPending = false
+	a.linkNoticeShown = false
 	a.linkMu.Unlock()
 }
 
@@ -741,10 +742,33 @@ func (a *App) setLinkPendingQuiet() bool {
 
 // notifyNotLinked explains the NEW-device case.
 func (a *App) notifyNotLinked() {
+	if !a.claimLinkNotice() {
+		return
+	}
 	a.store.Notify(state.NoticeWarn, fmt.Sprintf(
 		"This device isn't linked yet, so it can't read messages encrypted to your "+
 			"other devices. Approve it from a device that's already signed in — its "+
 			"code is %s.", e2ee.Fingerprint(a.e2eePub)))
+}
+
+// claimLinkNotice returns true for the FIRST caller each sign-on that wants to
+// explain why this device cannot read encrypted messages.
+//
+// There are two explanations — "you are new" and "you were removed" — and they
+// describe the same state, so emitting both contradicts. Twice now I have tried
+// to fix that by ordering the calls, and twice the duplicate survived, which
+// means my model of the ordering is wrong rather than the ordering being
+// slightly off. A claim makes it structurally impossible instead: whichever
+// path gets there first explains it, and the rest stay quiet no matter how they
+// interleave or how many goroutines reach them.
+func (a *App) claimLinkNotice() bool {
+	a.linkMu.Lock()
+	defer a.linkMu.Unlock()
+	if a.linkNoticeShown {
+		return false
+	}
+	a.linkNoticeShown = true
+	return true
 }
 
 // forgetLinkPrompt lets a device raise the approval dialog again.
