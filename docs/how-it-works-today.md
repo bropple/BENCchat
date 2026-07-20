@@ -333,10 +333,16 @@ E2EE is on, we have a keypair, and we have cached keys for that peer
 (`internal/client/e2ee.go:98-104`). The peer's advertised capability is *not*
 consulted.
 
-**The 1:1 path fails open.** If sealing errors, it logs and sends plaintext
-(`client.go:230-232`). The room path fails *closed* — it refuses to send
-(`room_e2ee.go:277-280`). That asymmetry is deliberate on the room side and
-worth knowing about on the 1:1 side.
+**Both paths fail closed.** `sealOutbound` sends plaintext only when we hold no
+keys for the peer — the ordinary non-BENCchat case, where the UI shows no lock.
+If we hold keys and sealing fails, nothing is sent, matching what
+`sealRoomMessage` does for rooms (`room_e2ee.go:277-280`).
+
+The failure branch is not reachable today: `sealFor` guarantees a non-empty
+recipient set, which is the only error `SealFor` returns short of the system
+random source failing. It exists because the alternative shape — "encrypt, or
+quietly don't" — transmits in the clear to someone the UI is showing a lock for,
+and anything fallible added to this path later lands exactly there.
 
 Local storage is optimistic: the plaintext is stored after a successful write to
 the socket, with no wait for any ack (`client.go:238-245`).

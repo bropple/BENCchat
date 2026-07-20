@@ -380,3 +380,61 @@ func TestMultiDeviceDirectoryReplyPreservesOthers(t *testing.T) {
 		t.Fatalf("learned %d device keys for bob, want 2", len(got))
 	}
 }
+
+// TestSealOutboundNeverSendsPlaintextToAnEncryptedPeer pins the invariant behind
+// the 1:1 fail-closed rule: once we hold a peer's keys, what goes on the wire is
+// an envelope or nothing. It must never be the raw text, because the UI is
+// showing a lock for that conversation at the same moment.
+func TestSealOutboundNeverSendsPlaintextToAnEncryptedPeer(t *testing.T) {
+	alice, _ := newE2EEClient(t)
+	_, bobPub := newE2EEClient(t)
+	alice.learnPeerKeys("bob", [][32]byte{bobPub})
+
+	wire, encrypted, err := alice.sealOutbound("bob", "secret")
+	if err != nil {
+		t.Fatalf("sealOutbound: %v", err)
+	}
+	if !encrypted {
+		t.Error("a peer with known keys was not marked encrypted")
+	}
+	if wire == "secret" {
+		t.Fatal("plaintext went on the wire for a peer we hold keys for")
+	}
+	if !e2ee.IsEnvelopeAny(wire) {
+		t.Errorf("wire body is neither plaintext nor an envelope: %q", wire)
+	}
+}
+
+// A peer we hold no keys for is the ordinary non-BENCchat case: plaintext, no
+// error, no lock. This is the branch the fail-closed change must NOT break.
+func TestSealOutboundSendsPlaintextToAStranger(t *testing.T) {
+	alice, _ := newE2EEClient(t)
+
+	wire, encrypted, err := alice.sealOutbound("stranger", "hello")
+	if err != nil {
+		t.Fatalf("sealOutbound to a stranger errored: %v", err)
+	}
+	if encrypted {
+		t.Error("a peer with no known keys was marked encrypted")
+	}
+	if wire != "hello" {
+		t.Errorf("wire = %q, want the plaintext unchanged", wire)
+	}
+}
+
+// With E2EE switched off, a peer whose keys we happen to know is still
+// plaintext — the toggle wins over key possession.
+func TestSealOutboundHonoursTheE2EEToggle(t *testing.T) {
+	alice, _ := newE2EEClient(t)
+	_, bobPub := newE2EEClient(t)
+	alice.learnPeerKeys("bob", [][32]byte{bobPub})
+	alice.SetE2EEOn(false)
+
+	wire, encrypted, err := alice.sealOutbound("bob", "hello")
+	if err != nil {
+		t.Fatalf("sealOutbound with E2EE off errored: %v", err)
+	}
+	if encrypted || wire != "hello" {
+		t.Errorf("E2EE off still encrypted: encrypted=%v wire=%q", encrypted, wire)
+	}
+}

@@ -220,16 +220,9 @@ func (c *Client) SendMessage(to, text string) error {
 		return errors.New("client: message is empty")
 	}
 
-	// Encrypt when E2EE is on and we hold the peer's key; otherwise send
-	// plaintext so non-BENCchat peers still work. We store the plaintext locally
-	// (so we see what we typed) and mark it encrypted for the lock indicator.
-	wireText, encrypted := text, false
-	if peerKeys, ourPriv, ok := c.sealFor(to); ok {
-		if env, err := e2ee.SealFor(text, peerKeys, ourPriv); err == nil {
-			wireText, encrypted = env, true
-		} else {
-			c.log.Warn("e2ee seal failed; sending plaintext", "err", err)
-		}
+	wireText, encrypted, err := c.sealOutbound(to, text)
+	if err != nil {
+		return err
 	}
 
 	if _, err := session.SendMessage(to, wireText, false); err != nil {
@@ -244,6 +237,38 @@ func (c *Client) SendMessage(to, text string) error {
 		Encrypted: encrypted,
 	})
 	return nil
+}
+
+// sealOutbound decides what actually goes on the wire for a 1:1 message, and
+// mirrors sealRoomMessage so both paths answer the same question the same way.
+//
+// Two situations look similar and only one of them is normal:
+//
+//   - We hold NO keys for this peer. They are not a BENCchat user, or E2EE is
+//     off. Plaintext is the correct answer and the UI shows no lock.
+//   - We hold keys and cannot USE them. That is a bug, and falling back to
+//     plaintext would transmit in the clear to someone the UI is at that moment
+//     showing a lock for. Nothing is sent.
+//
+// The second case is not reachable today — sealFor guarantees a non-empty
+// recipient set, which is the only error SealFor returns short of the system
+// random source failing. It is here because "encrypt, or quietly don't" is the
+// wrong shape for this decision regardless of whether the branch currently
+// fires, and because anything fallible added to this path later (post-quantum
+// encapsulation, say) lands exactly here.
+func (c *Client) sealOutbound(to, text string) (wireText string, encrypted bool, err error) {
+	peerKeys, ourPriv, ok := c.sealFor(to)
+	if !ok {
+		return text, false, nil
+	}
+	env, serr := e2ee.SealFor(text, peerKeys, ourPriv)
+	if serr != nil {
+		c.log.Error("e2ee seal failed; refusing to send in the clear", "to", to, "err", serr)
+		return "", false, errors.New(
+			"client: this conversation is encrypted but the message could not be " +
+				"encrypted — nothing was sent")
+	}
+	return env, true, nil
 }
 
 // AddBuddy adds screenName to group (or the default group if empty) and
