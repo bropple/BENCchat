@@ -154,36 +154,47 @@ fi
 say "Clearing keyring entries"
 KEYRING_OK=0
 if ! command -v secret-tool >/dev/null 2>&1; then
-  warn "secret-tool not found — clear these by hand (Seahorse, KDE Wallet):"
-  for a in $ACCOUNTS; do
-    echo "    service=$KEYRING_SERVICE  username=$a"
-    [ "$KEEP_IDENTITY" -eq 0 ] && echo "    service=$KEYRING_SERVICE  username=e2ee:$a, sign:$a"
-  done
+  warn "secret-tool not found — clear BENCchat's entries by hand (Seahorse, KDE Wallet)."
 elif ! timeout 5 secret-tool search service "$KEYRING_SERVICE" >/dev/null 2>&1; then
+  # The secret service lives on the D-Bus session bus, so it is simply absent
+  # over SSH or from a bare TTY even though it works in the desktop session.
+  # Reporting success here would be the worst outcome: the password survives and
+  # the app keeps signing itself in, which looks like the reset did nothing.
   warn "No secret service on this session's D-Bus — NOTHING was cleared from the keyring."
   echo "     The keyring only exists inside a desktop session; over SSH or a bare"
   echo "     TTY there is nothing listening. THE SAVED PASSWORD SURVIVED, so the"
   echo "     app will still auto-sign-on. Re-run this from a desktop terminal, or:"
-  for a in $ACCOUNTS; do
-    echo "         secret-tool clear service $KEYRING_SERVICE username $a"
-    if [ "$KEEP_IDENTITY" -eq 0 ]; then
-      echo "         secret-tool clear service $KEYRING_SERVICE username e2ee:$a"
-      echo "         secret-tool clear service $KEYRING_SERVICE username sign:$a"
-    fi
+  if [ "$KEEP_IDENTITY" -eq 0 ]; then
+    echo "         secret-tool clear service $KEYRING_SERVICE"
+  else
+    for a in $ACCOUNTS; do
+      echo "         secret-tool clear service $KEYRING_SERVICE username $a"
+    done
+  fi
+elif [ "$KEEP_IDENTITY" -eq 0 ]; then
+  # Clear by SERVICE, not per account. Anything BENCchat stored goes, including
+  # entries for accounts whose files were already removed — enumerating names
+  # would leave those orphans behind, and a blank slate should be blank.
+  KEYRING_OK=1
+  n=0
+  while timeout 5 secret-tool clear service "$KEYRING_SERVICE" 2>/dev/null; do
+    n=$((n+1))
+    # secret-tool clear removes matching items; loop until nothing matches, so a
+    # single call that only removes one entry still ends up clearing them all.
+    timeout 5 secret-tool search service "$KEYRING_SERVICE" >/dev/null 2>&1 || break
   done
+  echo "    cleared every $KEYRING_SERVICE entry"
 else
+  # Selective: the password goes, the identity stays.
   KEYRING_OK=1
   for a in $ACCOUNTS; do
-    USERS=("$a")
-    [ "$KEEP_IDENTITY" -eq 0 ] && USERS+=("e2ee:$a" "sign:$a")
-    for u in "${USERS[@]}"; do
-      if secret-tool clear service "$KEYRING_SERVICE" username "$u" 2>/dev/null; then
-        echo "    cleared $u"
-      else
-        echo "    (nothing stored for $u)"
-      fi
-    done
+    if secret-tool clear service "$KEYRING_SERVICE" username "$a" 2>/dev/null; then
+      echo "    cleared saved password for $a"
+    else
+      echo "    (no saved password for $a)"
+    fi
   done
+  echo "    kept e2ee: and sign: entries"
 fi
 
 say "Done."
