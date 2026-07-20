@@ -130,7 +130,7 @@ func (a *App) setupIdentity() {
 	}
 	a.publishProfile()
 
-	if !a.client.SupportsKeyDir() {
+	if !a.keyDir.SupportsKeyDir() {
 		a.setIdentityFlow("unavailable")
 		slog.Default().Error("server has no key directory; encryption keys cannot be published")
 		a.store.Notify(state.NoticeError,
@@ -139,7 +139,7 @@ func (a *App) setupIdentity() {
 		return
 	}
 
-	backup, ok := a.client.GetIdentityBackup()
+	backup, ok := a.keyDir.GetIdentityBackup()
 	if !ok {
 		a.setIdentityFlow("unavailable")
 		a.store.Notify(state.NoticeWarn,
@@ -160,7 +160,7 @@ func (a *App) setupIdentity() {
 	// An identity exists. Are we in its manifest? QueryManifest's reply is
 	// verified on arrival by the installed verifier, which is also what records
 	// the pin, the device set and whether this device is listed.
-	if _, ok := a.client.QueryManifest(a.store.Self().ScreenName); !ok {
+	if _, ok := a.keyDir.QueryManifest(a.store.Self().ScreenName); !ok {
 		a.setIdentityFlow("unavailable")
 		a.store.Notify(state.NoticeWarn,
 			"BENCchat couldn't read this account's device list. Encryption is unavailable "+
@@ -208,7 +208,7 @@ func (a *App) BeginIdentitySetup() RecoveryKeyInfo {
 	if !a.e2eeHasKey {
 		return RecoveryKeyInfo{Error: "Encryption isn't set up on this device yet."}
 	}
-	if !a.client.SupportsKeyDir() {
+	if !a.keyDir.SupportsKeyDir() {
 		return RecoveryKeyInfo{Error: errNoKeyDir.Error()}
 	}
 
@@ -216,7 +216,7 @@ func (a *App) BeginIdentitySetup() RecoveryKeyInfo {
 	// second identity for an account that already has one silently orphans every
 	// device signed under the first, and the window between deciding and acting
 	// is wide enough for another device to have bootstrapped.
-	backup, ok := a.client.GetIdentityBackup()
+	backup, ok := a.keyDir.GetIdentityBackup()
 	if !ok {
 		return RecoveryKeyInfo{Error: "BENCchat couldn't reach the key directory. Try again."}
 	}
@@ -271,7 +271,7 @@ func (a *App) ConfirmIdentitySetup() string {
 		if err != nil {
 			return err.Error()
 		}
-		stored, ok := a.client.PutIdentityBackup(
+		stored, ok := a.keyDir.PutIdentityBackup(
 			wire.BENCOKDFArgon2id, backup.Params.Encode(), backup.Salt, backup.Blob)
 		if !ok {
 			return "BENCchat couldn't reach the key directory to save your identity. Your " +
@@ -293,6 +293,12 @@ func (a *App) ConfirmIdentitySetup() string {
 		return "Your identity was saved, but publishing this device failed: " + err.Error() +
 			" Your recovery key is still on screen — try again."
 	}
+
+	// The account now has a recovery key, and this device watched it being made,
+	// so it is the one machine that can honestly say when. Recorded after the
+	// writes rather than before: a date for a key that was never stored would
+	// make the §13 line report on something that does not exist.
+	a.recordRecoveryKeyCreated()
 
 	// Step 7, and only now. The key has done its work and goes away.
 	a.identityMu.Lock()
@@ -337,6 +343,12 @@ const SaveRecoveryKeyCancelled = "cancelled"
 // SaveRecoveryKeyToFile writes the pending recovery key to a file the user
 // picks, as the other way to satisfy §12's gate.
 //
+// It serves first run and a §10 re-key from one implementation, because they are
+// the same gate guarding the same class of mistake — and a second, weaker copy
+// of a gate is worse than not having one. Which key is on screen is not
+// ambiguous: a first run means the account has no identity and a re-key means it
+// has one, so at most one of the two can be pending.
+//
 // Returns "" when the file was written, SaveRecoveryKeyCancelled when the user
 // backed out, and any other non-empty string as an error to show.
 //
@@ -351,9 +363,16 @@ const SaveRecoveryKeyCancelled = "cancelled"
 // is worse than anything it prevents.
 func (a *App) SaveRecoveryKeyToFile() string {
 	a.identityMu.Lock()
-	p := a.pending
+	key := ""
+	replacing := false
+	switch {
+	case a.pending != nil:
+		key = a.pending.recoveryKey
+	case a.rotation != nil:
+		key, replacing = a.rotation.newRecoveryKey, true
+	}
 	a.identityMu.Unlock()
-	if p == nil {
+	if key == "" {
 		return "There's no recovery key to save."
 	}
 	if a.ctx == nil {
@@ -373,18 +392,30 @@ func (a *App) SaveRecoveryKeyToFile() string {
 		return SaveRecoveryKeyCancelled
 	}
 
-	body := strings.Join([]string{
+	lines := []string{
 		"BENCchat recovery key for " + a.store.Self().ScreenName,
 		"",
-		p.recoveryKey,
+		key,
 		"",
 		"This is the only copy. It cannot be shown again, and without it this",
 		"account cannot link a new device or remove an old one.",
 		"",
+	}
+	if replacing {
+		// Said here as well as on screen: this file may well be read months
+		// later, next to an older one, and which of the two is live is the whole
+		// question at that point.
+		lines = append(lines,
+			"This REPLACES your previous recovery key. The old one keeps working",
+			"until you continue in BENCchat, and stops the moment you do — so once",
+			"you have, delete any copy of it rather than filing both.",
+			"")
+	}
+	lines = append(lines,
 		"Put it in a password manager, print it, or keep it where you keep a",
 		"passport. Do not leave it in Downloads.",
-		"",
-	}, "\n")
+		"")
+	body := strings.Join(lines, "\n")
 	// 0600: it is a plaintext account secret, and the mode is the only
 	// protection it has.
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -406,7 +437,7 @@ func (a *App) LinkDevice(recoveryKey string) string {
 	if !a.e2eeHasKey {
 		return "Encryption isn't set up on this device yet."
 	}
-	if !a.client.SupportsKeyDir() {
+	if !a.keyDir.SupportsKeyDir() {
 		return errNoKeyDir.Error()
 	}
 	rk, err := e2ee.ParseRecoveryKey(recoveryKey)
@@ -414,7 +445,7 @@ func (a *App) LinkDevice(recoveryKey string) string {
 		return recoveryKeyMessage(err)
 	}
 
-	backup, ok := a.client.GetIdentityBackup()
+	backup, ok := a.keyDir.GetIdentityBackup()
 	if !ok {
 		return "BENCchat couldn't reach the key directory. Try again."
 	}
@@ -452,13 +483,19 @@ func (a *App) LinkDevice(recoveryKey string) string {
 
 	// Learn the current device list before adding ourselves to it, or we would
 	// publish a manifest that drops every other machine.
-	if _, ok := a.client.QueryManifest(a.store.Self().ScreenName); !ok {
+	if _, ok := a.keyDir.QueryManifest(a.store.Self().ScreenName); !ok {
 		return "BENCchat couldn't read this account's current device list, and publishing " +
 			"without it would remove your other devices. Try again."
 	}
 	if err := a.publishManifest(kp, a.currentDevices()); err != nil {
 		return err.Error()
 	}
+
+	// A successful link is a real decryption of the backup, which is exactly the
+	// evidence §13's "Verify now" gathers. Recording it here means someone who
+	// links a laptop does not then see "never verified" against a key they just
+	// demonstrably used.
+	a.recordRecoveryKeyVerified()
 
 	a.setSelfIdentityPinIfUnset(kp)
 	a.setIdentityFlow("ready")
@@ -530,7 +567,7 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 	if target == a.e2eePub {
 		return "That's this device — removing it would stop you reading your own messages."
 	}
-	if !a.client.SupportsKeyDir() {
+	if !a.keyDir.SupportsKeyDir() {
 		return errNoKeyDir.Error()
 	}
 	rk, err := e2ee.ParseRecoveryKey(recoveryKey)
@@ -538,7 +575,7 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 		return recoveryKeyMessage(err)
 	}
 
-	backup, ok := a.client.GetIdentityBackup()
+	backup, ok := a.keyDir.GetIdentityBackup()
 	if !ok {
 		return "BENCchat couldn't reach the key directory. Try again."
 	}
@@ -563,7 +600,7 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 	// Work from the CURRENT manifest, not from whatever this session last saw,
 	// so a device another machine added in the meantime is not silently dropped
 	// by a removal aimed at something else.
-	if _, ok := a.client.QueryManifest(a.store.Self().ScreenName); !ok {
+	if _, ok := a.keyDir.QueryManifest(a.store.Self().ScreenName); !ok {
 		return "BENCchat couldn't read this account's current device list. Try again."
 	}
 	kept := make([]e2ee.Device, 0, e2ee.MaxDevices)
@@ -581,6 +618,8 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 	if err := a.publishManifest(kp, kept); err != nil {
 		return err.Error()
 	}
+	// Same proof as a link or a Verify now: the key just opened the backup.
+	a.recordRecoveryKeyVerified()
 	a.store.Notify(state.NoticeInfo, fmt.Sprintf(
 		"Device %s removed. It can no longer read messages sent to this account.",
 		e2ee.Fingerprint(target)))

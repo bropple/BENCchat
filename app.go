@@ -35,6 +35,9 @@ type App struct {
 	cfg    config.Config
 	store  *state.Store
 	client *client.Client
+	// keyDir is the key directory as the identity flows see it. Always the
+	// client above outside tests; see keyDirectory for why it is an interface.
+	keyDir keyDirectory
 
 	// Local history orchestration. histAccount is the signed-on screen name whose
 	// history we're persisting ("" when signed off); histTimer debounces saves so
@@ -100,6 +103,11 @@ type App struct {
 	// network call.
 	identityMu sync.Mutex
 	pending    *pendingIdentity
+	// rotation is a recovery-key re-key in flight (proposal §10), held under the
+	// same lock and for the same reason: the NEW key has been shown but the
+	// re-sealed backup has deliberately NOT been uploaded, because uploading it
+	// first would strand an account whose owner never finished saving the key.
+	rotation *pendingRotation
 
 	// System tray. Icons are injected from main (embedded assets). quitting
 	// distinguishes a real quit (tray "Quit") from a window close, which hides to
@@ -133,10 +141,12 @@ func NewApp() *App {
 	}
 
 	store := state.NewStore()
+	c := client.New(store, slog.Default())
 	return &App{
 		cfg:    cfg,
 		store:  store,
-		client: client.New(store, slog.Default()),
+		client: c,
+		keyDir: c,
 	}
 }
 
@@ -487,6 +497,10 @@ func (a *App) SignOff() {
 	// dropping it costs nothing and leaving it would keep an identity private
 	// key alive in a process that has no account to use it on.
 	a.CancelIdentitySetup()
+	// Likewise a re-key that was never confirmed: the stored backup is still the
+	// one the CURRENT key opens (proposal §10), so nothing is lost by dropping
+	// it, and the identity key it was holding stops existing.
+	a.CancelRecoveryKeyRotation()
 	a.setIdentityFlow("unavailable")
 	_ = a.client.SignOff()
 	a.emitStatus(SessionStatus{State: "offline", Message: "Signed off."})

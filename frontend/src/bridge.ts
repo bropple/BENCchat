@@ -169,6 +169,28 @@ export interface RecoveryKeyInfo {
   error: string;
 }
 
+/** The passive Settings line from proposal §13. Mirrors app.RecoveryKeyStatus.
+ *
+ *  Nothing in the app reacts to this on its own. It has no timer, no badge and
+ *  no notice behind it — it is read when Settings is opened and at no other
+ *  time, because an alert that fires when nothing is wrong is one people learn
+ *  to dismiss. */
+export interface RecoveryKeyStatus {
+  /** Whether there is a key to report on: signed on, a key directory, and an
+   *  identity backup that exists. */
+  available: boolean;
+  /** When the key in force was made, Unix seconds UTC, or 0 for "not known on
+   *  this computer" — the normal state of a device that was linked rather than
+   *  set up. Show "unknown", never a guess. */
+  created: number;
+  /** Last time THIS device watched the key open the backup, or 0 for never.
+   *  Only a real decryption sets it; there is no "yes I still have it" button
+   *  anywhere, because that would record a date meaning nothing. */
+  lastVerified: number;
+  /** Why `available` is false, when that is a failure rather than an answer. */
+  error: string;
+}
+
 export interface Preferences {
   theme: Theme;
   soundEnabled: boolean;
@@ -286,6 +308,11 @@ interface AppBindings {
   CancelIdentitySetup(): Promise<void>;
   SaveRecoveryKeyToFile(): Promise<string>;
   LinkDevice(recoveryKey: string): Promise<string>;
+  BeginRecoveryKeyRotation(current: string): Promise<RecoveryKeyInfo>;
+  ConfirmRecoveryKeyRotation(): Promise<string>;
+  CancelRecoveryKeyRotation(): Promise<void>;
+  GetRecoveryKeyStatus(): Promise<RecoveryKeyStatus>;
+  VerifyRecoveryKey(recoveryKey: string): Promise<string>;
   SetCustomSound(key: string, data: string): Promise<string>;
   GetCustomSounds(): Promise<Record<string, string>>;
   ClearCustomSound(key: string): Promise<string>;
@@ -410,6 +437,24 @@ export const Bridge = {
   cancelIdentitySetup: () => app().CancelIdentitySetup(),
   saveRecoveryKeyToFile: () => app().SaveRecoveryKeyToFile(),
   linkDevice: (recoveryKey: string) => app().LinkDevice(recoveryKey),
+
+  /** Proves possession of the CURRENT recovery key and mints a replacement, in
+   *  memory. Nothing is stored: until confirmRecoveryKeyRotation the server
+   *  still holds the blob the current key opens, which is what makes abandoning
+   *  this — or crashing — free. Same shape as the first-run pair, and the same
+   *  reason for the split. */
+  beginRecoveryKeyRotation: (current: string) => app().BeginRecoveryKeyRotation(current),
+  /** Replaces the stored backup. The old key stops working the instant this
+   *  succeeds, so it must not be called until the new one is saved. It does not
+   *  publish a manifest: the identity is unchanged, so devices stay linked and
+   *  no contact's safety number moves. */
+  confirmRecoveryKeyRotation: () => app().ConfirmRecoveryKeyRotation(),
+  cancelRecoveryKeyRotation: () => app().CancelRecoveryKeyRotation(),
+
+  getRecoveryKeyStatus: () => app().GetRecoveryKeyStatus(),
+  /** Actually decrypts the identity backup with the key given. Success and
+   *  failure are both evidence; only success records a date. */
+  verifyRecoveryKey: (recoveryKey: string) => app().VerifyRecoveryKey(recoveryKey),
 
   /** Which identity flow this device is in changed — first run finished, a link
    *  succeeded, or the session went away. */

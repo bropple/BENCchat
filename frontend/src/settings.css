@@ -515,6 +515,31 @@
   flex: none;
 }
 
+/* The recovery key line (proposal §13). Styled exactly like a device row and
+   nothing like a warning: it is a statement of fact that happens to be worth
+   knowing, and giving it an amber border would turn a passive report into the
+   nag §13 spent a section refusing. */
+.settings__recovery {
+  margin-top: 8px;
+}
+
+.settings__recovery-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel-2);
+}
+
+.settings__recovery-text {
+  font-size: 12px;
+  color: var(--benco-phosphor);
+  min-width: 0;
+}
+
 .settings__device-remove {
   flex: none;
   font-size: 11px;

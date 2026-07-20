@@ -13,6 +13,18 @@
   overflow-y: auto;
 }
 
+/* The re-key screen (§10) is raised over whatever is already on screen — a
+   settings panel, or the tail of a device link — rather than being a route of
+   its own. Above the settings overlay (100) and the dialog overlay (200),
+   because it is reached from both and must never end up underneath the thing
+   that opened it. */
+.identity--overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  background: var(--benco-bg-deep);
+}
+
 .identity__panel {
   width: 560px;
   max-width: 100%;

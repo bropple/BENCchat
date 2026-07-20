@@ -31,6 +31,7 @@ import {
   type SoundKey,
 } from "./sound";
 import { alertDialog, confirmDialog, promptDialog } from "./dialog";
+import { offerRecoveryKeyRotation } from "./identity";
 
 /** Minimal HTML escape for values interpolated into this panel's markup.
  *  Device keys are base64 and fingerprints are digits, but neither is worth
@@ -214,6 +215,16 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <div class="benco-caption settings__group-label">Your devices</div>
                 <p class="benco-caption settings__hint">Each machine you sign in on has its own encryption key. Messages sent to you are encrypted to every device listed here, so they're readable everywhere. Removing one rewrites the signed list of devices on your account, so it asks for your recovery key — the same key that links a device.</p>
                 <div class="settings__devices" id="deviceList"></div>
+
+                <div class="benco-caption settings__group-label">Recovery key</div>
+                <!-- Proposal §13: passive, and passive is the whole design. There is no
+                     timer behind this, no badge, no reminder and no prompt anywhere else
+                     in the app — it is seen only by someone who came looking, which is
+                     exactly the person it helps. An alert that fires when nothing is
+                     wrong is one people learn to dismiss, and this project has already
+                     paid for that lesson once with safety-number churn. -->
+                <div class="settings__recovery" id="recoveryLine"></div>
+                <p class="benco-caption settings__hint">Checking actually decrypts your account's identity with the key you type, so the answer is real either way — there's no "yes, I still have it" to tick. Losing this key is a slow failure: your devices keep working, but you can't link a new one or remove an old one, and you'd normally find out the day you replace a laptop.</p>
 
                 <p class="benco-caption settings__hint"><strong>On by default.</strong> Messages between BENCchat users are encrypted end-to-end automatically (look for the 🔒). Clients that don't support it are marked <strong>⚠ not encrypted</strong> rather than quietly downgraded. Your keys stay in this device's keychain. Group chats are <em>not</em> covered. Metadata — who you talk to and when — is hidden from the network by TLS above, but is still visible to the server itself.</p>
               </section>
@@ -507,6 +518,88 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
       }
     };
     void renderDevices();
+
+    // The recovery key line (proposal §13). Rendered when the panel opens and
+    // after a check; nothing else triggers it, and nothing triggers it on a
+    // timer.
+    const recoveryEl = overlay.querySelector<HTMLDivElement>("#recoveryLine")!;
+
+    /** "19 July 2026", or "" for a zero timestamp. Long-form on purpose: this
+     *  line is read once in a blue moon, so an unambiguous date beats a compact
+     *  one, and "3 months ago" would hide exactly the detail being asked for. */
+    const onDate = (unix: number): string =>
+      unix
+        ? new Date(unix * 1000).toLocaleDateString(undefined, {
+            day: "numeric",
+            month: "long",
+            year: "numeric",
+          })
+        : "";
+
+    const renderRecovery = async (): Promise<void> => {
+      let st;
+      try {
+        st = await Bridge.getRecoveryKeyStatus();
+      } catch (e) {
+        st = { available: false, created: 0, lastVerified: 0, error: String(e) };
+      }
+      if (!st.available) {
+        // Deliberately terse, and deliberately not alarming: no identity yet, no
+        // key directory, or a round trip that failed are all "nothing to report
+        // here", not "something is wrong with your recovery key".
+        recoveryEl.innerHTML = `<p class="benco-caption">${escapeHTML(
+          st.error || "No recovery key on this account yet.",
+        )}</p>`;
+        return;
+      }
+      const created = onDate(st.created);
+      const verified = onDate(st.lastVerified);
+      // "Created date unknown" rather than a guess: this file is per machine, so
+      // a device that was linked rather than set up genuinely never saw the key
+      // being made, and inventing a date would be the one dishonest thing on a
+      // line whose only job is to say something true.
+      const createdText = created ? `created ${created}` : "created date unknown on this computer";
+      const verifiedText = verified ? `last checked ${verified}` : "never checked";
+      recoveryEl.innerHTML = `
+        <div class="settings__recovery-row">
+          <span class="settings__recovery-text">${escapeHTML(createdText)}, ${escapeHTML(verifiedText)}.</span>
+          <button class="benco-button benco-button--ghost" id="recoveryVerify">Verify now</button>
+        </div>`;
+
+      overlay.querySelector<HTMLButtonElement>("#recoveryVerify")!.addEventListener(
+        "click",
+        async () => {
+          const key = await promptDialog(
+            "Type your recovery key and BENCchat will try to decrypt your account's " +
+              "identity with it. That's the only check that proves anything — it either " +
+              "opens or it doesn't.\n\n" +
+              "Nothing about your account changes either way.",
+            "",
+            { title: "Check your recovery key", okLabel: "Check", placeholder: "Recovery key" },
+          );
+          if (key === null || !key.trim()) return;
+          const err = await Bridge.verifyRecoveryKey(key.trim());
+          if (err) {
+            await alertDialog(err.replace(/^e2ee:\s*/, ""), {
+              title: "That key didn't open your identity",
+            });
+            void renderRecovery();
+            return;
+          }
+          await alertDialog(
+            "That key opened your account's identity. It's the right one, and it still works.",
+            { title: "Recovery key checked" },
+          );
+          // §10: the identity key was in memory during that check and is not any
+          // more, so this is one of the two moments a re-key is possible — and
+          // the offer has to be made now or not at all. It asks for the key
+          // again rather than holding the identity across this round trip.
+          await offerRecoveryKeyRotation(key.trim());
+          void renderRecovery();
+        },
+      );
+    };
+    void renderRecovery();
 
     // Per-event mute. Independent of the master switch: these persist so a user
     // who only wants, say, the sign-on chime silenced keeps the rest.

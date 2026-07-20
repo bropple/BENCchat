@@ -33,6 +33,22 @@ import (
 // has just unwrapped it from the backup and will zero it immediately after —
 // see app_identity.go. Nothing here retains it.
 
+// keyDirectory is the slice of *client.Client that the identity flows use.
+//
+// It is an interface for one reason, and it is not decoupling for its own sake:
+// proposal §10 and §12 are rules about WHICH call happens before which — that
+// nothing is uploaded before the user holds the key, that a re-key never
+// publishes a manifest — and a test with no way to observe the calls cannot
+// check any of them. *client.Client is the only implementation outside tests;
+// a.keyDir is set once in NewApp and never reassigned.
+type keyDirectory interface {
+	SupportsKeyDir() bool
+	QueryManifest(screenName string) (client.SignedManifest, bool)
+	PublishManifest(manifest []byte, sigAlg uint8, signature []byte) (accepted bool, counter uint64, ok bool)
+	PutIdentityBackup(kdf uint8, params, salt, blob []byte) (stored bool, ok bool)
+	GetIdentityBackup() (client.IdentityBackup, bool)
+}
+
 // manifestMemo is the last manifest we verified for one account.
 //
 // It exists because verification is not idempotent: the counter rule refuses a
@@ -340,7 +356,7 @@ func devicesFrom(m wire.BENCOManifest) []e2ee.Device {
 // memory, and a refusal carries the value to beat, so losing a race with
 // another device costs one retry instead of a guess.
 func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error {
-	if !a.client.SupportsKeyDir() {
+	if !a.keyDir.SupportsKeyDir() {
 		return errNoKeyDir
 	}
 	self := a.store.Self().ScreenName
@@ -362,7 +378,7 @@ func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error 
 		if err != nil {
 			return err
 		}
-		accepted, serverCounter, ok := a.client.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
+		accepted, serverCounter, ok := a.keyDir.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
 		if !ok {
 			return fmt.Errorf("the key directory did not answer")
 		}

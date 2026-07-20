@@ -57,6 +57,28 @@ type Identity struct {
 	Digest string `json:"digest,omitempty"`
 }
 
+// Recovery is what this device knows about the account's recovery key.
+//
+// Both are Unix seconds UTC, and both are LOCAL knowledge rather than facts
+// about the account — this file is per account per machine. A second device
+// that was linked rather than bootstrapped has no idea when the key was made,
+// so Created is 0 there and the UI has to say "unknown" rather than invent one.
+// Putting the date on the server instead was considered and dropped: it is a
+// wire change (proposal §4 has no field for it) for a value that is advisory,
+// and the server is not trusted to tell the truth about it anyway.
+//
+// LastVerified is only ever set by a real decryption of the identity backup
+// (proposal §13) — Verify now, linking a device, removing one. It is evidence,
+// never a self-report, so nothing sets it because the user said so.
+type Recovery struct {
+	// Created is when the recovery key currently in force was generated: the
+	// first-run bootstrap, or the last rotation (§10).
+	Created uint64 `json:"created,omitempty"`
+	// LastVerified is the last time this device watched that key open the
+	// account's identity backup. Zero means never on this machine.
+	LastVerified uint64 `json:"lastVerified,omitempty"`
+}
+
 // Entry is what we remember about one peer.
 //
 // Verified is what the user confirmed out of band by comparing safety numbers;
@@ -122,20 +144,30 @@ type File struct {
 	// of the account at all (proposal §6) — an identity here that we do not
 	// recognise means the account was re-bootstrapped without us.
 	Self Identity
+	// Recovery is when this account's recovery key was made and last proven to
+	// work, for the passive Settings line in proposal §13.
+	Recovery Recovery
 }
 
 // fileFormat is the versioned on-disk envelope.
 type fileFormat struct {
-	Version int      `json:"version"`
-	Peers   Store    `json:"peers"`
-	Self    Identity `json:"self,omitempty"`
+	Version  int      `json:"version"`
+	Peers    Store    `json:"peers"`
+	Self     Identity `json:"self,omitempty"`
+	Recovery Recovery `json:"recovery,omitempty"`
 }
 
 // currentVersion 3 dropped the device list and added identity pins. A version 2
 // file still loads: its peer entries survive (their Verified value is a device
 // key set, which v2 treats as a stale verification — see Entry), and the device
 // fields are simply not read.
-const currentVersion = 3
+//
+// Version 4 added Recovery, and is deliberately a version bump for a purely
+// additive field so that the number keeps meaning "what this file may contain".
+// A version 3 file loads unchanged with both dates zero, which is the same state
+// as an account whose key predates this feature — and that is the honest answer
+// for it, since nothing recorded the date at the time.
+const currentVersion = 4
 
 // safeName turns an account into a filesystem-safe file stem, matching the
 // history package's convention so both stores name files the same way.
@@ -190,7 +222,7 @@ func LoadFile(account string) (File, error) {
 	if f.Peers == nil {
 		f.Peers = Store{}
 	}
-	return File{Peers: f.Peers, Self: f.Self}, nil
+	return File{Peers: f.Peers, Self: f.Self, Recovery: f.Recovery}, nil
 }
 
 // SaveFile writes an account's trust record atomically (temp file then rename).
@@ -203,9 +235,10 @@ func SaveFile(account string, file File) error {
 		file.Peers = Store{}
 	}
 	raw, err := json.MarshalIndent(fileFormat{
-		Version: currentVersion,
-		Peers:   file.Peers,
-		Self:    file.Self,
+		Version:  currentVersion,
+		Peers:    file.Peers,
+		Self:     file.Self,
+		Recovery: file.Recovery,
 	}, "", "  ")
 	if err != nil {
 		return err
@@ -253,5 +286,30 @@ func SaveSelfIdentity(account string, id Identity) error {
 		existing = File{}
 	}
 	existing.Self = id
+	return SaveFile(account, existing)
+}
+
+// LoadRecovery returns what this device knows about the account's recovery key.
+//
+// A zero value means this machine has never watched the key be made or used,
+// which is the ordinary state of a device that was linked rather than
+// bootstrapped. It is NOT a claim that no recovery key exists.
+func LoadRecovery(account string) (Recovery, error) {
+	f, err := LoadFile(account)
+	return f.Recovery, err
+}
+
+// SaveRecovery records the recovery-key dates, preserving everything else.
+//
+// Written whole rather than field by field because a rotation sets Created and
+// clears LastVerified in one step: the new key has never been proven, and
+// carrying the old key's verification date onto it would report evidence that
+// was gathered about a different secret.
+func SaveRecovery(account string, r Recovery) error {
+	existing, err := LoadFile(account)
+	if err != nil {
+		existing = File{}
+	}
+	existing.Recovery = r
 	return SaveFile(account, existing)
 }
