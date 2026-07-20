@@ -494,7 +494,10 @@ func DecodeDeviceMessage(body string) (kind string, keys [][32]byte, ok bool) {
 		return "", nil, false
 	}
 	kind = rest[:i]
-	if kind != DeviceAnnounce && kind != DeviceShare {
+	// Every kind must be listed here. A constant defined elsewhere but missing
+	// from this check decodes to nothing and the message is silently dropped —
+	// which is exactly how DeviceDeny appeared to do nothing at all.
+	if kind != DeviceAnnounce && kind != DeviceShare && kind != DeviceDeny {
 		return "", nil, false
 	}
 	keys = DecodeKeys(rest[i+1:])

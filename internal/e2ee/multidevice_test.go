@@ -377,3 +377,24 @@ func TestPickDevicesUnderCapKeepsEverything(t *testing.T) {
 		t.Errorf("kept %d of 6 devices while under the cap", len(got))
 	}
 }
+
+// Every device-message kind must survive a round trip. DeviceDeny was defined
+// but missing from the decoder's whitelist, so denials decoded to nothing and
+// were dropped without a trace — the denied device simply stayed signed in.
+func TestDeviceMessageKindsRoundTrip(t *testing.T) {
+	key := [32]byte{1, 2, 3}
+	for _, kind := range []string{DeviceAnnounce, DeviceShare, DeviceDeny} {
+		body := EncodeDeviceMessage(kind, [][32]byte{key})
+		got, keys, ok := DecodeDeviceMessage(body)
+		if !ok {
+			t.Errorf("%s: did not decode", kind)
+			continue
+		}
+		if got != kind {
+			t.Errorf("kind = %q, want %q", got, kind)
+		}
+		if len(keys) != 1 || keys[0] != key {
+			t.Errorf("%s: keys did not survive", kind)
+		}
+	}
+}
