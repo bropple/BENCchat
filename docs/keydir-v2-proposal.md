@@ -26,6 +26,9 @@ supersedes its wire-level sketch in one respect, flagged in §3.
   device, discarded. Linking a device costs the recovery key every time. See §5.
 - **An identity change is always loud**, never silently accepted, and a device
   that has been cut off detects it itself and says so. See §6.
+- **The recovery key is shown exactly once**, and that is a consequence of
+  transient custody rather than a policy. The backup can be re-keyed later, but
+  only while the user is proving they still hold the current key. See §10.
 
 ## 2. What v1 looks like now
 
@@ -344,18 +347,106 @@ The questions this document opened, and how they were settled.
 - **A device signed by a replaced identity → stops being accepted, and is told.**
   It detects this itself from the signed manifest. See §6.
 
-## 10. Still open
+## 10. First run, and re-keying
 
-- **What the first-run recovery-key screen looks like.** Step 2 of the migration
-  cannot publish anything until an identity exists, which means recovery-key
-  generation is the first thing a user meets after updating. That is the right
-  place for it, but it is a UI design problem and nothing above solves it.
-- **Whether the identity backup should be re-encryptable** without generating a
-  new recovery key — for raising argon2id parameters later, or letting someone
-  who suspects their written-down key was seen replace it. The wire format
-  allows it (`PutBackup` simply overwrites), but the client flow and what it
-  means for devices already signed is unspecified.
-- **Whether a manifest should be re-published periodically** so `IssuedAt` stays
-  fresh and a long-idle account is distinguishable from a server withholding
-  updates. Cheap, but it is a policy decision about traffic rather than a
-  correctness one.
+### Which flow a client is in is answered by the directory
+
+No server-side "has this account ever signed in" flag is needed. An account the
+sysadmin created and nobody has used is exactly an account with no identity
+backup, and `GetBackup` already reports that:
+
+| `GetBackup` | Meaning | Flow |
+|---|---|---|
+| `Present = 0` | never bootstrapped | generate an identity, show the recovery key once |
+| `Present = 1` | an identity exists | prompt for the recovery key to link this device |
+| `Present = 1`, key lost | unrecoverable | admin clears the identity; back to row one |
+
+That third row is the destroy-and-rebootstrap operation `trust-model.md`
+identified as the one admin capability worth having, and it is safe precisely
+because it destroys rather than restores. Every contact sees the safety number
+change, which is correct: cryptographically that is a new person, and nobody can
+prove otherwise.
+
+### The recovery key genuinely cannot be shown twice
+
+This is a property of §5's custody decision, not a policy the UI enforces.
+Nothing retains the recovery key — it is used to derive a wrapping key and
+discarded — so there is nothing to redisplay. The screen should say so plainly
+rather than hedging, because a user who suspects it can be recovered later will
+not write it down.
+
+Show it once, with copy-to-clipboard, and make continuing require an
+acknowledgement that it has been saved somewhere.
+
+### Re-keying the backup: possible, at exactly one moment
+
+Re-encrypting the backup under a **new** recovery key is safe, and it is not the
+same thing as a new identity. Distinguishing them matters:
+
+|  | Devices stay signed? | Safety numbers change? |
+|---|---|---|
+| **Re-key the backup** — same identity, new recovery key | yes | **no** |
+| **New identity** — everything re-issued | no | yes, for everyone |
+
+The identity key never leaves; only the passphrase-derived wrapping around it
+changes. So a user who thinks their written-down key was seen does **not** need
+a new account, and does not disturb anybody.
+
+The catch is when this can happen. Under transient custody the identity private
+key exists in memory only while the user has just supplied the current recovery
+key — so that is the only safe moment to offer a re-key, and it is a natural
+one: *"you've just entered your recovery key. Replace it with a new one?"* It
+requires proving possession of the old key, which is exactly the right bar.
+
+It also gives argon2id parameters a place to be raised later, since `PutBackup`
+carries them.
+
+**If the recovery key is lost, there is no re-key** — the plaintext identity key
+cannot be reached, and the only route is the destroy-and-rebootstrap above. That
+is the honest cost of the design, and it is the same reason an operator cannot
+quietly take an account over.
+
+### Losing the recovery key while devices still work
+
+Worth stating because it is not obvious: it is a degradation, not an immediate
+catastrophe. Existing devices keep working — their keys are already signed and
+messages keep flowing. What is lost is the ability to **change** the device list:
+no new device can be linked and none can be revoked, because both require
+signing a new manifest.
+
+So the failure is slow. It surfaces the day a laptop is replaced, which may be
+long after the key went missing. A client should therefore treat "can you still
+produce your recovery key?" as worth asking occasionally, rather than assuming
+silence means everything is fine.
+
+## 11. Rejected: periodic manifest re-publishing
+
+Considered and dropped, because it is **incompatible with §5**.
+
+The idea was to re-publish the manifest on a schedule so `IssuedAt` stays fresh,
+letting a client distinguish a genuinely idle account from a server withholding
+updates. It cannot work: re-publishing means signing, signing requires the
+identity key, and under transient custody that key is only available while the
+user is entering their recovery key. Automatic re-publication would mean
+prompting for the recovery key on a timer, which is absurd.
+
+Pre-signing future manifests would dodge that and is worse — it would mean
+signed statements sitting around asserting a device list that has not been
+checked, which is the opposite of what signing them was for.
+
+**What this gives up:** a client cannot bound how stale a served manifest is. A
+malicious server can serve a correctly-signed, correctly-countered, very old
+manifest indefinitely, and the only signal is `IssuedAt` looking old — which,
+per §4, is advisory and must not by itself cause a rejection.
+
+That is an acceptable loss here. The attack requires a hostile server, gains
+only the suppression of device-list *changes* (it cannot forge, insert, or roll
+back), and the deployment's operator is the person reading this. Worth
+revisiting if that ever stops being true.
+
+## 12. Still open
+
+- **The first-run screen's actual design** — copy, layout, and how hard to make
+  the acknowledgement. The flow is settled above; the UI is not.
+- **How often, if ever, to re-confirm that a user still has their recovery key**,
+  given the slow failure described in §10.
