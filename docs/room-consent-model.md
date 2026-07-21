@@ -7,8 +7,8 @@ now, and `SECURITY-FINDINGS.local.md` for the room work already landed (R1–R4,
 K6) — the roster now travels with the key, removal exists, and removing a device
 re-keys the rooms it could read.
 
-§7 (roles and authority) is **decided but unbuilt**: owner and mod, roles as
-signed statements the server stores and enforces. Nothing else here is built.
+§7 (roles and authority) is **decided but unbuilt**: owner, senior mod and mod;
+roles as signed statements the server stores and enforces. Nothing else is built.
 
 The organizing idea: **a group invite carries two separate consent questions,
 and a single room-type choice answers both.**
@@ -159,18 +159,39 @@ the room key that already exists.
 **Decided 2026-07-21.** This section answers most of §8's questions; what remains
 open is flagged there.
 
-### Two roles. Owner and mod. No tiers.
+### Three roles: owner, senior mod, mod
 
-An owner, who may promote and demote mods and transfer ownership. Mods, who may
-admit and remove members. Mods cannot touch the owner or each other's role —
-that asymmetry is the point, and it is the whole hierarchy.
+| | Promote / demote | Ban a member | Kick a member | Removable by |
+|---|---|---|---|---|
+| **Owner** | yes | yes | yes | nobody |
+| **Senior mod** | no | yes | yes | owner only |
+| **Mod** | no | no | yes | owner only |
+| **Member** | no | no | no | owner, senior mod, mod |
 
-Granular tiers exist in products with six-figure member counts, where the cost of
-a role system is amortised over thousands of moderation decisions a day. Here
-every extra tier multiplies the number of statements that need defining, signing,
-verifying and displaying, against rooms that will have single-digit membership.
-Two levels cover every case this deployment has. Adding a third later is easy;
-removing one after people depend on it is not.
+Two invariants do all the work here, and they are worth stating separately from
+the table because everything else follows from them:
+
+- **Nobody can touch the owner.** Not kicked, not banned, not demoted.
+- **Only the owner can touch anyone holding a role.** A senior mod cannot remove
+  a mod, and mods cannot remove each other. Roles are granted by the owner and
+  revoked by the owner, full stop.
+
+That second one is what stops the hierarchy eating itself. Without it, two mods
+can remove each other and the outcome is decided by whoever acts first — a race
+condition dressed up as a permission system.
+
+The split between the tiers is a **capability boundary, not a rank**. Ban is the
+more permanent act: a kicked member can be re-invited by anyone, while a banned
+one needs the ban lifted first. Gating the irreversible operation higher than the
+reversible one is a real distinction, which is why this is three tiers rather
+than an arbitrary hierarchy.
+
+What is still deliberately refused is granularity for its own sake. Per-room
+custom roles, per-capability grants and configurable permission matrices exist in
+products with six-figure membership, where the cost amortises over thousands of
+moderation decisions a day. Here every extra axis multiplies what has to be
+defined, signed, verified and displayed, against rooms with single-digit
+membership. Three tiers with fixed capabilities is the ceiling.
 
 ### The server is the authority — but it enforces, it does not decide
 
@@ -239,6 +260,21 @@ name. Note that a kick asks the server to enforce something it *already observes
 Two operations, and the UI must not blur them: "removed" and "cannot come back"
 are different promises, and only one of them is enforceable without the server.
 
+**A ban survives a reform.** `ReformRoom` moves the conversation to a fresh room
+with an unguessable name, and it is a continuation of the same group rather than
+a new one — so its bans, roles and member list come with it. Anything else means
+the act you perform *because* somebody is unwelcome silently unbans them.
+
+This is a real requirement on the implementation, not a default that falls out.
+A reformed room is a new row under a new name, so the server cannot tell it
+continues the old one unless it is told: the reform has to carry a pointer to its
+predecessor and inherit that room's state. Without the pointer, the ban list is
+empty by construction.
+
+The unguessable name and the inherited ban list are belt and braces on purpose.
+The name stops the person following the conversation; the ban stops them arriving
+if they learn it anyway.
+
 ### Owner succession, in preference order
 
 The room must not ossify when its owner goes, and the obvious fix is the one
@@ -302,9 +338,40 @@ by the counter rule already built for device manifests: the server accepts the
 first statement at counter N+1 and refuses the second as stale. Deterministic,
 first-writer-wins, and identical to how a manifest race already resolves.
 
-If there are no members either, the room is empty and there is nothing to decide.
-The row persists server-side — chat rooms are `UNIQUE(exchange, name)` and never
-garbage collected — but an empty room has no state anyone is contending for.
+### The completely stale room
+
+Nobody has been near it in three months — owner, mods, members, all gone. What
+happens is: **nothing**, and that is the correct behaviour rather than an
+oversight.
+
+There is no timer that fires. The ladder is evaluated **at the moment somebody
+claims**, not continuously, so a room with nobody in it to make a claim simply
+sits. When the group does come back it resolves itself in seniority order: if the
+owner returns first, nothing ever changed and they are still the owner; if a
+senior mod returns first and the window has elapsed, they may claim. "May claim"
+rather than "inherits automatically" is exactly what makes this safe — a dormant
+room does not quietly change hands while everyone is away.
+
+The property that makes staleness harmless is that **the ladder is closed over
+the signed member list**. A stranger who wanders into a stale room — and they
+can, because OSCAR has no join control and the name is still reserved — can never
+claim it, no matter how long it has been abandoned. They hold no key, and they
+are not on a list they cannot sign themselves onto. Staleness never converts a
+walk-in into an heir.
+
+**No garbage collection.** Rooms, roles and ban lists persist indefinitely. The
+rows are small and this deployment has a handful of rooms, whereas the failure
+mode of collecting them is a group returning after a year to find its bans
+lifted, its roles gone and its owner demoted to nobody. Keeping them is cheap
+insurance against the case that would actually hurt.
+
+One consequence worth writing down rather than discovering: because `chatRoom` is
+`UNIQUE(exchange, name)` and never collected, **a stale room reserves its name
+forever**. A group that abandons "project-planning" has taken that name off the
+table for good.
+
+If there are no members either, the room is empty and there is nothing to decide
+— no state anyone is contending for, just a reserved name.
 
 ### What this changes elsewhere
 
@@ -345,10 +412,20 @@ to advance or replace a room's key is exactly what that touches.
 - ~~**What if there is nobody to inherit?**~~ Answered in §7: the claim falls to
   the most senior surviving tier, and an ownerless room is the open room of §3
   rather than a broken one.
-- **Does a ban survive a room being reformed?** `ReformRoom` creates a room with
-  a new name, which is a new row and therefore an empty ban list. Probably right —
-  a reform is a fresh start by definition — but it means ban is per-room and not
-  per-person, which somebody will eventually be surprised by.
-- **Can a mod ban, or only kick?** Ban is the more permanent act and the argument
-  for reserving it to the owner is the same one that stops mods demoting each
-  other. Leaning: mods kick, owner bans.
+- ~~**Does a ban survive a room being reformed?**~~ Answered in §7: yes. A reform
+  continues the same group, so bans, roles and members carry over — which means
+  the implementation needs a predecessor pointer, since a reformed room is
+  otherwise indistinguishable from a new one.
+- ~~**Can a mod ban, or only kick?**~~ Answered in §7: mods kick, senior mods and
+  the owner ban.
+- ~~**What happens to a completely stale room?**~~ Answered in §7: nothing, by
+  design. The ladder is evaluated at claim time, and it is closed over the signed
+  member list so a walk-in can never inherit.
+- **Is a senior mod's ban reversible by a mod?** Unbanning is not in the table
+  yet. Symmetry says the tier that can ban can unban, which would let one senior
+  mod undo another's decision — the same race the role rules avoid elsewhere.
+  Leaning: whoever banned, plus the owner.
+- **Should a reform be able to DROP inherited bans deliberately?** Inheriting by
+  default is right, but a group reforming to make a fresh start after an argument
+  may want the opposite. Cheap to offer as a choice at reform time; wrong to make
+  it the default.
