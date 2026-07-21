@@ -37,6 +37,16 @@ func TestLiveMsgGateProbe(t *testing.T) {
 	}
 	defer session.Close()
 
+	// Precondition: the probe only means anything if the two are NOT connected.
+	// Once they are, a delivered message is correct behaviour, and asserting
+	// "gate absent" would be a false alarm rather than a finding.
+	for _, b := range session.BuddyList().Buddies {
+		if normName(b.ScreenName) == normName(target) && !b.Pending {
+			t.Skipf("%q is already a connected buddy of %q — messaging is SUPPOSED to work; "+
+				"pick an unconnected target to probe the gate", target, sn)
+		}
+	}
+
 	var mu sync.Mutex
 	var errCodes []uint16
 	session.Handler = func(frame wire.SNACFrame, body []byte) {
