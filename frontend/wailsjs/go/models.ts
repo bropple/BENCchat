@@ -1,3 +1,22 @@
+export namespace client {
+	
+	export class GroupInfo {
+	    name: string;
+	    count: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new GroupInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.count = source["count"];
+	    }
+	}
+
+}
+
 export namespace config {
 	
 	export class Theme {

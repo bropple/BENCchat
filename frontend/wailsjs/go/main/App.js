@@ -94,6 +94,10 @@ export function DeclineRoomInvite(arg1) {
   return window['go']['main']['App']['DeclineRoomInvite'](arg1);
 }
 
+export function DeleteGroup(arg1) {
+  return window['go']['main']['App']['DeleteGroup'](arg1);
+}
+
 export function FindUser(arg1) {
   return window['go']['main']['App']['FindUser'](arg1);
 }
@@ -148,6 +152,10 @@ export function GetSelf() {
 
 export function GetServerSettings() {
   return window['go']['main']['App']['GetServerSettings']();
+}
+
+export function Groups() {
+  return window['go']['main']['App']['Groups']();
 }
 
 export function InviteToRoom(arg1, arg2) {
@@ -216,6 +224,10 @@ export function RemoveDevice(arg1, arg2) {
 
 export function RenameBuddy(arg1, arg2) {
   return window['go']['main']['App']['RenameBuddy'](arg1, arg2);
+}
+
+export function RenameGroup(arg1, arg2) {
+  return window['go']['main']['App']['RenameGroup'](arg1, arg2);
 }
 
 export function ReopenConversation(arg1) {
