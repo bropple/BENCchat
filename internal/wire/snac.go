@@ -131,6 +131,10 @@ const (
 	FeedbagUpdateItem  uint16 = 0x0009
 	FeedbagDeleteItem  uint16 = 0x000A
 	FeedbagStatus      uint16 = 0x000E
+	// FeedbagPreAuthorizedBuddy notifies a requester that someone approved their
+	// connection request when the server had no pending row for it (a fast
+	// approval). The alternative acceptance signal to RespondAuthorizeToClient.
+	FeedbagPreAuthorizedBuddy uint16 = 0x0015
 	// Buddy-authorization (consensual connection) subgroups. "ToHost" travels
 	// client → server; "ToClient" travels server → client. RequestAuthorize
 	// asks a person to allow being added; RespondAuthorize is their answer.

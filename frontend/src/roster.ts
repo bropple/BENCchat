@@ -1307,12 +1307,14 @@ export function renderRoster(
     document.addEventListener("mouseup", tonePaletteUp, true);
   }
 
-  // Wire an emoji button. A short press inserts the emoji in the current default
-  // tone; holding a tone-capable one pops the six-swatch palette, which you then
-  // slide onto and release to pick a tone. mousedown preventDefault keeps the
-  // textarea's focus and caret, and the panel stays open so you can pick several.
-  function wireEmojiButton(btn: HTMLButtonElement): void {
-    const base = btn.dataset.base ?? btn.textContent ?? "";
+  // Emoji interaction is delegated: two listeners on the whole panel instead of a
+  // pair per button. With ~1,900 emoji, wiring each one is what made the picker
+  // slow to build; delegation makes the build essentially free. Short press
+  // inserts the default tone; holding a tone-capable one pops the palette to slide
+  // onto (handled in openTonePalette). The tone swatches live in .chat__tone-palette
+  // and are handled separately, so the selector below excludes them.
+  const EMOJI_SEL = ".chat__emoji-grid .chat__emoji, .chat__emoji-results .chat__emoji";
+  function wireEmojiDelegation(): void {
     let timer = 0;
     const clearTimer = (): void => {
       if (timer) {
@@ -1320,21 +1322,27 @@ export function renderRoster(
         timer = 0;
       }
     };
-    btn.addEventListener("mousedown", (e) => {
-      e.preventDefault();
+    emojiPanel.addEventListener("mousedown", (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>(EMOJI_SEL);
+      if (!btn) return;
+      e.preventDefault(); // keep the textarea's focus and caret
       closeTonePalette();
-      // No mouseleave cancel: once held, the palette should still appear so you
-      // can slide onto it (phone-keyboard accent style), even if the cursor drifts.
+      clearTimer();
+      const base = btn.dataset.base ?? btn.textContent ?? "";
+      // No mouseleave cancel: once held, the palette should still appear so you can
+      // slide onto it (phone-keyboard accent style), even if the cursor drifts.
       if (toneable(base)) {
         timer = window.setTimeout(() => openTonePalette(btn, base), 350);
       }
     });
-    btn.addEventListener("mouseup", () => {
+    emojiPanel.addEventListener("mouseup", (e) => {
       clearTimer();
-      // Released back on the emoji itself: insert the default tone. (If the palette
-      // was open, its capture-phase mouseup runs first and dismisses it; a release
-      // over a SWATCH never reaches here, since it isn't over this button.)
-      if (!tonePaletteEl) insertAtCursor(chatInputEl, applyTone(base));
+      // A palette pick / dismissal is handled by openTonePalette's capture-phase
+      // mouseup, which runs first and nulls tonePaletteEl; only a plain release on
+      // a browsable emoji (no palette) inserts here.
+      if (tonePaletteEl) return;
+      const btn = (e.target as HTMLElement).closest<HTMLElement>(EMOJI_SEL);
+      if (btn) insertAtCursor(chatInputEl, applyTone(btn.dataset.base ?? btn.textContent ?? ""));
     });
   }
 
@@ -1358,9 +1366,8 @@ export function renderRoster(
       `<div class="chat__emoji-grid" id="emojiGrid">${sections}</div>` +
       `<div class="chat__emoji-results" id="emojiResults" hidden></div>`;
 
-    for (const btn of emojiPanel.querySelectorAll<HTMLButtonElement>(".chat__emoji-grid .chat__emoji")) {
-      wireEmojiButton(btn);
-    }
+    // Emoji presses are handled by delegation (wireEmojiDelegation), so no
+    // per-button wiring here.
     const grid = emojiPanel.querySelector<HTMLDivElement>("#emojiGrid")!;
     const tabsEl = emojiPanel.querySelector<HTMLDivElement>("#emojiTabs")!;
     const results = emojiPanel.querySelector<HTMLDivElement>("#emojiResults")!;
@@ -1393,9 +1400,7 @@ export function renderRoster(
             .map((e) => `<button type="button" class="chat__emoji${toneable(e) ? " chat__emoji--tone" : ""}" data-base="${escapeAttr(e)}" tabindex="-1">${applyTone(e)}</button>`)
             .join("")}</div>`
         : `<div class="chat__emoji-empty benco-caption">No emoji match “${escapeHTML(q)}”.</div>`;
-      for (const btn of results.querySelectorAll<HTMLButtonElement>(".chat__emoji")) {
-        wireEmojiButton(btn);
-      }
+      // Result emoji are handled by the same delegation as the grid.
       grid.hidden = true;
       tabsEl.hidden = true;
       results.hidden = false;
@@ -1499,14 +1504,25 @@ export function renderRoster(
     openVerifyDialog(activeScreenName);
   });
 
-  // Emoji picker: toggle on the button, insert on pick, close on outside click.
-  buildEmojiPanel();
-  // Load the saved skin tone, and rebuild the picker whenever it changes (from
-  // Settings) so the grid shows emoji in the chosen tone.
+  // Emoji picker. Delegation is set up once; the grid itself is built lazily on
+  // first open, so the ~1,900-emoji DOM isn't parsed during sign-in — it's built
+  // the first time you actually open the picker, and reused after.
+  let emojiBuilt = false;
+  wireEmojiDelegation();
+  const ensureEmojiPanel = (): void => {
+    if (emojiBuilt) return;
+    emojiBuilt = true;
+    buildEmojiPanel();
+  };
+  // Load the saved skin tone, and re-render the picker (only if already built)
+  // whenever it changes from Settings, so the grid shows emoji in the chosen tone.
   void Bridge.getPreferences().then((p) => setSkinTonePref(p.skinTone ?? 0));
-  onSkinToneChange(buildEmojiPanel);
+  onSkinToneChange(() => {
+    if (emojiBuilt) buildEmojiPanel();
+  });
   emojiBtn.addEventListener("click", (e) => {
     e.stopPropagation();
+    if (emojiPanel.hidden) ensureEmojiPanel();
     emojiPanel.hidden = !emojiPanel.hidden;
     if (!emojiPanel.hidden) {
       // Open on a fresh search, focused, so you can type a name straight away.

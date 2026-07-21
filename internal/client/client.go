@@ -72,6 +72,18 @@ type Client struct {
 	// to catch a one-shot profile fetch for someone who isn't a buddy (the store
 	// only retains buddies' profiles). Guarded by e2eeMu.
 	profileProbe func(screenName, profile, away string, hasProfile bool)
+	// accepted (guarded by acceptedMu) is the set of buddies whose connection was
+	// approved this session, normalized. It settles a race: an add whose server
+	// AuthRequired triggers a "re-add as pending" can otherwise land AFTER the
+	// acceptance cleared the pending tag, stranding a connected buddy showing
+	// "pending". Both paths consult this set so the acceptance always wins.
+	acceptedMu sync.Mutex
+	accepted   map[string]bool
+	// pendingMu serializes the two paths that publish a buddy's pending state —
+	// the re-add-as-pending goroutine and the acceptance handler — so neither can
+	// publish a stale snapshot over the other. Held only around the decide+publish,
+	// never around a network send.
+	pendingMu sync.Mutex
 	// keyDirWait correlates device key directory replies to their requests.
 	// Keyed by request ID because several queries can be outstanding at once —
 	// one per peer whose keys we want. See keydir.go.
@@ -308,12 +320,39 @@ func (c *Client) AddBuddy(screenName, group string) error {
 	})
 }
 
+// markAccepted records that screenName's connection was approved this session.
+func (c *Client) markAccepted(screenName string) {
+	key := state.NormalizeScreenName(screenName)
+	c.acceptedMu.Lock()
+	if c.accepted == nil {
+		c.accepted = map[string]bool{}
+	}
+	c.accepted[key] = true
+	c.acceptedMu.Unlock()
+}
+
+// wasAccepted reports whether screenName's connection was approved this session.
+func (c *Client) wasAccepted(screenName string) bool {
+	c.acceptedMu.Lock()
+	defer c.acceptedMu.Unlock()
+	return c.accepted[state.NormalizeScreenName(screenName)]
+}
+
+// forgetAccepted clears the accepted mark, so a fresh add after a removal goes
+// through the pending flow again rather than being treated as still connected.
+func (c *Client) forgetAccepted(screenName string) {
+	c.acceptedMu.Lock()
+	delete(c.accepted, state.NormalizeScreenName(screenName))
+	c.acceptedMu.Unlock()
+}
+
 // RemoveBuddy removes screenName from the list. If the buddy is already gone —
 // the other party removed us, so our mirror no longer has them but the store may
 // still show them — it reconciles the store to the mirror and reports success:
 // the end state the caller wants is already true, and surfacing "not on your
 // buddy list" as a failure would just strand a dead row on screen.
 func (c *Client) RemoveBuddy(screenName string) error {
+	c.forgetAccepted(screenName)
 	err := c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
 		return s.RemoveBuddy(screenName)
 	})
@@ -682,6 +721,8 @@ func (c *Client) handleFeedbag(frame wire.SNACFrame, body []byte) {
 		c.handleConnectionRequest(body)
 	case wire.FeedbagRespondAuthorizeToClient:
 		c.handleConnectionResponse(body)
+	case wire.FeedbagPreAuthorizedBuddy:
+		c.handlePreAuthorized(body)
 	case wire.FeedbagInsertItem, wire.FeedbagUpdateItem, wire.FeedbagDeleteItem:
 		// A change made on ANOTHER of our sessions, relayed by the server so this
 		// device stays in sync — a block, add, remove, rename or move done on a
@@ -769,12 +810,28 @@ func (c *Client) handleFeedbagStatus(frame wire.SNACFrame, body []byte) {
 	// "awaiting acceptance". Done off the read loop: the re-add SNAC can block on
 	// rate pacing, which must never stall the read loop.
 	go func() {
+		// If the target already accepted (a fast approval that raced ahead of this
+		// AuthRequired), don't re-mark them pending — just make sure they're clear.
+		if c.wasAccepted(target) {
+			c.pendingMu.Lock()
+			c.publishBuddyList(session.ClearBuddyPending(target))
+			c.pendingMu.Unlock()
+			return
+		}
 		list, err := session.ReAddBuddyPending(target)
 		if err != nil {
 			c.log.Warn("pending re-add failed", "buddy", target, "err", err)
 			return
 		}
+		// Decide-and-publish under the lock, reading the CURRENT mirror: if an
+		// acceptance landed while we were re-adding, publish the cleared list, not
+		// the stale pending snapshot we just took.
+		c.pendingMu.Lock()
+		if c.wasAccepted(target) {
+			list = session.ClearBuddyPending(target)
+		}
 		c.publishBuddyList(list)
+		c.pendingMu.Unlock()
 		c.log.Info("buddy add awaiting authorization", "buddy", target)
 	}()
 }

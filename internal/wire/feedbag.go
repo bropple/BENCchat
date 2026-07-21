@@ -129,6 +129,17 @@ type SNAC_0x13_0x19_FeedbagRequestAuthorizeToClient struct {
 	Unknown    uint16
 }
 
+// SNAC_0x13_0x15_FeedbagPreAuthorizedBuddy notifies us that ScreenName has
+// pre-authorized us — i.e. approved a connection request we made — in the case
+// where the server didn't have our pending row on file (a fast approval). It's
+// the acceptance signal for that path, distinct from the 0x1B we get when the
+// pending row existed. No extended-info block on this one.
+type SNAC_0x13_0x15_FeedbagPreAuthorizedBuddy struct {
+	ScreenName string `oscar:"len_prefix=uint8"`
+	Message    string `oscar:"len_prefix=uint16"`
+	Flags      uint16
+}
+
 // SNAC_0x13_0x1A_FeedbagRespondAuthorizeToHost is our answer to a request
 // (client → server): Accepted is 1 to approve, 0 to decline.
 type SNAC_0x13_0x1A_FeedbagRespondAuthorizeToHost struct {

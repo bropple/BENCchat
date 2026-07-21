@@ -1,11 +1,13 @@
 package client
 
 import (
+	"bytes"
 	"errors"
 	"sync"
 
 	"github.com/benco-holdings/benchat/internal/oscar"
 	"github.com/benco-holdings/benchat/internal/state"
+	"github.com/benco-holdings/benchat/internal/wire"
 )
 
 // Consensual buddy connections, client layer.
@@ -95,7 +97,13 @@ func (c *Client) handleConnectionResponse(body []byte) {
 	// buddy-list refresh that follows clears it from the UI.
 	if res.Accepted {
 		if session != nil {
+			// Record acceptance and clear pending under pendingMu, so a re-add-as-
+			// pending racing in from this add's AuthRequired can't publish a stale
+			// pending snapshot over this clear (it takes the same lock and re-reads).
+			c.markAccepted(res.ScreenName)
+			c.pendingMu.Lock()
 			c.publishBuddyList(session.ClearBuddyPending(res.ScreenName))
+			c.pendingMu.Unlock()
 		}
 	} else {
 		go func() {
@@ -110,6 +118,38 @@ func (c *Client) handleConnectionResponse(body []byte) {
 	c.conn.mu.Unlock()
 	if fn != nil {
 		fn(res)
+	}
+}
+
+// handlePreAuthorized processes a SNAC(0x13,0x15): someone approved a connection
+// request we made, but the server had no pending row for us on file (a fast
+// approval, before our re-add-as-pending reached the server), so it sent this
+// instead of the usual 0x1B. Treat it as an acceptance: clear our pending marker
+// and record it so a late re-add can't re-strand them, then notify the app.
+func (c *Client) handlePreAuthorized(body []byte) {
+	var snac wire.SNAC_0x13_0x15_FeedbagPreAuthorizedBuddy
+	if err := wire.UnmarshalBE(&snac, bytes.NewReader(body)); err != nil {
+		c.log.Warn("could not decode pre-authorized buddy", "err", err)
+		return
+	}
+
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return
+	}
+
+	c.markAccepted(snac.ScreenName)
+	c.pendingMu.Lock()
+	c.publishBuddyList(session.ClearBuddyPending(snac.ScreenName))
+	c.pendingMu.Unlock()
+
+	c.conn.mu.Lock()
+	fn := c.conn.response
+	c.conn.mu.Unlock()
+	if fn != nil {
+		fn(oscar.ConnectionResponse{ScreenName: snac.ScreenName, Accepted: true})
 	}
 }
 
