@@ -365,6 +365,7 @@ export namespace state {
 	    // Go type: time
 	    at: any;
 	    outgoing: boolean;
+	    id?: string;
 	    notSent?: boolean;
 	    autoResponse?: boolean;
 	    encrypted?: boolean;
@@ -382,6 +383,7 @@ export namespace state {
 	        this.text = source["text"];
 	        this.at = this.convertValues(source["at"], null);
 	        this.outgoing = source["outgoing"];
+	        this.id = source["id"];
 	        this.notSent = source["notSent"];
 	        this.autoResponse = source["autoResponse"];
 	        this.encrypted = source["encrypted"];

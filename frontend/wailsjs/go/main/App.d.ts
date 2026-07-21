@@ -122,6 +122,8 @@ export function ReopenConversation(arg1:string):Promise<void>;
 
 export function RequestUserInfo(arg1:string):Promise<void>;
 
+export function ResendMessage(arg1:string,arg2:string):Promise<string>;
+
 export function RoomSecurityInfo(arg1:string):Promise<main.RoomSecurity>;
 
 export function RotateRoomKey(arg1:string,arg2:Array<string>):Promise<string>;

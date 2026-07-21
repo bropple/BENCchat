@@ -238,6 +238,10 @@ export function RequestUserInfo(arg1) {
   return window['go']['main']['App']['RequestUserInfo'](arg1);
 }
 
+export function ResendMessage(arg1, arg2) {
+  return window['go']['main']['App']['ResendMessage'](arg1, arg2);
+}
+
 export function RoomSecurityInfo(arg1) {
   return window['go']['main']['App']['RoomSecurityInfo'](arg1);
 }
