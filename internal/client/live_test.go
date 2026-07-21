@@ -411,6 +411,78 @@ func TestLiveChatRoomListen(t *testing.T) {
 	c.LeaveRoom(cookie)
 }
 
+// TestLiveFeedbagPropagation proves a feedbag change made on one session shows
+// up on ANOTHER session of the same account without reconnecting — the server
+// relays it and the client now applies the relay. Two clients sign in as the
+// same account; one blocks a target, the other should see it appear in its
+// blocked list within a few seconds, and see it disappear on unblock.
+//
+//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SCREENNAME=cmaximus BENCCHAT_LIVE_PASSWORD=... \
+//	BENCCHAT_LIVE_BLOCK_TARGET=someuser \
+//	go test ./internal/client/ -run TestLiveFeedbagPropagation -v -timeout 90s
+func TestLiveFeedbagPropagation(t *testing.T) {
+	addr, sn, pw := liveCreds(t)
+	target := os.Getenv("BENCCHAT_LIVE_BLOCK_TARGET")
+	if target == "" {
+		t.Skip("set BENCCHAT_LIVE_BLOCK_TARGET to a screen name to block/unblock")
+	}
+	ctx := context.Background()
+
+	// Two independent clients, same account = two server-side instances.
+	a := New(state.NewStore(), nil)
+	if err := a.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
+		t.Fatalf("SignOn A: %v", err)
+	}
+	defer func() { _ = a.SignOff() }()
+
+	b := New(state.NewStore(), nil)
+	if err := b.SignOn(ctx, addr, oscar.Credentials{ScreenName: sn, Password: pw}, liveTransport(t)...); err != nil {
+		t.Fatalf("SignOn B: %v", err)
+	}
+	defer func() { _ = b.SignOff() }()
+
+	blockedOnB := func() bool {
+		for _, n := range b.BlockedUsers() {
+			if state.NormalizeScreenName(n) == state.NormalizeScreenName(target) {
+				return true
+			}
+		}
+		return false
+	}
+	waitFor := func(want bool) bool {
+		for i := 0; i < 20; i++ { // up to ~5s
+			if blockedOnB() == want {
+				return true
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		return blockedOnB() == want
+	}
+
+	// Clean start: make sure the target isn't already blocked, and let it settle.
+	_ = a.UnblockBuddy(target)
+	time.Sleep(500 * time.Millisecond)
+
+	if err := a.BlockBuddy(target); err != nil {
+		t.Fatalf("A.BlockBuddy: %v", err)
+	}
+	if !waitFor(true) {
+		t.Errorf("block made on A did not propagate to B (B blocked=%v)", b.BlockedUsers())
+	} else {
+		t.Logf("RESULT: block propagated A→B live")
+	}
+
+	if err := a.UnblockBuddy(target); err != nil {
+		t.Fatalf("A.UnblockBuddy: %v", err)
+	}
+	if !waitFor(false) {
+		t.Errorf("unblock made on A did not propagate to B (B blocked=%v)", b.BlockedUsers())
+	} else {
+		t.Logf("RESULT: unblock propagated A→B live")
+	}
+}
+
 // TestLiveDMEcho brings bob online and echoes back every 1:1 message it
 // receives, so a human driving the GUI can test direct messages both ways. Run:
 //

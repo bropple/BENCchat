@@ -620,7 +620,54 @@ func (c *Client) handleFeedbag(frame wire.SNACFrame, body []byte) {
 		c.handleConnectionRequest(body)
 	case wire.FeedbagRespondAuthorizeToClient:
 		c.handleConnectionResponse(body)
+	case wire.FeedbagInsertItem, wire.FeedbagUpdateItem, wire.FeedbagDeleteItem:
+		// A change made on ANOTHER of our sessions, relayed by the server so this
+		// device stays in sync — a block, add, remove, rename or move done on a
+		// different open client. Only server-initiated pushes are applied; our own
+		// edits come back as a FeedbagStatus, handled above.
+		if frame.RequestID&wire.ReqIDFromServer != 0 {
+			c.handleRelayedFeedbag(frame, body)
+		}
 	}
+}
+
+// handleRelayedFeedbag applies a feedbag insert/update/delete pushed from another
+// of the account's sessions and republishes the buddy list so the UI reflects it
+// live, without waiting for a reconnect.
+func (c *Client) handleRelayedFeedbag(frame wire.SNACFrame, body []byte) {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return
+	}
+
+	var items []wire.FeedbagItem
+	switch frame.SubGroup {
+	case wire.FeedbagInsertItem:
+		var snac wire.SNAC_0x13_0x08_FeedbagInsertItem
+		if err := wire.UnmarshalBE(&snac, bytes.NewReader(body)); err != nil {
+			c.log.Warn("could not decode relayed feedbag insert", "err", err)
+			return
+		}
+		items = snac.Items
+	case wire.FeedbagUpdateItem:
+		var snac wire.SNAC_0x13_0x09_FeedbagUpdateItem
+		if err := wire.UnmarshalBE(&snac, bytes.NewReader(body)); err != nil {
+			c.log.Warn("could not decode relayed feedbag update", "err", err)
+			return
+		}
+		items = snac.Items
+	case wire.FeedbagDeleteItem:
+		var snac wire.SNAC_0x13_0x0A_FeedbagDeleteItem
+		if err := wire.UnmarshalBE(&snac, bytes.NewReader(body)); err != nil {
+			c.log.Warn("could not decode relayed feedbag delete", "err", err)
+			return
+		}
+		c.publishBuddyList(session.ApplyServerDelete(snac.Items))
+		return
+	}
+	c.publishBuddyList(session.ApplyServerUpsert(items))
 }
 
 // handleFeedbagStatus observes the server's acknowledgement of a buddy-list

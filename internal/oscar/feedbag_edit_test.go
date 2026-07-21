@@ -273,6 +273,65 @@ func TestMoveBuddyChangesGroupInsertBeforeDelete(t *testing.T) {
 	}
 }
 
+func TestApplyServerEditPropagatesAcrossDevices(t *testing.T) {
+	// Mirror as another device would build it: root + group + one buddy.
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Buddies")
+
+	// A block made on another session arrives as a relayed insert: a deny item
+	// (and, on that other device, a pdinfo item). Applying it must surface the
+	// block here.
+	fb.ApplyServerUpsert([]wire.FeedbagItem{
+		{ClassID: wire.FeedbagClassIdPdinfo, GroupID: 0, ItemID: 900},
+		{ClassID: wire.FeedbagClassIdDeny, GroupID: 0, ItemID: 901, Name: "meanie"},
+	})
+	blocked := false
+	for _, n := range fb.BuddyList().Blocked {
+		if normName(n) == "meanie" {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Errorf("relayed block did not propagate; Blocked=%v", fb.BuddyList().Blocked)
+	}
+
+	// A buddy added on another session arrives as a relayed insert too. It needs
+	// a group to hang under; reuse alice's group id.
+	var gid uint16
+	fb.mu.Lock()
+	for _, it := range fb.items {
+		if it.IsBuddy() && normName(it.Name) == "alice" {
+			gid = it.GroupID
+		}
+	}
+	fb.mu.Unlock()
+	fb.ApplyServerUpsert([]wire.FeedbagItem{
+		{ClassID: wire.FeedbagClassIdBuddy, GroupID: gid, ItemID: 950, Name: "bob"},
+	})
+	if _, ok := findBuddyEntry(fb.BuddyList(), "bob"); !ok {
+		t.Error("relayed buddy add did not propagate")
+	}
+
+	// A removal on another session arrives as a relayed delete keyed by identity.
+	fb.ApplyServerDelete([]wire.FeedbagItem{
+		{ClassID: wire.FeedbagClassIdBuddy, GroupID: gid, ItemID: 950, Name: "bob"},
+	})
+	if _, ok := findBuddyEntry(fb.BuddyList(), "bob"); ok {
+		t.Error("relayed buddy removal did not propagate")
+	}
+
+	// And an unblock (delete of the deny item) clears the block.
+	fb.ApplyServerDelete([]wire.FeedbagItem{
+		{ClassID: wire.FeedbagClassIdDeny, GroupID: 0, ItemID: 901, Name: "meanie"},
+	})
+	for _, n := range fb.BuddyList().Blocked {
+		if normName(n) == "meanie" {
+			t.Error("relayed unblock did not propagate")
+		}
+	}
+}
+
 func TestMoveBuddyToSameGroupIsNoop(t *testing.T) {
 	fb := NewFeedbag(nil)
 	fb.EnsureBaseStructure("Buddies")

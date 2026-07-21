@@ -322,6 +322,44 @@ func (f *Feedbag) MoveBuddy(screenName, newGroup string) ([]editOp, error) {
 	return ops, nil
 }
 
+// ApplyServerUpsert merges server-pushed items into the mirror, keyed by their
+// SSI identity (group id + item id, which is consistent across an account's
+// sessions). An item already present is replaced; a new one is appended. Used to
+// reflect edits made on another device — blocks, adds, renames, moves.
+func (f *Feedbag) ApplyServerUpsert(items []wire.FeedbagItem) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, it := range items {
+		if idx := f.indexByID(it.GroupID, it.ItemID); idx >= 0 {
+			f.items[idx] = it
+		} else {
+			f.items = append(f.items, it)
+		}
+	}
+}
+
+// ApplyServerDelete removes server-pushed items from the mirror by SSI identity.
+func (f *Feedbag) ApplyServerDelete(items []wire.FeedbagItem) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, it := range items {
+		if idx := f.indexByID(it.GroupID, it.ItemID); idx >= 0 {
+			f.items = removeAt(f.items, idx)
+		}
+	}
+}
+
+// indexByID finds an item by its SSI identity (group id + item id), the pair
+// that uniquely identifies a feedbag row. Returns -1 when absent.
+func (f *Feedbag) indexByID(groupID, itemID uint16) int {
+	for i := range f.items {
+		if f.items[i].GroupID == groupID && f.items[i].ItemID == itemID {
+			return i
+		}
+	}
+	return -1
+}
+
 // --- Session integration ---
 
 // AddBuddy adds a buddy to the server-stored list and returns the updated list.
@@ -369,6 +407,30 @@ func (s *Session) BlockBuddy(screenName string) (BuddyList, error) {
 // UnblockBuddy unblocks a user.
 func (s *Session) UnblockBuddy(screenName string) (BuddyList, error) {
 	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.UnblockBuddy(screenName) })
+}
+
+// ApplyServerUpsert merges a feedbag insert/update the server pushed from ANOTHER
+// of this account's sessions (a buddy added, blocked, renamed or moved on another
+// device) into the local mirror, and returns the updated list. No SNAC is sent —
+// this is inbound reconciliation, not an edit.
+func (s *Session) ApplyServerUpsert(items []wire.FeedbagItem) BuddyList {
+	if s.feedbag == nil {
+		return BuddyList{}
+	}
+	s.feedbag.ApplyServerUpsert(items)
+	s.buddyList = s.feedbag.BuddyList()
+	return s.buddyList
+}
+
+// ApplyServerDelete mirrors ApplyServerUpsert for a delete pushed from another
+// session (a buddy removed or unblocked elsewhere).
+func (s *Session) ApplyServerDelete(items []wire.FeedbagItem) BuddyList {
+	if s.feedbag == nil {
+		return BuddyList{}
+	}
+	s.feedbag.ApplyServerDelete(items)
+	s.buddyList = s.feedbag.BuddyList()
+	return s.buddyList
 }
 
 // applyEdit runs a feedbag mutation, sends the resulting SNACs, and returns the
