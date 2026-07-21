@@ -567,10 +567,48 @@ func (a *App) SetTyping(to string, typing bool) { a.client.SendTyping(to, typing
 // AddBuddy adds a buddy to the list. group may be empty for the default group.
 // Returns an error string (empty on success).
 func (a *App) AddBuddy(screenName string, group string) string {
+	// You can't message yourself (the server won't relay it), so adding yourself
+	// only ever produces a buddy you can never talk to. Refuse it up front.
+	if self := a.store.Self().ScreenName; self != "" &&
+		state.NormalizeScreenName(self) == state.NormalizeScreenName(screenName) {
+		return "You can't add yourself as a buddy."
+	}
 	if err := a.client.AddBuddy(screenName, group); err != nil {
 		return err.Error()
 	}
 	return ""
+}
+
+// MoveBuddy moves a buddy to a different group without severing the connection.
+func (a *App) MoveBuddy(screenName string, group string) string {
+	if err := a.client.MoveBuddy(screenName, group); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// BlockedUsers lists the screen names currently on the deny list (including any
+// that aren't buddies), for the blocked-users manager in settings.
+func (a *App) BlockedUsers() []string {
+	return a.client.BlockedUsers()
+}
+
+// ProfilePreview is a one-shot profile lookup, for previewing who's asking to
+// connect before you accept.
+type ProfilePreview struct {
+	ScreenName string `json:"screenName"`
+	Profile    string `json:"profile"`
+	Away       string `json:"away"`
+}
+
+// LookupProfile fetches a screen name's profile and away text. Empty fields mean
+// nothing was set, or nothing arrived in time — the caller shows it either way.
+func (a *App) LookupProfile(screenName string) ProfilePreview {
+	profile, away, err := a.client.LookupProfile(context.Background(), screenName)
+	if err != nil {
+		return ProfilePreview{ScreenName: screenName}
+	}
+	return ProfilePreview{ScreenName: screenName, Profile: profile, Away: away}
 }
 
 // RemoveBuddy removes a buddy from the list.
@@ -944,6 +982,13 @@ func (a *App) CloseConversation(screenName string) {
 // hidden flag on disk in sync so it doesn't re-hide on the next sign-on.
 func (a *App) ReopenConversation(screenName string) {
 	a.store.ReopenConversation(screenName)
+	a.persistHistoryNow()
+}
+
+// ClearConversation deletes one thread's local history without touching the
+// buddy or the connection, and persists the deletion so it doesn't come back.
+func (a *App) ClearConversation(screenName string) {
+	a.store.ClearConversation(screenName)
 	a.persistHistoryNow()
 }
 

@@ -97,6 +97,14 @@ export interface Self {
   warningLevel: number;
 }
 
+/** A one-shot profile lookup, for previewing a connection requester. Empty
+ *  fields mean nothing was set or nothing arrived in time. */
+export interface ProfilePreview {
+  screenName: string;
+  profile: string;
+  away: string;
+}
+
 export interface Theme {
   name?: string;
   tokens?: Record<string, string>;
@@ -284,10 +292,14 @@ interface AppBindings {
   AddBuddy(screenName: string, group: string): Promise<string>;
   RemoveBuddy(screenName: string): Promise<string>;
   RenameBuddy(screenName: string, alias: string): Promise<string>;
+  MoveBuddy(screenName: string, group: string): Promise<string>;
   BlockBuddy(screenName: string): Promise<string>;
   UnblockBuddy(screenName: string): Promise<string>;
+  BlockedUsers(): Promise<string[]>;
+  ClearConversation(screenName: string): Promise<void>;
   SetAway(message: string): Promise<string>;
   RequestUserInfo(screenName: string): Promise<void>;
+  LookupProfile(screenName: string): Promise<ProfilePreview>;
   SetProfile(text: string): Promise<string>;
   WarnUser(screenName: string, anonymous: boolean): Promise<string>;
   FindUser(email: string): Promise<string>;
@@ -388,13 +400,18 @@ export const Bridge = {
   markRead: (screenName: string) => app().MarkRead(screenName),
   closeConversation: (screenName: string) => app().CloseConversation(screenName),
   reopenConversation: (screenName: string) => app().ReopenConversation(screenName),
+  clearConversation: (screenName: string) => app().ClearConversation(screenName),
   addBuddy: (screenName: string, group: string) =>
     app().AddBuddy(screenName, group),
   removeBuddy: (screenName: string) => app().RemoveBuddy(screenName),
   renameBuddy: (screenName: string, alias: string) =>
     app().RenameBuddy(screenName, alias),
+  moveBuddy: (screenName: string, group: string) =>
+    app().MoveBuddy(screenName, group),
   blockBuddy: (screenName: string) => app().BlockBuddy(screenName),
   unblockBuddy: (screenName: string) => app().UnblockBuddy(screenName),
+  blockedUsers: () => app().BlockedUsers(),
+  lookupProfile: (screenName: string) => app().LookupProfile(screenName),
   setAway: (message: string) => app().SetAway(message),
   requestUserInfo: (screenName: string) => app().RequestUserInfo(screenName),
   setProfile: (text: string) => app().SetProfile(text),

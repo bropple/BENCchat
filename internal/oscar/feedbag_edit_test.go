@@ -211,6 +211,81 @@ func TestRemoveUnknownBuddyErrors(t *testing.T) {
 	}
 }
 
+func TestMoveBuddyChangesGroupInsertBeforeDelete(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Buddies")
+	fb.RenameBuddy("alice", "The User") // alias must survive the move
+
+	ops, err := fb.MoveBuddy("alice", "Work")
+	if err != nil {
+		t.Fatalf("MoveBuddy: %v", err)
+	}
+
+	// Ordering is the whole point: the server tells a move from a removal by the
+	// buddy still having a row after the delete, which only holds if the insert
+	// is sent first. So the first InsertItem naming alice must precede the
+	// DeleteItem naming alice.
+	firstInsert, firstDelete := -1, -1
+	for i, op := range ops {
+		switch op.subGroup {
+		case wire.FeedbagInsertItem:
+			for _, it := range op.body.(wire.SNAC_0x13_0x08_FeedbagInsertItem).Items {
+				if it.IsBuddy() && normName(it.Name) == "alice" && firstInsert == -1 {
+					firstInsert = i
+				}
+			}
+		case wire.FeedbagDeleteItem:
+			for _, it := range op.body.(wire.SNAC_0x13_0x0A_FeedbagDeleteItem).Items {
+				if it.IsBuddy() && normName(it.Name) == "alice" && firstDelete == -1 {
+					firstDelete = i
+				}
+			}
+		}
+	}
+	if firstInsert == -1 || firstDelete == -1 {
+		t.Fatalf("move should both insert and delete alice; insert=%d delete=%d", firstInsert, firstDelete)
+	}
+	if firstInsert >= firstDelete {
+		t.Errorf("insert (op %d) must come before delete (op %d) or the server reads a move as a removal", firstInsert, firstDelete)
+	}
+
+	// Final state: exactly one alice, in Work, alias intact.
+	b, ok := findBuddyEntry(fb.BuddyList(), "alice")
+	if !ok {
+		t.Fatal("alice missing after move")
+	}
+	if b.Group != "Work" {
+		t.Errorf("alice group = %q, want Work", b.Group)
+	}
+	if b.Alias != "The User" {
+		t.Errorf("alias lost in move: %q", b.Alias)
+	}
+	// No stray duplicate left behind in the old group.
+	count := 0
+	for _, e := range fb.BuddyList().Buddies {
+		if normName(e.ScreenName) == "alice" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("alice appears %d times after move, want 1", count)
+	}
+}
+
+func TestMoveBuddyToSameGroupIsNoop(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Buddies")
+	ops, err := fb.MoveBuddy("alice", "Buddies")
+	if err != nil {
+		t.Fatalf("MoveBuddy: %v", err)
+	}
+	if len(ops) != 0 {
+		t.Errorf("moving to the same group should be a no-op, got %d ops", len(ops))
+	}
+}
+
 func TestRenameBuddySetsAlias(t *testing.T) {
 	fb := NewFeedbag(nil)
 	fb.EnsureBaseStructure("Buddies")

@@ -481,7 +481,8 @@
   margin-top: 8px;
 }
 
-.settings__device {
+.settings__device,
+.settings__blocked-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -490,6 +491,19 @@
   border: 1px solid var(--benco-border);
   border-radius: var(--benco-radius);
   background: var(--benco-panel-2);
+}
+
+.settings__blocked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings__blocked-name {
+  color: var(--benco-phosphor);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings__device-id {

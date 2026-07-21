@@ -14,6 +14,12 @@ import (
 // reciprocally) can treat "already there" as success rather than a failure.
 var ErrAlreadyBuddy = errors.New("oscar: already on the buddy list")
 
+// ErrNotABuddy is returned by edits that target a buddy who isn't on the list —
+// including when the other party removed you, so your mirror no longer has them.
+// Callers use errors.Is to reconcile that case rather than surfacing it as a
+// failure.
+var ErrNotABuddy = errors.New("not on your buddy list")
+
 // Feedbag is a client-side mirror of the server-stored buddy list, holding the
 // raw items with their group/item IDs so edits can be expressed as the
 // insert/update/delete SNACs the server expects.
@@ -142,7 +148,7 @@ func (f *Feedbag) RemoveBuddy(screenName string) ([]editOp, error) {
 
 	bIdx := f.findBuddy(screenName)
 	if bIdx < 0 {
-		return nil, fmt.Errorf("oscar: %q is not on your buddy list", screenName)
+		return nil, fmt.Errorf("oscar: %q is %w", screenName, ErrNotABuddy)
 	}
 	buddy := f.items[bIdx]
 
@@ -233,6 +239,89 @@ func (f *Feedbag) RenameBuddy(screenName, alias string) ([]editOp, error) {
 	}, nil
 }
 
+// MoveBuddy moves an existing buddy to a different group WITHOUT severing the
+// connection. A group change in OSCAR is a delete of the old row plus an insert
+// under the target group; done in that order the server would see a bare buddy
+// delete and revoke the connection (feedbag DeleteItem's mutual-removal). So the
+// order is reversed here — insert the new row FIRST, then delete the old — which
+// guarantees a row for this buddy always exists, and the server recognises it as
+// a move rather than a removal. The alias and any pending tag ride along on the
+// copied item.
+func (f *Feedbag) MoveBuddy(screenName, newGroup string) ([]editOp, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	newGroup = strings.TrimSpace(newGroup)
+	if newGroup == "" {
+		newGroup = DefaultGroupName
+	}
+	bIdx := f.findBuddy(screenName)
+	if bIdx < 0 {
+		return nil, fmt.Errorf("oscar: %q is %w", screenName, ErrNotABuddy)
+	}
+	old := f.items[bIdx]
+
+	// Already in the target group: nothing to do.
+	if gi := f.findGroupByID(old.GroupID); gi >= 0 && strings.EqualFold(f.items[gi].Name, newGroup) {
+		return nil, nil
+	}
+
+	// The moved row keeps the buddy's TLVs (alias, pending) but takes a new item
+	// id — and, below, the target group's id — since (group,item) is its identity.
+	newItemID := f.nextItemID()
+	moved := old
+	moved.TLVList = append(wire.TLVList(nil), old.TLVList...)
+	moved.ItemID = newItemID
+
+	var ops []editOp
+
+	// 1. Insert the buddy under the target group, creating the group if needed.
+	if gIdx := f.findGroupByName(newGroup); gIdx >= 0 {
+		moved.GroupID = f.items[gIdx].GroupID
+		grp := f.items[gIdx]
+		grp.SetOrder(append(grp.Order(), newItemID))
+		f.items[gIdx] = grp
+		f.items = append(f.items, moved)
+		ops = append(ops,
+			editOp{wire.FeedbagInsertItem, wire.SNAC_0x13_0x08_FeedbagInsertItem{Items: []wire.FeedbagItem{moved}}},
+			editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{grp}}},
+		)
+	} else {
+		gid := f.nextGroupID()
+		moved.GroupID = gid
+		grp := wire.FeedbagItem{ClassID: wire.FeedbagClassIdGroup, GroupID: gid, ItemID: 0, Name: newGroup}
+		grp.SetOrder([]uint16{newItemID})
+		rIdx := f.rootIndex()
+		root := f.items[rIdx]
+		root.SetOrder(append(root.Order(), gid))
+		f.items[rIdx] = root
+		f.items = append(f.items, grp, moved)
+		ops = append(ops,
+			editOp{wire.FeedbagInsertItem, wire.SNAC_0x13_0x08_FeedbagInsertItem{Items: []wire.FeedbagItem{grp, moved}}},
+			editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{root}}},
+		)
+	}
+
+	// 2. Delete the old row and drop it from the old group's ordering.
+	ops = append(ops, editOp{wire.FeedbagDeleteItem, wire.SNAC_0x13_0x0A_FeedbagDeleteItem{Items: []wire.FeedbagItem{old}}})
+	if gi := f.findGroupByID(old.GroupID); gi >= 0 {
+		grp := f.items[gi]
+		grp.SetOrder(without(grp.Order(), old.ItemID))
+		f.items[gi] = grp
+		ops = append(ops, editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{grp}}})
+	}
+	// Remove the old row from the mirror by its original identity (appends above
+	// may have shifted indices, and its name now matches the moved row too).
+	for i := range f.items {
+		if f.items[i].IsBuddy() && f.items[i].GroupID == old.GroupID && f.items[i].ItemID == old.ItemID {
+			f.items = removeAt(f.items, i)
+			break
+		}
+	}
+
+	return ops, nil
+}
+
 // --- Session integration ---
 
 // AddBuddy adds a buddy to the server-stored list and returns the updated list.
@@ -263,6 +352,13 @@ func (s *Session) RemoveBuddy(screenName string) (BuddyList, error) {
 // RenameBuddy sets or clears a buddy's local alias.
 func (s *Session) RenameBuddy(screenName, alias string) (BuddyList, error) {
 	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.RenameBuddy(screenName, alias) })
+}
+
+// MoveBuddy moves a buddy to a different group. The ops (insert-then-delete) are
+// sent in order by sendEdits, which is what keeps the server from reading the
+// move as a removal.
+func (s *Session) MoveBuddy(screenName, newGroup string) (BuddyList, error) {
+	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.MoveBuddy(screenName, newGroup) })
 }
 
 // BlockBuddy blocks a user.

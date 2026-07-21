@@ -256,6 +256,12 @@
 .roster__menu-item.is-danger:hover {
   background: color-mix(in srgb, var(--benco-red) 16%, transparent);
 }
+/* Divides the safe actions from the destructive ones below. */
+.roster__menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--benco-border);
+}
 
 /* Presence is carried by a dot plus text dimming — never by color alone, which
    would be invisible to anyone who can't distinguish these greens. */
@@ -1002,6 +1008,26 @@
   overflow: hidden;
 }
 
+/* Search box at the top of the picker. */
+.chat__emoji-search-wrap {
+  padding: 6px 6px 4px;
+  flex: none;
+}
+.chat__emoji-search {
+  width: 100%;
+  font-size: 13px;
+  padding: 6px 8px;
+}
+/* Flat, scrolling result grid shown while searching (replaces tabs + grid). */
+.chat__emoji-results {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 8px 8px;
+}
+.chat__emoji-empty {
+  padding: 10px 4px;
+}
+
 /* Category tab strip. */
 .chat__emoji-tabs {
   display: flex;
@@ -1135,9 +1161,37 @@
 }
 
 .roster__invite-yes,
-.roster__invite-no {
+.roster__invite-no,
+.roster__invite-block {
   font-size: 11px;
   padding: 3px 8px;
+}
+
+/* Clickable requester name — opens their profile before you decide. */
+.roster__invite-name {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--benco-phosphor);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.roster__invite-name:hover {
+  text-decoration: underline;
+}
+.roster__invite-link {
+  cursor: pointer;
+  text-decoration: underline;
+  color: var(--benco-dim-2);
+}
+.roster__invite-link:hover {
+  color: var(--benco-phosphor);
 }
 
 /* The dot marks waiting invitations without a modal demanding attention. */

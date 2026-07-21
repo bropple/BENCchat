@@ -226,6 +226,12 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <div class="settings__recovery" id="recoveryLine"></div>
                 <p class="benco-caption settings__hint">Checking actually decrypts your account's identity with the key you type, so the answer is real either way — there's no "yes, I still have it" to tick. Losing this key is a slow failure: your devices keep working, but you can't link a new one or remove an old one, and you'd normally find out the day you replace a laptop.</p>
               </section>
+
+              <section class="settings__section">
+                <div class="benco-label">Blocked users</div>
+                <p class="benco-caption settings__hint">Blocked people can't message you, see when you're online, or ask to connect. Unblock anyone here to allow them again.</p>
+                <div class="settings__blocked" id="blockedList"></div>
+              </section>
             </div>
 
             <div class="settings__panel" data-panel="account">
@@ -500,6 +506,42 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
       }
     };
     void renderDevices();
+
+    // Blocked users. Rendered on open and after any unblock.
+    const blockedListEl = overlay.querySelector<HTMLDivElement>("#blockedList")!;
+    const renderBlocked = async (): Promise<void> => {
+      let blocked: string[] = [];
+      try {
+        blocked = (await Bridge.blockedUsers()) ?? [];
+      } catch {
+        blocked = [];
+      }
+      if (!blocked.length) {
+        blockedListEl.innerHTML = `<p class="benco-caption">No one is blocked.</p>`;
+        return;
+      }
+      blocked.sort((a, b) => a.localeCompare(b));
+      blockedListEl.innerHTML = blocked
+        .map(
+          (sn) => `
+          <div class="settings__blocked-row">
+            <span class="settings__blocked-name">${escapeHTML(sn)}</span>
+            <button class="benco-button benco-button--ghost settings__unblock" data-sn="${escapeHTML(sn)}">Unblock</button>
+          </div>`,
+        )
+        .join("");
+      for (const btn of blockedListEl.querySelectorAll<HTMLButtonElement>(".settings__unblock")) {
+        btn.addEventListener("click", async () => {
+          const err = await Bridge.unblockBuddy(btn.dataset.sn!);
+          if (err) {
+            void alertDialog(err, { title: "Couldn't unblock" });
+            return;
+          }
+          void renderBlocked();
+        });
+      }
+    };
+    void renderBlocked();
 
     // The recovery key line (proposal §13). Rendered when the panel opens and
     // after a check; nothing else triggers it, and nothing triggers it on a

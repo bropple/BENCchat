@@ -810,6 +810,18 @@ func (s *Store) CloseConversation(screenName string) {
 	s.emit(Event{Kind: EventConversationsChanged})
 }
 
+// ClearConversation deletes one thread's messages while leaving the buddy and
+// the connection untouched — "forget what we said," not "forget the person."
+// The thread is removed outright (a fresh, empty one opens next time you talk),
+// which is different from CloseConversation's hide-but-keep.
+func (s *Store) ClearConversation(screenName string) {
+	key := NormalizeScreenName(screenName)
+	s.mu.Lock()
+	delete(s.conversations, key)
+	s.mu.Unlock()
+	s.emit(Event{Kind: EventConversationsChanged})
+}
+
 // ReopenConversation un-hides a thread the user had closed, returning it to the
 // conversation list with its history intact. A no-op (and no event) when the
 // thread is absent or already visible, so opening an ordinary conversation costs

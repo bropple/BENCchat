@@ -67,6 +67,10 @@ type Client struct {
 	onPeerKey func(screenName string, keys, prev [][32]byte)
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// profileProbe, when set, receives every locate reply. LookupProfile uses it
+	// to catch a one-shot profile fetch for someone who isn't a buddy (the store
+	// only retains buddies' profiles). Guarded by e2eeMu.
+	profileProbe func(screenName, profile, away string, hasProfile bool)
 	// keyDirWait correlates device key directory replies to their requests.
 	// Keyed by request ID because several queries can be outstanding at once —
 	// one per peer whose keys we want. See keydir.go.
@@ -303,11 +307,25 @@ func (c *Client) AddBuddy(screenName, group string) error {
 	})
 }
 
-// RemoveBuddy removes screenName from the list.
+// RemoveBuddy removes screenName from the list. If the buddy is already gone —
+// the other party removed us, so our mirror no longer has them but the store may
+// still show them — it reconciles the store to the mirror and reports success:
+// the end state the caller wants is already true, and surfacing "not on your
+// buddy list" as a failure would just strand a dead row on screen.
 func (c *Client) RemoveBuddy(screenName string) error {
-	return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
+	err := c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
 		return s.RemoveBuddy(screenName)
 	})
+	if errors.Is(err, oscar.ErrNotABuddy) {
+		c.mu.Lock()
+		session := c.session
+		c.mu.Unlock()
+		if session != nil {
+			c.publishBuddyList(session.BuddyList())
+		}
+		return nil
+	}
+	return err
 }
 
 // RenameBuddy sets (or clears, with an empty alias) a buddy's local nickname.
@@ -315,6 +333,25 @@ func (c *Client) RenameBuddy(screenName, alias string) error {
 	return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
 		return s.RenameBuddy(screenName, alias)
 	})
+}
+
+// MoveBuddy moves a buddy to a different group without severing the connection.
+func (c *Client) MoveBuddy(screenName, group string) error {
+	return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
+		return s.MoveBuddy(screenName, group)
+	})
+}
+
+// BlockedUsers returns the screen names on the deny list, which may include
+// people who aren't buddies. Empty when signed off.
+func (c *Client) BlockedUsers() []string {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	return session.BuddyList().Blocked
 }
 
 // BlockBuddy blocks a user.
@@ -513,6 +550,56 @@ func (c *Client) handleLocate(frame wire.SNACFrame, body []byte) {
 		// Markers are still stripped for display, because an account that has
 		// not republished since the change still has one sitting in its bio.
 		c.store.SetBuddyProfile(reply.ScreenName, e2ee.StripMarkerAll(reply.Profile))
+	}
+	c.e2eeMu.Lock()
+	pp := c.profileProbe
+	c.e2eeMu.Unlock()
+	if pp != nil {
+		pp(reply.ScreenName, e2ee.StripMarkerAll(reply.Profile), reply.Away, reply.HasProfile)
+	}
+}
+
+// LookupProfile does a one-shot profile+away fetch for a screen name that need
+// not be a buddy — used to preview a connection requester before accepting. It
+// returns whatever the first locate reply carries, or empty strings if none
+// arrives before the deadline (a profile that was never set looks the same).
+func (c *Client) LookupProfile(ctx context.Context, screenName string) (profile, away string, err error) {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return "", "", errors.New("client: not signed on")
+	}
+	want := state.NormalizeScreenName(screenName)
+
+	type result struct{ profile, away string }
+	ch := make(chan result, 1)
+	c.e2eeMu.Lock()
+	c.profileProbe = func(sn, prof, aw string, _ bool) {
+		if state.NormalizeScreenName(sn) != want {
+			return
+		}
+		select {
+		case ch <- result{prof, aw}:
+		default:
+		}
+	}
+	c.e2eeMu.Unlock()
+	defer func() {
+		c.e2eeMu.Lock()
+		c.profileProbe = nil
+		c.e2eeMu.Unlock()
+	}()
+
+	c.RequestUserInfo(screenName)
+
+	select {
+	case r := <-ch:
+		return r.profile, r.away, nil
+	case <-time.After(6 * time.Second):
+		return "", "", nil
+	case <-ctx.Done():
+		return "", "", ctx.Err()
 	}
 }
 

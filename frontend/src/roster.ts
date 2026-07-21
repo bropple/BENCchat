@@ -25,6 +25,7 @@ import {
 import { alertDialog, confirmDialog, promptDialog, choiceDialog } from "./dialog";
 import { renderMessageBody } from "./message";
 import { EMOJI_CATEGORIES } from "./emoji";
+import { EMOJI_NAMES } from "./emoji_names";
 
 /** How long after the last keystroke we tell the other end we stopped typing. */
 const TYPING_IDLE_MS = 3000;
@@ -206,32 +207,26 @@ export function renderRoster(
           (r) => `
         <div class="roster__invite" data-sn="${escapeAttr(r.screenName)}">
           <div class="roster__invite-what">
-            <span class="roster__invite-room">👤 ${escapeHTML(r.screenName)}</span>
-            <span class="benco-caption">wants to connect${r.reason ? ` — ${escapeHTML(r.reason)}` : ""}</span>
+            <button class="roster__invite-name" data-conn-profile="${escapeAttr(r.screenName)}" title="View ${escapeAttr(r.screenName)}'s profile">👤 ${escapeHTML(r.screenName)}</button>
+            <span class="benco-caption">wants to connect${r.reason ? ` — ${escapeHTML(r.reason)}` : ""} · <span class="roster__invite-link" data-conn-profile="${escapeAttr(r.screenName)}">view profile</span></span>
           </div>
           <div class="roster__invite-acts">
             <button class="benco-button roster__invite-yes" data-conn-yes="${escapeAttr(r.screenName)}">Accept</button>
-            <button class="benco-button benco-button--ghost roster__invite-no" data-conn-no="${escapeAttr(r.screenName)}">✕</button>
+            <button class="benco-button benco-button--ghost roster__invite-block" data-conn-block="${escapeAttr(r.screenName)}" title="Block ${escapeAttr(r.screenName)}">Block</button>
+            <button class="benco-button benco-button--ghost roster__invite-no" data-conn-no="${escapeAttr(r.screenName)}" title="Decline">✕</button>
           </div>
         </div>`,
         )
         .join("")}`;
 
+    for (const el of connReqsEl.querySelectorAll<HTMLElement>("[data-conn-profile]")) {
+      el.addEventListener("click", () => void showRequesterProfile(el.dataset.connProfile!));
+    }
     for (const btn of connReqsEl.querySelectorAll<HTMLButtonElement>("[data-conn-yes]")) {
-      btn.addEventListener("click", async () => {
-        const sn = btn.dataset.connYes!;
-        // Accepting is mutual: it connects you both, so you'll see each other's
-        // presence and can message. Say so, since it's more than "let them in".
-        const ok = await confirmDialog(
-          `Connect with ${sn}?\n\nYou'll be able to message each other and see when the other is online.`,
-          { title: "Accept connection", okLabel: "Connect" },
-        );
-        if (!ok) return;
-        const err = await Bridge.approveConnectionRequest(sn);
-        if (err) void alertDialog(err, { title: "Couldn't connect" });
-        void renderConnectionRequests();
-        void refreshBuddies();
-      });
+      btn.addEventListener("click", () => void approveRequest(btn.dataset.connYes!));
+    }
+    for (const btn of connReqsEl.querySelectorAll<HTMLButtonElement>("[data-conn-block]")) {
+      btn.addEventListener("click", () => void blockRequester(btn.dataset.connBlock!));
     }
     for (const btn of connReqsEl.querySelectorAll<HTMLButtonElement>("[data-conn-no]")) {
       btn.addEventListener("click", async () => {
@@ -239,6 +234,56 @@ export function renderRoster(
         void renderConnectionRequests();
       });
     }
+  }
+
+  // Accepting is mutual: it connects you both, so you'll see each other's
+  // presence and can message. Say so, since it's more than "let them in".
+  async function approveRequest(sn: string): Promise<void> {
+    const ok = await confirmDialog(
+      `Connect with ${sn}?\n\nYou'll be able to message each other and see when the other is online.`,
+      { title: "Accept connection", okLabel: "Connect" },
+    );
+    if (!ok) return;
+    const err = await Bridge.approveConnectionRequest(sn);
+    if (err) void alertDialog(err, { title: "Couldn't connect" });
+    void renderConnectionRequests();
+    void refreshBuddies();
+  }
+
+  // Blocking a requester declines the request and adds them to the deny list, so
+  // they can't ask again or reach you. Confirmed, since it's the harsh option.
+  async function blockRequester(sn: string): Promise<void> {
+    const ok = await confirmDialog(
+      `Block ${sn}? Their request is declined and they won't be able to message you or ask to connect again. You can unblock them later in Settings.`,
+      { title: "Block user", okLabel: "Block", danger: true },
+    );
+    if (!ok) return;
+    await Bridge.declineConnectionRequest(sn);
+    const err = await Bridge.blockBuddy(sn);
+    if (err) void alertDialog(err, { title: "Couldn't block" });
+    void renderConnectionRequests();
+    void refreshBuddies();
+  }
+
+  // Preview who's asking before deciding: fetch their profile and away text and
+  // show it with the same accept/block choices, so you can vet a stranger without
+  // connecting first.
+  async function showRequesterProfile(sn: string): Promise<void> {
+    showToast(`Looking up ${sn}…`, "info");
+    const info = await Bridge.lookupProfile(sn);
+    const lines: string[] = [];
+    if (info.away) lines.push(`🌙 Away: ${info.away}`);
+    lines.push(info.profile ? info.profile : "No profile set.");
+    const choice = await choiceDialog(
+      lines.join("\n\n"),
+      [
+        { label: "Accept", value: "accept" },
+        { label: "Block", value: "block", danger: true },
+      ],
+      { title: `👤 ${sn}`, cancelLabel: "Close" },
+    );
+    if (choice === "accept") void approveRequest(sn);
+    else if (choice === "block") void blockRequester(sn);
   }
 
   async function renderInvites(): Promise<void> {
@@ -433,8 +478,8 @@ export function renderRoster(
 
     if (buddies.length === 0) {
       buddiesHTML += `<p class="benco-caption roster__hint">
-        Your buddy list is empty. Use <strong>+ Add Buddy</strong> to add someone,
-        or <strong>+ New IM</strong> to message without adding.
+        Your buddy list is empty. Use <strong>+ Add Buddy</strong> to connect with
+        someone — they'll get a request, and once they accept you can message.
       </p>`;
     } else {
       buddiesHTML += groups
@@ -651,26 +696,35 @@ export function renderRoster(
     updateBuddyInfo();
   }
 
-  // While a connection request is still pending, there's nothing to send to: the
-  // server refuses the message and it would sit unsent in the log. So disable the
-  // composer outright and say why, rather than letting the user type into a void
-  // and only learn on hitting Send. Re-runs on every status change (renderChatStatus
-  // fires on open, presence, and connection updates), so it lifts the moment the
-  // other person accepts. Rooms and established 1:1s are never gated.
+  // The composer is usable only when a message will actually go somewhere: an
+  // established 1:1 (buddy, accepted, not blocked) or a room. Everything else —
+  // a request still pending, a blocked user, or someone you're no longer
+  // connected to — has the server refuse the message, leaving it unsent in the
+  // log. So disable the composer and say why, rather than letting the user type
+  // into a void. Re-runs on every status change (renderChatStatus fires on open,
+  // presence, buddy-list and connection updates), so it lifts the instant a
+  // request is accepted and clamps down the instant a connection is severed.
   function applyComposerGate(): void {
-    const b = activeKey ? buddies.find((x) => x.key === activeKey) : null;
-    const gated = !!b && b.pending === true && !b.blocked;
+    let reason = "";
+    if (activeKey && !activeRoom) {
+      const b = buddies.find((x) => x.key === activeKey);
+      const who = activeScreenName ?? "this person";
+      if (!b) {
+        reason = `You're not connected to ${who}. Add them as a buddy to start a conversation.`;
+      } else if (b.pending) {
+        reason =
+          `Waiting for ${b.screenName} to accept your connection request. ` +
+          `You can message once they do.`;
+      } else if (b.blocked) {
+        reason = `You've blocked ${b.screenName}. Unblock them to send messages.`;
+      }
+    }
+    const gated = reason !== "";
     chatInputEl.disabled = gated;
     chatSendEl.disabled = gated;
     emojiBtn.disabled = gated;
-    if (gated) {
-      chatGateEl.textContent =
-        `Waiting for ${b!.screenName} to accept your connection request. ` +
-        `You can message once they do.`;
-      chatGateEl.hidden = false;
-    } else {
-      chatGateEl.hidden = true;
-    }
+    chatGateEl.textContent = reason;
+    chatGateEl.hidden = !gated;
   }
 
   // Shows the active buddy's away message and profile. Both are fetched
@@ -885,6 +939,60 @@ export function renderRoster(
     // The conversationsChanged event re-renders the list.
   }
 
+  // Move a buddy to another group. Offers the groups that already exist plus a
+  // "new group" escape hatch, so the common case (a group you already use) is one
+  // click and doesn't require retyping a name exactly.
+  async function moveBuddyPrompt(sn: string): Promise<void> {
+    const current = buddies.find((b) => b.key === normalizeScreenName(sn))?.group ?? "";
+    const groups = [...new Set(buddies.map((b) => b.group).filter(Boolean))];
+    const NEW = " new";
+    const choices = groups
+      .filter((g) => g !== current)
+      .map((g) => ({ label: g, value: g }));
+    choices.push({ label: "New group…", value: NEW });
+    const picked = await choiceDialog(
+      `Move ${sn} to which group?${current ? ` Currently in “${current}”.` : ""}`,
+      choices,
+      { title: "Move to group" },
+    );
+    if (picked === null) return;
+    let group = picked;
+    if (picked === NEW) {
+      const name = await promptDialog("Name the new group.", "", {
+        title: "Move to group",
+        okLabel: "Move",
+        placeholder: "Group name",
+      });
+      if (name === null || !name.trim()) return;
+      group = name.trim();
+    }
+    const err = await Bridge.moveBuddy(sn, group);
+    if (err) void alertDialog(err, { title: "Couldn't move buddy" });
+    // buddyListChanged refreshes the roster.
+  }
+
+  // Clear one thread's history without touching the buddy or the connection —
+  // "forget what we said", distinct from Close (keeps history) and Remove buddy
+  // (severs the connection). Destructive and local, so it confirms first.
+  async function clearHistoryPrompt(sn: string): Promise<void> {
+    if (
+      !(await confirmDialog(
+        `Delete your message history with ${sn} on this computer? This can't be undone. ` +
+          `They stay on your buddy list and you can keep talking — only the past messages go.`,
+        { title: "Clear history", okLabel: "Clear", danger: true },
+      ))
+    )
+      return;
+    const key = normalizeScreenName(sn);
+    await Bridge.clearConversation(sn);
+    // Reflect the wipe at once: empty the log if it's on screen, and drop an
+    // off-list thread from the Conversations section.
+    if (activeKey === key) renderMessages([]);
+    looseConvos.delete(key);
+    unread.delete(key);
+    renderBuddies();
+  }
+
   // --- Row action menu (the ⋯ button on every buddy / room) --------------
 
   interface MenuItem {
@@ -913,11 +1021,13 @@ export function renderRoster(
   function openRowMenu(btn: HTMLElement): void {
     const items = rowMenuItems(btn.dataset);
     if (items.length === 0) return;
+    const firstDanger = items.findIndex((it) => it.danger);
     menuEl.innerHTML = items
-      .map(
-        (it, i) =>
-          `<button type="button" class="roster__menu-item${it.danger ? " is-danger" : ""}" data-i="${i}">${escapeHTML(it.label)}</button>`,
-      )
+      .map((it, i) => {
+        const sep =
+          i === firstDanger && firstDanger > 0 ? `<div class="roster__menu-sep"></div>` : "";
+        return `${sep}<button type="button" class="roster__menu-item${it.danger ? " is-danger" : ""}" data-i="${i}">${escapeHTML(it.label)}</button>`;
+      })
       .join("");
     menuEl.querySelectorAll<HTMLButtonElement>(".roster__menu-item").forEach((el, i) => {
       el.addEventListener("click", () => {
@@ -949,24 +1059,39 @@ export function renderRoster(
     }
     const sn = d.menuSn ?? "";
     const blocked = d.menuBlocked === "true";
-    const items: MenuItem[] = [{ label: "Message", run: () => openConversation(sn) }];
-    if (d.menuKind === "onlist") {
-      items.push({ label: "Rename…", run: () => renameBuddy(sn) });
+    const onList = d.menuKind === "onlist";
+
+    // Safe actions first. Destructive ones are collected separately and appended
+    // below a divider, so a mis-click lands on something harmless.
+    const safe: MenuItem[] = [{ label: "Message", run: () => openConversation(sn) }];
+    if (onList) {
+      safe.push({ label: "Rename…", run: () => renameBuddy(sn) });
+      safe.push({ label: "Move to group…", run: () => moveBuddyPrompt(sn) });
     } else {
-      items.push({ label: "Add to buddy list", run: () => addBuddy(sn) });
+      safe.push({ label: "Add to buddy list", run: () => addBuddy(sn) });
     }
-    items.push(
-      blocked
-        ? { label: "Unblock", run: () => unblockBuddy(sn) }
-        : { label: "Block", run: () => blockBuddy(sn), danger: true },
-    );
+    if (blocked) {
+      // Undoing a block is a safe, restorative action.
+      safe.push({ label: "Unblock", run: () => unblockBuddy(sn) });
+    }
     // "Close" just tidies the list — the thread and its history stay, one click
-    // away. "Remove buddy" is the heavier, severing action, and reads as such.
-    items.push({ label: "Close conversation", run: () => closeConversation(sn) });
-    if (d.menuKind === "onlist") {
-      items.push({ label: "Remove buddy", run: () => removeBuddy(sn), danger: true });
+    // away — so it belongs with the safe actions.
+    safe.push({ label: "Close conversation", run: () => closeConversation(sn) });
+
+    const danger: MenuItem[] = [
+      { label: "Clear history…", run: () => clearHistoryPrompt(sn), danger: true },
+    ];
+    if (!blocked) {
+      danger.push({ label: "Block", run: () => blockBuddy(sn), danger: true });
     }
-    return items;
+    if (onList) {
+      // The heaviest action, and last: severs the connection both ways.
+      danger.push({ label: "Remove buddy", run: () => removeBuddy(sn), danger: true });
+    }
+
+    // A single separator marks the boundary; openRowMenu renders it before the
+    // first danger item.
+    return [...safe, ...danger];
   }
 
   async function openRoom(cookie: string): Promise<void> {
@@ -1109,6 +1234,19 @@ export function renderRoster(
   // Discord-style: category tabs (jump-scroll) above a scrolling grid of
   // labelled sections. Picking an emoji inserts it and keeps the panel open so
   // several can be chosen in a row.
+  // Every emoji flattened once, for search. Deduped so an emoji listed in two
+  // categories only appears once in results.
+  const allEmoji = [...new Set(EMOJI_CATEGORIES.flatMap((c) => c.list))];
+
+  // Wire an emoji button: mousedown + preventDefault keeps the textarea's focus
+  // and caret, and the panel stays open so you can pick several in a row.
+  function wireEmojiButton(btn: HTMLButtonElement): void {
+    btn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      insertAtCursor(chatInputEl, btn.textContent ?? "");
+    });
+  }
+
   function buildEmojiPanel(): void {
     const tabs = EMOJI_CATEGORIES.map(
       (c, i) =>
@@ -1124,18 +1262,19 @@ export function renderRoster(
         </div>`,
     ).join("");
     emojiPanel.innerHTML =
-      `<div class="chat__emoji-tabs">${tabs}</div>` +
-      `<div class="chat__emoji-grid" id="emojiGrid">${sections}</div>`;
+      `<div class="chat__emoji-search-wrap"><input class="benco-input chat__emoji-search" id="emojiSearch" type="text" placeholder="Search emoji…" autocomplete="off" spellcheck="false" /></div>` +
+      `<div class="chat__emoji-tabs" id="emojiTabs">${tabs}</div>` +
+      `<div class="chat__emoji-grid" id="emojiGrid">${sections}</div>` +
+      `<div class="chat__emoji-results" id="emojiResults" hidden></div>`;
 
-    for (const btn of emojiPanel.querySelectorAll<HTMLButtonElement>(".chat__emoji")) {
-      // mousedown + preventDefault keeps the textarea's focus and caret; the
-      // panel deliberately stays open so you can pick several.
-      btn.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        insertAtCursor(chatInputEl, btn.textContent ?? "");
-      });
+    for (const btn of emojiPanel.querySelectorAll<HTMLButtonElement>(".chat__emoji-grid .chat__emoji")) {
+      wireEmojiButton(btn);
     }
     const grid = emojiPanel.querySelector<HTMLDivElement>("#emojiGrid")!;
+    const tabsEl = emojiPanel.querySelector<HTMLDivElement>("#emojiTabs")!;
+    const results = emojiPanel.querySelector<HTMLDivElement>("#emojiResults")!;
+    const search = emojiPanel.querySelector<HTMLInputElement>("#emojiSearch")!;
+
     for (const tab of emojiPanel.querySelectorAll<HTMLButtonElement>(".chat__emoji-tab")) {
       tab.addEventListener("mousedown", (e) => {
         e.preventDefault();
@@ -1144,6 +1283,31 @@ export function renderRoster(
           ?.scrollIntoView({ block: "start" });
       });
     }
+
+    // Search: an empty box is the normal tabbed browse; anything typed switches
+    // to a flat, filtered result grid matched against each emoji's Unicode name.
+    const runSearch = (): void => {
+      const q = search.value.trim().toLowerCase();
+      if (!q) {
+        results.hidden = true;
+        grid.hidden = false;
+        tabsEl.hidden = false;
+        return;
+      }
+      const hits = allEmoji.filter((e) => (EMOJI_NAMES[e] ?? "").includes(q));
+      results.innerHTML = hits.length
+        ? `<div class="chat__emoji-row">${hits
+            .map((e) => `<button type="button" class="chat__emoji" tabindex="-1">${e}</button>`)
+            .join("")}</div>`
+        : `<div class="chat__emoji-empty benco-caption">No emoji match “${escapeHTML(q)}”.</div>`;
+      for (const btn of results.querySelectorAll<HTMLButtonElement>(".chat__emoji")) {
+        wireEmojiButton(btn);
+      }
+      grid.hidden = true;
+      tabsEl.hidden = true;
+      results.hidden = false;
+    };
+    search.addEventListener("input", runSearch);
   }
 
   function insertAtCursor(ta: HTMLTextAreaElement, text: string): void {
@@ -1247,7 +1411,15 @@ export function renderRoster(
   emojiBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     emojiPanel.hidden = !emojiPanel.hidden;
-    if (!emojiPanel.hidden) chatInputEl.focus();
+    if (!emojiPanel.hidden) {
+      // Open on a fresh search, focused, so you can type a name straight away.
+      const search = emojiPanel.querySelector<HTMLInputElement>("#emojiSearch");
+      if (search) {
+        search.value = "";
+        search.dispatchEvent(new Event("input"));
+        search.focus();
+      }
+    }
   });
   document.addEventListener("click", (e) => {
     if (
@@ -2168,7 +2340,15 @@ export function renderRoster(
   });
   // A request we sent was answered (or one we handled): refresh both the request
   // list and the buddy list, since an accept clears a pending buddy.
-  Bridge.onConnectionUpdate(() => {
+  Bridge.onConnectionUpdate((u) => {
+    // Declined, or the connection was severed (both arrive as accepted:false).
+    // If it's the conversation on screen, close it out: an open, ungated thread
+    // to someone you're no longer connected to is the "bad state". An accept
+    // (accepted:true) or our own handling of an incoming request (handled:true)
+    // leaves the pane alone.
+    if (u && u.accepted === false && !u.handled && u.screenName) {
+      clearActiveIf(normalizeScreenName(u.screenName));
+    }
     void renderConnectionRequests();
     void refreshBuddies();
   });
