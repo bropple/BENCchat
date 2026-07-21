@@ -73,16 +73,16 @@ func TestRateLimiterNoPacingWhenSpaced(t *testing.T) {
 
 	for i := 0; i < 50; i++ {
 		now = now.Add(10 * time.Second) // well beyond any window
-		if d := rl.reserve(wire.ICBM, wire.ICBMChannelMsgToHost); d != 0 {
-			t.Fatalf("spaced send %d was paced by %v", i, d)
+		if d, ok := rl.reserve(wire.ICBM, wire.ICBMChannelMsgToHost); !ok || d != 0 {
+			t.Fatalf("spaced send %d was paced by %v (allowed=%v)", i, d, ok)
 		}
 	}
 
 	// Feedbag isn't in the group map here, so it must never be throttled.
 	now = time.Unix(1_000_000, 0)
 	for i := 0; i < 100; i++ {
-		if d := rl.reserve(wire.Feedbag, wire.FeedbagQuery); d != 0 {
-			t.Fatalf("unmapped SNAC was paced by %v", d)
+		if d, ok := rl.reserve(wire.Feedbag, wire.FeedbagQuery); !ok || d != 0 {
+			t.Fatalf("unmapped SNAC was paced by %v (allowed=%v)", d, ok)
 		}
 	}
 }
@@ -98,7 +98,10 @@ func TestRateLimiterPacesBurst(t *testing.T) {
 	// a wait is required; once required, the wait pins the average at alert.
 	var firstPaced int = -1
 	for i := 0; i < 8; i++ {
-		d := rl.reserve(wire.ICBM, wire.ICBMChannelMsgToHost)
+		d, ok := rl.reserve(wire.ICBM, wire.ICBMChannelMsgToHost)
+		if !ok {
+			t.Fatalf("send %d refused while pacing was still viable", i)
+		}
 		if d > 0 {
 			if firstPaced < 0 {
 				firstPaced = i
@@ -123,15 +126,25 @@ func TestRateLimiterPacesBurst(t *testing.T) {
 	}
 }
 
-// The per-send wait is capped so a pathological flood can't stall a message
-// indefinitely.
-func TestRateLimiterCapsWait(t *testing.T) {
+// Past the cap the limiter REFUSES instead of sending early. Sending anyway is
+// exactly what let the server discard the message in silence, so a flood must
+// end in a visible refusal rather than a quietly dropped SNAC.
+func TestRateLimiterRefusesPastCap(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	rl := newRateLimiter(sampleRateReply(), func() time.Time { return now })
-	for i := 0; i < 40; i++ {
-		d := rl.reserve(wire.ICBM, wire.ICBMChannelMsgToHost) // never advance the clock
+
+	refused := false
+	for i := 0; i < 200; i++ {
+		d, ok := rl.reserve(wire.ICBM, wire.ICBMChannelMsgToHost) // never advance the clock
+		if !ok {
+			refused = true
+			break
+		}
 		if d > maxPace {
 			t.Fatalf("wait %v exceeded cap %v", d, maxPace)
 		}
+	}
+	if !refused {
+		t.Fatal("a flood with no elapsed time should end in a refusal, not endless pacing")
 	}
 }

@@ -1021,6 +1021,16 @@ func (a *App) ReopenConversation(screenName string) {
 	a.persistHistoryNow()
 }
 
+// ResendMessage re-sends a message that failed to send, replacing the failed row
+// rather than leaving a dead copy beside the real one. Manual by design: there's
+// no server-side de-duplication, so an automatic retry could post it twice.
+func (a *App) ResendMessage(screenName string, id string) string {
+	if err := a.client.ResendMessage(screenName, id); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 // ClearConversation deletes one thread's local history without touching the
 // buddy or the connection, and persists the deletion so it doesn't come back.
 func (a *App) ClearConversation(screenName string) {

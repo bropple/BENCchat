@@ -1028,6 +1028,22 @@
   padding: 10px 4px;
 }
 
+/* Name of whatever the cursor is over, along the bottom of the picker. Fixed
+   height so the grid doesn't shift as the text comes and goes. */
+.chat__emoji-name {
+  flex: none;
+  height: 26px;
+  line-height: 26px;
+  padding: 0 10px;
+  border-top: 1px solid var(--benco-border);
+  background: var(--benco-panel-2);
+  color: var(--benco-dim-2);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* A faint corner dot marks emoji that take a skin tone (long-press for the palette). */
 .chat__emoji--tone {
   position: relative;
@@ -1165,6 +1181,19 @@
   letter-spacing: 0.5px;
   text-transform: uppercase;
   cursor: help;
+}
+.chat__resend {
+  background: none;
+  border: none;
+  padding: 0 0 0 6px;
+  color: var(--benco-dim-2);
+  font-family: inherit;
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.chat__resend:hover {
+  color: var(--benco-phosphor);
 }
 
 /* Encrypted but unattributable — an older client, or a sender whose signing

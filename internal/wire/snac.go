@@ -37,6 +37,9 @@ const (
 // SNAC error codes carried as a bare uint16 in an error SNAC's body. Only the
 // few the client needs to interpret are here; the server defines the full set.
 const (
+	// ErrorCodeRateToHost — we sent faster than the server's rate class allows.
+	// The server refuses the SNAC outright; nothing was delivered.
+	ErrorCodeRateToHost uint16 = 0x02
 	// ErrorCodeNotLoggedOn — literally "recipient not logged on", but also what
 	// the consensual-connection gate and a block return when refusing a message.
 	ErrorCodeNotLoggedOn uint16 = 0x04

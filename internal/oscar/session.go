@@ -280,7 +280,14 @@ func (s *Session) Send(fg, sg uint16, body any) error {
 // arrive in bursts while still needing its reply correlated by request ID.
 func (s *Session) sendPaced(fg, sg uint16, body any) (uint32, error) {
 	if s.rateLimiter != nil {
-		if d := s.rateLimiter.reserve(fg, sg); d > 0 {
+		d, ok := s.rateLimiter.reserve(fg, sg)
+		if !ok {
+			// Over budget by more than we're willing to wait. Fail loudly instead of
+			// transmitting: the server discards over-limit SNACs silently, so sending
+			// would lose the message with no error and no acknowledgement.
+			return 0, errors.New("oscar: sending too fast — wait a moment and try again")
+		}
+		if d > 0 {
 			t := time.NewTimer(d)
 			select {
 			case <-t.C:

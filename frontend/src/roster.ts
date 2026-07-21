@@ -616,7 +616,10 @@ export function renderRoster(
         // has to be marked or it reads as delivered. Most often this is the rate
         // limiter: the server silently discards sends that come too fast.
         const notSent = m.notSent
-          ? `<span class="chat__notsent" title="The server never confirmed this message — it wasn't delivered. Sending too fast is the usual cause; wait a moment and send it again.">not sent</span>`
+          ? `<span class="chat__notsent" title="The server never confirmed this message — it wasn't delivered. Sending too fast is the usual cause; wait a moment and send it again.">not sent</span>` +
+            (m.id
+              ? `<button type="button" class="chat__resend" data-resend="${escapeAttr(m.id)}" title="Send this message again">resend</button>`
+              : "")
           : "";
         const notSentCls = m.notSent ? " chat__msg--notsent" : "";
         return `
@@ -1264,6 +1267,37 @@ export function renderRoster(
   // categories only appears once in results.
   const allEmoji = [...new Set(EMOJI_CATEGORIES.flatMap((c) => c.list))];
 
+  // Recently used emoji, newest first. Kept on this device (like the skin tone)
+  // and written on every pick, which is why it lives in localStorage rather than
+  // going through the Go config on each keystroke-sized event.
+  const RECENTS_KEY = "benchat.emojiRecents";
+  const RECENTS_MAX = 32;
+  // Set when a pick changes the list, so the next OPEN rebuilds the panel. The
+  // grid isn't rebuilt mid-use — that would yank the section out from under the
+  // cursor — so recents show up the next time the picker is opened.
+  let recentsDirty = false;
+
+  function loadRecents(): string[] {
+    try {
+      const raw = localStorage.getItem(RECENTS_KEY);
+      const arr: unknown = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((e): e is string => typeof e === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function noteEmojiUsed(base: string): void {
+    if (!base) return;
+    const next = [base, ...loadRecents().filter((e) => e !== base)].slice(0, RECENTS_MAX);
+    try {
+      localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+    } catch {
+      /* storage unavailable — recents are a convenience, never load-bearing */
+    }
+    recentsDirty = true;
+  }
+
   // The tone palette shown on a long-press. One at a time, tracked here so an
   // outside click, the next long-press, or the button release can dismiss it.
   let tonePaletteEl: HTMLDivElement | null = null;
@@ -1309,6 +1343,9 @@ export function renderRoster(
         e.preventDefault();
         e.stopPropagation();
         insertAtCursor(chatInputEl, swatch.textContent ?? "");
+        // Recents track the BASE, so the entry renders in whatever tone is
+        // current rather than freezing the one picked here.
+        noteEmojiUsed(base);
       }
       closeTonePalette();
     };
@@ -1350,29 +1387,65 @@ export function renderRoster(
       // a browsable emoji (no palette) inserts here.
       if (tonePaletteEl) return;
       const btn = (e.target as HTMLElement).closest<HTMLElement>(EMOJI_SEL);
-      if (btn) insertAtCursor(chatInputEl, applyTone(btn.dataset.base ?? btn.textContent ?? ""));
+      if (!btn) return;
+      const base = btn.dataset.base ?? btn.textContent ?? "";
+      insertAtCursor(chatInputEl, applyTone(base));
+      noteEmojiUsed(base);
+    });
+
+    // Name of whatever the cursor is over, shown along the bottom. Covers the
+    // tone swatches too — those carry the base's name.
+    emojiPanel.addEventListener("mouseover", (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>(
+        `${EMOJI_SEL}, .chat__tone-palette .chat__emoji`,
+      );
+      const nameEl = emojiPanel.querySelector<HTMLDivElement>("#emojiName");
+      if (!nameEl) return;
+      if (!btn) return;
+      const base = btn.dataset.base ?? btn.textContent ?? "";
+      const name = EMOJI_NAMES[base] ?? "";
+      nameEl.textContent = name ? `${applyTone(base)}  ${name}` : applyTone(base);
+    });
+    emojiPanel.addEventListener("mouseleave", () => {
+      const nameEl = emojiPanel.querySelector<HTMLDivElement>("#emojiName");
+      if (nameEl) nameEl.textContent = "";
     });
   }
 
   function buildEmojiPanel(): void {
-    const tabs = EMOJI_CATEGORIES.map(
-      (c, i) =>
-        `<button type="button" class="chat__emoji-tab" data-cat="${i}" title="${escapeAttr(c.label)}">${c.icon}</button>`,
-    ).join("");
-    const sections = EMOJI_CATEGORIES.map(
-      (c, i) => `
-        <div class="chat__emoji-section" data-cat="${i}">
+    recentsDirty = false;
+    // A "Recent" category leads the list once anything has been used. When there
+    // are none it isn't rendered at all, so the picker opens on the normal
+    // categories rather than an empty screen.
+    const recents = loadRecents().filter((e) => EMOJI_NAMES[e] !== undefined);
+    const cats = recents.length
+      ? [{ label: "Recent", icon: "🕘", list: recents }, ...EMOJI_CATEGORIES]
+      : [...EMOJI_CATEGORIES];
+    const recentIdx = recents.length ? 0 : -1;
+
+    const tabs = cats
+      .map(
+        (c, i) =>
+          `<button type="button" class="chat__emoji-tab" data-cat="${i}" title="${escapeAttr(c.label)}">${c.icon}</button>`,
+      )
+      .join("");
+    const sections = cats
+      .map(
+        (c, i) => `
+        <div class="chat__emoji-section" data-cat="${i}"${i === recentIdx ? ` data-recent="1"` : ""}>
           <div class="chat__emoji-cat-label">${escapeHTML(c.label)}</div>
           <div class="chat__emoji-row">
             ${c.list.map((e) => `<button type="button" class="chat__emoji${toneable(e) ? " chat__emoji--tone" : ""}" data-base="${escapeAttr(e)}" tabindex="-1">${applyTone(e)}</button>`).join("")}
           </div>
         </div>`,
-    ).join("");
+      )
+      .join("");
     emojiPanel.innerHTML =
       `<div class="chat__emoji-search-wrap"><input class="benco-input chat__emoji-search" id="emojiSearch" type="text" placeholder="Search emoji…" autocomplete="off" spellcheck="false" /></div>` +
       `<div class="chat__emoji-tabs" id="emojiTabs">${tabs}</div>` +
       `<div class="chat__emoji-grid" id="emojiGrid">${sections}</div>` +
-      `<div class="chat__emoji-results" id="emojiResults" hidden></div>`;
+      `<div class="chat__emoji-results" id="emojiResults" hidden></div>` +
+      `<div class="chat__emoji-name" id="emojiName"></div>`;
 
     // Emoji presses are handled by delegation (wireEmojiDelegation), so no
     // per-button wiring here.
@@ -1482,6 +1555,18 @@ export function renderRoster(
   // navigate the webview away from the app. renderMessageBody marks them with
   // data-ext and only ever emits vetted http/https/mailto/ftp/aim URLs.
   chatLogEl.addEventListener("click", (e) => {
+    // Resend a message the server never accepted. Replaces the failed row rather
+    // than adding a second copy beside it.
+    const resend = (e.target as HTMLElement).closest<HTMLElement>("[data-resend]");
+    if (resend) {
+      e.preventDefault();
+      const id = resend.dataset.resend!;
+      if (!activeScreenName) return;
+      void Bridge.resendMessage(activeScreenName, id).then((err) => {
+        if (err) showToast(err, "error");
+      });
+      return;
+    }
     const link = (e.target as HTMLElement).closest("a[data-ext]");
     if (!link) return;
     e.preventDefault();
@@ -1530,7 +1615,12 @@ export function renderRoster(
   });
   emojiBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    if (emojiPanel.hidden) ensureEmojiPanel();
+    if (emojiPanel.hidden) {
+      ensureEmojiPanel();
+      // Picks since the last open changed the Recent list; rebuild now rather
+      // than mid-use, so the section never moves under the cursor.
+      if (recentsDirty) buildEmojiPanel();
+    }
     emojiPanel.hidden = !emojiPanel.hidden;
     if (!emojiPanel.hidden) {
       // Open on a fresh search, focused, so you can type a name straight away.
@@ -1540,6 +1630,11 @@ export function renderRoster(
         search.dispatchEvent(new Event("input"));
         search.focus();
       }
+      // Land on Recent once there is one; with none, stay on the first category
+      // rather than opening to an empty screen.
+      emojiPanel
+        .querySelector<HTMLElement>('.chat__emoji-section[data-recent="1"]')
+        ?.scrollIntoView({ block: "start" });
     }
   });
   document.addEventListener("click", (e) => {

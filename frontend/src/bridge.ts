@@ -73,6 +73,8 @@ export interface Message {
    *  (which is what hitting a rate limit looks like). It's still in your local
    *  history, so it has to be visibly marked or it reads as delivered. */
   notSent?: boolean;
+  /** Identifies an outgoing message, so a failed one can be resent. */
+  id?: string;
 }
 
 export interface Room {
@@ -297,6 +299,7 @@ interface AppBindings {
   GetConversation(screenName: string): Promise<Conversation>;
   GetConversations(): Promise<Conversation[]>;
   SendMessage(to: string, text: string): Promise<string>;
+  ResendMessage(screenName: string, id: string): Promise<string>;
   SetTyping(to: string, typing: boolean): Promise<void>;
   MarkRead(screenName: string): Promise<void>;
   CloseConversation(screenName: string): Promise<void>;
@@ -412,6 +415,7 @@ export const Bridge = {
   getConversation: (screenName: string) => app().GetConversation(screenName),
   getConversations: () => app().GetConversations(),
   sendMessage: (to: string, text: string) => app().SendMessage(to, text),
+  resendMessage: (screenName: string, id: string) => app().ResendMessage(screenName, id),
   setTyping: (to: string, typing: boolean) => app().SetTyping(to, typing),
   markRead: (screenName: string) => app().MarkRead(screenName),
   closeConversation: (screenName: string) => app().CloseConversation(screenName),

@@ -7,13 +7,13 @@ import (
 	"github.com/benco-holdings/benchat/internal/wire"
 )
 
-// maxPace caps how long reserve() will ask a caller to wait before sending. Set
-// above the largest per-class target so that under a *sustained* flood the
-// steady-state pacing still holds the average above the drop threshold; the cap
-// only bites on extreme transients, where we send late rather than stall a
-// message for an absurd length of time. Normal chatting never comes near it —
-// pacing engages only on rapid bursts of many SNACs in one class.
-const maxPace = 8 * time.Second
+// maxPace bounds how long reserve() will ask a caller to wait. Past it the send
+// is REFUSED rather than sent early — sending anyway lands over the server's
+// limit, and the server discards those without a word, so the message is lost
+// with no error and no acknowledgement. Refusing surfaces something the user can
+// see and resend. Generous on purpose: with a sanely tuned server class, normal
+// conversation never waits at all, so reaching this means something is wrong.
+const maxPace = 30 * time.Second
 
 // rateClass is the client's live view of one server rate class, plus the moving
 // average and last-send time we track to pace ourselves the way the server paces
@@ -97,13 +97,17 @@ func snacKey(fg, sg uint16) uint32 { return uint32(fg)<<16 | uint32(sg) }
 // updates the class's moving average and last-send time as if the send happens
 // after the returned delay, so concurrent callers naturally queue behind one
 // another.
-func (rl *rateLimiter) reserve(fg, sg uint16) time.Duration {
+// reserve returns how long to wait before sending this SNAC, and whether the
+// send is allowed at all. false means the required wait exceeds maxPace: the
+// caller must fail the send rather than transmit into a rate limit and have it
+// silently discarded.
+func (rl *rateLimiter) reserve(fg, sg uint16) (time.Duration, bool) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	id, ok := rl.snacs[snacKey(fg, sg)]
 	if !ok {
-		return 0
+		return 0, true // unmapped SNAC types are never paced
 	}
 	c := rl.classes[id]
 
@@ -120,15 +124,13 @@ func (rl *rateLimiter) reserve(fg, sg uint16) time.Duration {
 	} else {
 		waitMs, gap = required-elapsed, required // wait, then land on target
 	}
-	if capMs := maxPace.Milliseconds(); waitMs > capMs {
-		// Give up waiting past the cap; send late rather than stall. gap is
-		// clamped non-negative: a send can't have a negative inter-arrival, and
-		// leaving it negative (possible when a concurrent caller reserved a
-		// future slot) would spuriously depress the average.
-		waitMs = capMs
-		if gap = elapsed + waitMs; gap < 0 {
-			gap = 0
-		}
+	if waitMs > maxPace.Milliseconds() {
+		// Refuse rather than send early. Sending anyway (what this used to do) put
+		// the SNAC over the server's limit, and the server discards those silently
+		// — the message simply vanished. A refusal the caller can surface, and the
+		// user can resend, beats a message that quietly evaporates. Nothing is
+		// mutated: this send never happened.
+		return 0, false
 	}
 
 	newAvg := (c.curAvg*(c.window-1) + gap) / c.window
@@ -137,5 +139,5 @@ func (rl *rateLimiter) reserve(fg, sg uint16) time.Duration {
 	}
 	c.curAvg = newAvg
 	c.lastSend = now.Add(time.Duration(waitMs) * time.Millisecond)
-	return time.Duration(waitMs) * time.Millisecond
+	return time.Duration(waitMs) * time.Millisecond, true
 }

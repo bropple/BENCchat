@@ -98,6 +98,10 @@ type Message struct {
 	// server's acknowledgement back to this row. Session-only: it means nothing
 	// once the app restarts, so it isn't persisted.
 	Cookie uint64 `json:"-"`
+	// ID identifies an outbound message to the UI (the cookie in hex), so a failed
+	// one can be resent or dropped without passing a uint64 through JavaScript,
+	// where it wouldn't survive the number type intact.
+	ID string `json:"id,omitempty"`
 	// NotSent marks an outbound message the server never accepted — either it
 	// returned an error, or it acknowledged nothing at all. The latter is what
 	// rate limiting looks like from here: the server silently discards SNACs over
@@ -774,6 +778,33 @@ func (s *Store) SetMessageNotSent(screenName string, cookie uint64, notSent bool
 		s.emit(Event{Kind: EventMessage, Conversation: key})
 	}
 	return found
+}
+
+// TakeMessage removes an outbound message by its UI id and returns its text, so
+// a failed message can be resent as a fresh one rather than leaving the dead row
+// behind. Reports false when no such message exists.
+func (s *Store) TakeMessage(screenName, id string) (string, bool) {
+	key := NormalizeScreenName(screenName)
+
+	s.mu.Lock()
+	c, ok := s.conversations[key]
+	text, found := "", false
+	if ok && id != "" {
+		for i := range c.Messages {
+			if c.Messages[i].Outgoing && c.Messages[i].ID == id {
+				text = c.Messages[i].Text
+				c.Messages = append(c.Messages[:i], c.Messages[i+1:]...)
+				found = true
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if found {
+		s.emit(Event{Kind: EventMessage, Conversation: key})
+	}
+	return text, found
 }
 
 // Conversation returns a snapshot of one thread.

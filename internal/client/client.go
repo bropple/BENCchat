@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -272,9 +273,22 @@ func (c *Client) SendMessage(to, text string) error {
 		Outgoing:  true,
 		Encrypted: encrypted,
 		Cookie:    cookie,
+		ID:        strconv.FormatUint(cookie, 16),
 	})
 	c.trackSend(to, cookie, reqID)
 	return nil
+}
+
+// ResendMessage re-sends a message that failed, removing the failed row so the
+// thread doesn't accumulate a dead copy beside the real one. Deliberately manual:
+// there's no server-side de-duplication, so an automatic retry after a lost
+// acknowledgement would post the message twice.
+func (c *Client) ResendMessage(to, id string) error {
+	text, ok := c.store.TakeMessage(to, id)
+	if !ok {
+		return errors.New("client: that message is no longer here to resend")
+	}
+	return c.SendMessage(to, text)
 }
 
 // ackTimeout is how long a sent message waits for the server's acknowledgement
@@ -1104,6 +1118,9 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		msg := "The server rejected that action."
 		if len(body) >= 2 {
 			switch binary.BigEndian.Uint16(body[:2]) {
+			case wire.ErrorCodeRateToHost:
+				msg = "You're sending too fast — that message wasn't delivered. " +
+					"Wait a moment, then resend it."
 			case wire.ErrorCodeNotLoggedOn, wire.ErrorCodeInLocalPermitDeny:
 				msg = "Couldn't send that message — you may not be connected to this person, " +
 					"they may have blocked you, or they're offline and not accepting messages."
