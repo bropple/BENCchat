@@ -125,6 +125,12 @@ type Conversation struct {
 	Messages   []Message `json:"messages"`
 	// Unread counts messages received since the UI last marked it read.
 	Unread int `json:"unread"`
+	// Hidden means the user closed this thread: it drops off the conversation
+	// list but its history is kept, so reopening it (from the buddy list, a
+	// search, or a new message) restores the messages. Closing is not deleting —
+	// that's what "Remove buddy" is for. Persisted, so a close stays closed
+	// across restarts.
+	Hidden bool `json:"hidden,omitempty"`
 }
 
 // Room is a joined multi-user chat room. Cookie is the server room identity
@@ -715,6 +721,9 @@ func (s *Store) AddMessage(m Message) string {
 		c = &Conversation{Key: key, ScreenName: other}
 		s.conversations[key] = c
 	}
+	// A new message reopens a closed thread — activity is exactly the moment it
+	// should return to the list rather than stay silently hidden.
+	c.Hidden = false
 	c.Messages = append(c.Messages, m)
 	if len(c.Messages) > maxMessagesPerConversation {
 		c.Messages = c.Messages[len(c.Messages)-maxMessagesPerConversation:]
@@ -784,13 +793,39 @@ func (s *Store) MarkRead(screenName string) {
 	s.emit(Event{Kind: EventConversationsChanged})
 }
 
-// CloseConversation drops a thread entirely (the user closed the window).
+// CloseConversation hides a thread from the conversation list without discarding
+// it: the user closed the window, they didn't ask to forget what was said. The
+// messages stay, so reopening the thread — from the buddy list, a search, or a
+// new message arriving — brings the history back. Deleting is a separate,
+// heavier action ("Remove buddy"). A close on a thread that doesn't exist (an
+// empty, never-messaged conversation) is a no-op.
 func (s *Store) CloseConversation(screenName string) {
 	key := NormalizeScreenName(screenName)
 	s.mu.Lock()
-	delete(s.conversations, key)
+	if c, ok := s.conversations[key]; ok {
+		c.Hidden = true
+		c.Unread = 0
+	}
 	s.mu.Unlock()
 	s.emit(Event{Kind: EventConversationsChanged})
+}
+
+// ReopenConversation un-hides a thread the user had closed, returning it to the
+// conversation list with its history intact. A no-op (and no event) when the
+// thread is absent or already visible, so opening an ordinary conversation costs
+// nothing.
+func (s *Store) ReopenConversation(screenName string) {
+	key := NormalizeScreenName(screenName)
+	s.mu.Lock()
+	c, ok := s.conversations[key]
+	changed := ok && c.Hidden
+	if changed {
+		c.Hidden = false
+	}
+	s.mu.Unlock()
+	if changed {
+		s.emit(Event{Kind: EventConversationsChanged})
+	}
 }
 
 // RestoreConversations loads saved threads at sign-on, replacing whatever is

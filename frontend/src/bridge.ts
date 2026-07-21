@@ -85,6 +85,9 @@ export interface Conversation {
   screenName: string;
   messages: Message[];
   unread: number;
+  /** Closed by the user: kept for its history but omitted from the list until
+   *  reopened. Set with omitempty on the Go side, so absent means visible. */
+  hidden?: boolean;
 }
 
 export interface Self {
@@ -277,6 +280,7 @@ interface AppBindings {
   SetTyping(to: string, typing: boolean): Promise<void>;
   MarkRead(screenName: string): Promise<void>;
   CloseConversation(screenName: string): Promise<void>;
+  ReopenConversation(screenName: string): Promise<void>;
   AddBuddy(screenName: string, group: string): Promise<string>;
   RemoveBuddy(screenName: string): Promise<string>;
   RenameBuddy(screenName: string, alias: string): Promise<string>;
@@ -383,6 +387,7 @@ export const Bridge = {
   setTyping: (to: string, typing: boolean) => app().SetTyping(to, typing),
   markRead: (screenName: string) => app().MarkRead(screenName),
   closeConversation: (screenName: string) => app().CloseConversation(screenName),
+  reopenConversation: (screenName: string) => app().ReopenConversation(screenName),
   addBuddy: (screenName: string, group: string) =>
     app().AddBuddy(screenName, group),
   removeBuddy: (screenName: string) => app().RemoveBuddy(screenName),

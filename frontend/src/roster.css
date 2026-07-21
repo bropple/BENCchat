@@ -925,6 +925,24 @@
   position: relative; /* anchor for the emoji popover */
 }
 
+/* Shown in place of a usable composer while a connection request is pending. */
+.chat__gate {
+  margin: 0 14px 2px;
+  padding: 8px 12px;
+  border: 1px dashed var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel);
+  color: var(--benco-dim-2);
+}
+
+/* Make the disabled composer read as deliberately-off, not broken. */
+.chat__input:disabled,
+.chat__emoji-btn:disabled,
+.chat__compose .benco-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Room header: the "N here" status becomes a clickable disclosure. */
 .chat__status--room {
   cursor: pointer;

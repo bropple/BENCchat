@@ -106,6 +106,7 @@ export function renderRoster(
           </details>
           <div class="chat__log" id="chatLog"></div>
           <div class="chat__typing benco-caption" id="chatTyping"></div>
+          <div class="chat__gate benco-caption" id="chatGate" hidden></div>
           <div class="chat__compose">
             <textarea class="benco-input chat__input" id="chatInput" rows="2"
                       placeholder="Type a message; Enter sends"></textarea>
@@ -147,6 +148,7 @@ export function renderRoster(
   const chatProfileTextEl = el<HTMLDivElement>("chatProfileText");
   const chatInputEl = el<HTMLTextAreaElement>("chatInput");
   const chatSendEl = el<HTMLButtonElement>("chatSend");
+  const chatGateEl = el<HTMLDivElement>("chatGate");
   const chatErrorEl = el<HTMLDivElement>("chatError");
   const roomParticipantsEl = el<HTMLDivElement>("roomParticipants");
   const emojiBtn = el<HTMLButtonElement>("emojiBtn");
@@ -487,11 +489,17 @@ export function renderRoster(
 
   async function removeBuddy(screenName: string): Promise<void> {
     if (
-      !(await confirmDialog(`Remove ${screenName} from your buddy list?`, {
-        title: "Remove buddy",
-        okLabel: "Remove",
-        danger: true,
-      }))
+      !(await confirmDialog(
+        `Remove ${screenName}? This severs the connection both ways — you'll each drop off ` +
+          `the other's list and neither can message the other until you connect again. ` +
+          `Your message history stays on this computer.\n\n` +
+          `To just tidy the list without any of that, use “Close conversation” instead.`,
+        {
+          title: "Remove buddy",
+          okLabel: "Remove",
+          danger: true,
+        },
+      ))
     )
       return;
     const err = await Bridge.removeBuddy(screenName);
@@ -636,10 +644,33 @@ export function renderRoster(
   }
 
   function renderChatStatus(): void {
+    applyComposerGate();
     if (!activeKey) return;
     const b = buddies.find((x) => x.key === activeKey);
     chatStatusEl.textContent = b ? presenceLabel(b) : "";
     updateBuddyInfo();
+  }
+
+  // While a connection request is still pending, there's nothing to send to: the
+  // server refuses the message and it would sit unsent in the log. So disable the
+  // composer outright and say why, rather than letting the user type into a void
+  // and only learn on hitting Send. Re-runs on every status change (renderChatStatus
+  // fires on open, presence, and connection updates), so it lifts the moment the
+  // other person accepts. Rooms and established 1:1s are never gated.
+  function applyComposerGate(): void {
+    const b = activeKey ? buddies.find((x) => x.key === activeKey) : null;
+    const gated = !!b && b.pending === true && !b.blocked;
+    chatInputEl.disabled = gated;
+    chatSendEl.disabled = gated;
+    emojiBtn.disabled = gated;
+    if (gated) {
+      chatGateEl.textContent =
+        `Waiting for ${b!.screenName} to accept your connection request. ` +
+        `You can message once they do.`;
+      chatGateEl.hidden = false;
+    } else {
+      chatGateEl.hidden = true;
+    }
   }
 
   // Shows the active buddy's away message and profile. Both are fetched
@@ -691,6 +722,9 @@ export function renderRoster(
     if (!buddies.some((b) => b.key === activeKey)) {
       looseConvos.set(activeKey, screenName);
     }
+    // Opening a thread the user had closed brings it back to the list (a no-op on
+    // the backend if it wasn't hidden).
+    void Bridge.reopenConversation(screenName);
     chatErrorEl.textContent = "";
     chatTypingEl.textContent = "";
 
@@ -926,9 +960,11 @@ export function renderRoster(
         ? { label: "Unblock", run: () => unblockBuddy(sn) }
         : { label: "Block", run: () => blockBuddy(sn), danger: true },
     );
+    // "Close" just tidies the list — the thread and its history stay, one click
+    // away. "Remove buddy" is the heavier, severing action, and reads as such.
     items.push({ label: "Close conversation", run: () => closeConversation(sn) });
     if (d.menuKind === "onlist") {
-      items.push({ label: "Remove from list", run: () => removeBuddy(sn), danger: true });
+      items.push({ label: "Remove buddy", run: () => removeBuddy(sn), danger: true });
     }
     return items;
   }
@@ -952,6 +988,9 @@ export function renderRoster(
     renderMessages(room.messages);
     renderRooms();
     renderBuddies();
+    // Rooms are never gated; clear any pending-connection lock left by the 1:1
+    // we may have switched away from.
+    applyComposerGate();
     chatInputEl.focus();
   }
 
@@ -1117,6 +1156,9 @@ export function renderRoster(
   }
 
   async function send(): Promise<void> {
+    // Belt and braces: the composer is disabled while a connection is pending, so
+    // this shouldn't fire — but never send from a gated conversation even if it does.
+    if (chatInputEl.disabled) return;
     const text = chatInputEl.value.trim();
     if (!text) return;
 
@@ -1930,6 +1972,8 @@ export function renderRoster(
   async function seedConversations(): Promise<void> {
     const convs = await Bridge.getConversations();
     for (const c of convs) {
+      // A closed thread keeps its history but stays off the list until reopened.
+      if (c.hidden) continue;
       if (!buddies.some((b) => b.key === c.key)) {
         looseConvos.set(c.key, c.screenName);
       }

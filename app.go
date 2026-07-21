@@ -931,10 +931,19 @@ func (a *App) flushHistory() {
 	}
 }
 
-// CloseConversation removes a 1:1 thread from the list without blocking the
-// other party, and persists the removal so it doesn't return on next sign-on.
+// CloseConversation hides a 1:1 thread from the list without blocking the other
+// party or discarding what was said. The history is kept — persisted with the
+// hidden flag — so the close stays put across restarts yet reopening the thread
+// restores the messages. (Forgetting a conversation outright is "Remove buddy".)
 func (a *App) CloseConversation(screenName string) {
 	a.store.CloseConversation(screenName)
+	a.persistHistoryNow()
+}
+
+// ReopenConversation returns a previously closed thread to the list, keeping the
+// hidden flag on disk in sync so it doesn't re-hide on the next sign-on.
+func (a *App) ReopenConversation(screenName string) {
+	a.store.ReopenConversation(screenName)
 	a.persistHistoryNow()
 }
 

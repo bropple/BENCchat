@@ -30,7 +30,7 @@ import {
   setSoundMuted,
   type SoundKey,
 } from "./sound";
-import { alertDialog, confirmDialog, promptDialog } from "./dialog";
+import { alertDialog, confirmDialog, recoveryKeyDialog } from "./dialog";
 import { offerRecoveryKeyRotation } from "./identity";
 
 /** Minimal HTML escape for values interpolated into this panel's markup.
@@ -480,39 +480,22 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
           // Removal is not a request to the server any more — it publishes a
           // new, signed device list that simply doesn't name this machine.
           // Signing needs the account's identity, and the only way to reach
-          // that is the recovery key, so ask for it here and say why: the cost
-          // is what makes the removal something the server cannot undo.
-          const key = await promptDialog(
+          // that is the recovery key, so ask for it here (as the same ten boxes
+          // used to add a device) and say why: the cost is what makes the
+          // removal something the server cannot undo.
+          const ok = await recoveryKeyDialog(
             "Removing this device publishes a new signed list of devices for your account " +
               "without it. That's what makes the removal stick — the server can't put it " +
               "back — and it's why it needs your recovery key.\n\n" +
               "The device will no longer be able to read messages sent to you. Nobody you " +
               "talk to sees anything change: safety numbers follow your account's identity, " +
               "not the machines under it.",
-            "",
-            {
-              title: "Remove device",
-              okLabel: "Remove",
-              placeholder: "Recovery key",
-            },
+            // Stays open and highlights a mistyped word on failure; only resolves
+            // true once the removal actually succeeds.
+            (key) => Bridge.removeDevice(btn.dataset.device!, key),
+            { title: "Remove device", okLabel: "Remove", danger: true },
           );
-          if (key === null) return;
-          if (!key.trim()) {
-            void alertDialog("Enter your recovery key to remove a device.", {
-              title: "Could not remove device",
-            });
-            return;
-          }
-          const err = await Bridge.removeDevice(btn.dataset.device!, key.trim());
-          if (err) {
-            // Straight through, prefix aside: the useful failures here name the
-            // position of a mistyped word rather than saying "wrong key".
-            void alertDialog(err.replace(/^e2ee:\s*/, ""), {
-              title: "Could not remove device",
-            });
-            return;
-          }
-          void renderDevices();
+          if (ok) void renderDevices();
         });
       }
     };
@@ -568,23 +551,24 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
       overlay.querySelector<HTMLButtonElement>("#recoveryVerify")!.addEventListener(
         "click",
         async () => {
-          const key = await promptDialog(
+          // The same ten boxes as the rest of the app. On a bad key the dialog
+          // stays open and highlights the word at fault; it only closes true once
+          // the key actually decrypts the identity.
+          let verifiedKey = "";
+          const ok = await recoveryKeyDialog(
             "Type your recovery key and BENCchat will try to decrypt your account's " +
               "identity with it. That's the only check that proves anything — it either " +
               "opens or it doesn't.\n\n" +
               "Nothing about your account changes either way.",
-            "",
-            { title: "Check your recovery key", okLabel: "Check", placeholder: "Recovery key" },
+            async (key) => {
+              const err = await Bridge.verifyRecoveryKey(key);
+              if (err) return err;
+              verifiedKey = key;
+              return "";
+            },
+            { title: "Check your recovery key", okLabel: "Check" },
           );
-          if (key === null || !key.trim()) return;
-          const err = await Bridge.verifyRecoveryKey(key.trim());
-          if (err) {
-            await alertDialog(err.replace(/^e2ee:\s*/, ""), {
-              title: "That key didn't open your identity",
-            });
-            void renderRecovery();
-            return;
-          }
+          if (!ok) return;
           await alertDialog(
             "That key opened your account's identity. It's the right one, and it still works.",
             { title: "Recovery key checked" },
@@ -593,7 +577,8 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
           // more, so this is one of the two moments a re-key is possible — and
           // the offer has to be made now or not at all. It asks for the key
           // again rather than holding the identity across this round trip.
-          await offerRecoveryKeyRotation(key.trim());
+          await offerRecoveryKeyRotation(verifiedKey);
+          verifiedKey = "";
           void renderRecovery();
         },
       );

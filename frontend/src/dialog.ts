@@ -6,6 +6,8 @@
 // alertDialog → void, confirmDialog → boolean, promptDialog → string|null,
 // choiceDialog → the chosen value|null. Escape and a backdrop click cancel.
 
+import { mountRecoveryKeyInput, wordPositionFromError } from "./recoverykey-input";
+
 interface DialogOptions {
   title?: string;
   okLabel?: string;
@@ -243,6 +245,117 @@ export async function serverDialog(
     }
     return { host: values.host, port: n };
   }
+}
+
+/** A recovery key is ten words. Everywhere else it's collected the key gets one
+ *  box per word (first run, device linking); this brings the same input to the
+ *  modal actions — removing a device, checking the key — so there is one way to
+ *  type a recovery key in the whole app, not a grid in some places and a single
+ *  smudge of a text field in others. */
+const RECOVERY_KEY_WORDS = 10;
+
+/** A modal that collects a recovery key as ten boxes and hands the assembled key
+ *  to `onSubmit`, which returns "" on success or an error message to show. The
+ *  dialog stays open on error and highlights the box a "word N" message names, so
+ *  a single typo is fixed in place rather than by retyping the whole key. Resolves
+ *  true when the action completed, false if cancelled. The key never outlives the
+ *  dialog: the boxes are wiped on every exit. */
+export async function recoveryKeyDialog(
+  message: string,
+  onSubmit: (key: string) => Promise<string>,
+  opts: DialogOptions = {},
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const title = opts.title ?? "Recovery key";
+    const overlay = document.createElement("div");
+    overlay.className = "dialog-overlay";
+    overlay.innerHTML = `
+      <div class="dialog dialog--recovery" role="dialog" aria-modal="true" aria-label="${escapeHTML(title)}">
+        <div class="dialog__title benco-label">${escapeHTML(title)}</div>
+        <div class="dialog__msg">${escapeHTML(message)}</div>
+        <div class="dialog__rk" id="dlgRk"></div>
+        <div class="dialog__error benco-error" id="dlgError"></div>
+        <div class="dialog__actions">
+          <button class="benco-button benco-button--ghost" data-act="cancel">${escapeHTML(
+            opts.cancelLabel ?? "Cancel",
+          )}</button>
+          <button class="benco-button ${opts.danger ? "dialog__btn--danger" : ""}" data-act="ok">${escapeHTML(
+            opts.okLabel ?? "OK",
+          )}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const errorEl = overlay.querySelector<HTMLDivElement>("#dlgError")!;
+    const okBtn = overlay.querySelector<HTMLButtonElement>('[data-act="ok"]')!;
+    const cancelBtn = overlay.querySelector<HTMLButtonElement>('[data-act="cancel"]')!;
+    const okLabel = okBtn.textContent ?? "OK";
+
+    let done = false;
+    let busy = false;
+
+    const finish = (result: boolean): void => {
+      if (done) return;
+      done = true;
+      rk.clear(); // a recovery key must not linger in a detached DOM node
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      resolve(result);
+    };
+
+    const submit = async (): Promise<void> => {
+      if (busy) return;
+      const key = rk.value();
+      // An empty box makes the key incomplete; say so here rather than letting the
+      // Go parser reject a key with a gap in it less clearly.
+      if (key.split("-").some((w) => w === "")) {
+        errorEl.textContent = "Fill in all the words.";
+        return;
+      }
+      busy = true;
+      okBtn.disabled = true;
+      okBtn.textContent = "Working…";
+      errorEl.textContent = "";
+      try {
+        const err = await onSubmit(key);
+        if (err) {
+          errorEl.textContent = err.replace(/^e2ee:\s*/, "");
+          // If the failure names a word, point at that box — the locate-the-typo
+          // feedback a single field could only ever put into prose.
+          const pos = wordPositionFromError(err);
+          if (pos) rk.markInvalid(pos);
+          return;
+        }
+        finish(true);
+      } catch (e) {
+        errorEl.textContent = String(e);
+      } finally {
+        busy = false;
+        okBtn.disabled = false;
+        okBtn.textContent = okLabel;
+      }
+    };
+
+    const rk = mountRecoveryKeyInput(
+      overlay.querySelector<HTMLDivElement>("#dlgRk")!,
+      RECOVERY_KEY_WORDS,
+      () => void submit(),
+    );
+
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(false);
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    okBtn.addEventListener("click", () => void submit());
+    cancelBtn.addEventListener("click", () => finish(false));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) finish(false);
+    });
+    rk.focus();
+  });
 }
 
 /** A dialog with N labeled choices plus a Cancel. Resolves the chosen value, or

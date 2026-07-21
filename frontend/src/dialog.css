@@ -24,6 +24,16 @@
   padding: 18px;
 }
 
+/* The recovery-key modal carries a ten-box grid, which wants more room than a
+   400px prompt so the boxes land in tidy rows rather than one-per-line. */
+.dialog--recovery {
+  width: min(480px, 100%);
+}
+
+.dialog__rk {
+  margin: 2px 0;
+}
+
 .dialog__title {
   display: block;
 }

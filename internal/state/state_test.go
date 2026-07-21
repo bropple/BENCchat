@@ -439,9 +439,31 @@ func TestConversationBasics(t *testing.T) {
 		t.Errorf("unread = %d after MarkRead, want 0", c2.Unread)
 	}
 
+	// Closing hides the thread but keeps its history: the snapshot is still
+	// reachable, now marked Hidden, and its messages survive.
 	s.CloseConversation("alice")
-	if _, ok := s.Conversation("alice"); ok {
-		t.Error("closed conversation is still present")
+	closed, ok := s.Conversation("alice")
+	if !ok {
+		t.Fatal("closed conversation should still exist (history kept)")
+	}
+	if !closed.Hidden {
+		t.Error("closed conversation should be marked Hidden")
+	}
+	if len(closed.Messages) == 0 {
+		t.Error("closing must not discard message history")
+	}
+
+	// Reopening un-hides it again.
+	s.ReopenConversation("alice")
+	if reopened, _ := s.Conversation("alice"); reopened.Hidden {
+		t.Error("reopened conversation should not be Hidden")
+	}
+
+	// A new message also reopens a closed thread.
+	s.CloseConversation("alice")
+	s.AddMessage(Message{From: "alice", To: "alice", Text: "back", At: time.Now()})
+	if after, _ := s.Conversation("alice"); after.Hidden {
+		t.Error("a new message should reopen a closed thread")
 	}
 }
 
