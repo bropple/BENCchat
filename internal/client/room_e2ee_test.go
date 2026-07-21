@@ -784,3 +784,51 @@ func TestProtocolTrafficIsNotStoredAsAMessage(t *testing.T) {
 		t.Error("an ordinary message was not stored")
 	}
 }
+
+// TestPlaintextInEncryptedRoomIsMarked: a member's BENCchat either seals or
+// refuses, so plaintext arriving in an encrypted room was injected downstream.
+// The server picks the sender name attached to every chat message and already
+// rewrites chat traffic to implement //roll, so this is a live capability, not a
+// hypothetical one. Rendering it as an ordinary message would put words in a
+// named member's mouth with no marker but an ABSENT lock.
+func TestPlaintextInEncryptedRoomIsMarked(t *testing.T) {
+	c, _ := newTestClient(t)
+	key, _ := e2ee.GenerateRoomKey()
+	c.SetRoomKey("room-1", key)
+
+	d := c.decodeRoomMessageFrom("room-1", "alice", "wire the money to this account")
+	if !d.Forged {
+		t.Error("plaintext injected into an encrypted room was not flagged")
+	}
+	if d.Encrypted {
+		t.Error("injected plaintext was reported as encrypted")
+	}
+	if !strings.Contains(d.Text, "wire the money to this account") {
+		t.Errorf("injected text must still be shown so the user can see what was said: %q", d.Text)
+	}
+	if !strings.Contains(d.Text, "UNENCRYPTED") {
+		t.Errorf("no marker on injected plaintext: %q", d.Text)
+	}
+}
+
+// TestPlaintextInKeylessEncryptedRoomIsMarked: losing the key must not reopen
+// the hole. MarkRoomEncrypted exists precisely so a room stays known-encrypted
+// when its key is missing.
+func TestPlaintextInKeylessEncryptedRoomIsMarked(t *testing.T) {
+	c, _ := newTestClient(t)
+	c.MarkRoomEncrypted("room-1")
+
+	if d := c.decodeRoomMessageFrom("room-1", "alice", "hello"); !d.Forged {
+		t.Errorf("plaintext in a known-encrypted room with no key went unflagged: %+v", d)
+	}
+}
+
+// TestPlaintextRoomIsUnaffected: an ordinary unencrypted room must not sprout
+// warnings on every message.
+func TestPlaintextRoomIsUnaffected(t *testing.T) {
+	c, _ := newTestClient(t)
+	d := c.decodeRoomMessageFrom("room-plain", "alice", "hello")
+	if d.Forged || d.Encrypted || d.Text != "hello" {
+		t.Fatalf("ordinary room message was altered: %+v", d)
+	}
+}

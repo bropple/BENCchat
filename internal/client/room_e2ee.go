@@ -44,6 +44,15 @@ func (rc *roomCrypto) get(cookie string) *roomKeys {
 	return rc.rooms[cookie]
 }
 
+// isEncrypted reports whether a room is an encrypted one, regardless of whether
+// we currently hold a usable key for it.
+func (rc *roomCrypto) isEncrypted(cookie string) bool {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	k := rc.rooms[cookie]
+	return k != nil && k.encrypted
+}
+
 func (rc *roomCrypto) ensure(cookie string) *roomKeys {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
@@ -357,6 +366,23 @@ func (c *Client) decodeRoomMessage(cookie, text string) (string, bool) {
 // against the claimed sender's published signing keys.
 func (c *Client) decodeRoomMessageFrom(cookie, sender, text string) roomDecode {
 	if !e2ee.IsRoomEnvelope(text) {
+		// Plaintext in a room we know is encrypted did not come from a member's
+		// BENCchat: sealRoomMessage seals or refuses, it never falls back. So it
+		// was injected further down the wire — by the server, which chooses the
+		// sender name attached to every chat message and already rewrites chat
+		// traffic to implement //roll, or by a walk-in OSCAR client. Mark it.
+		// The only other signal is an ABSENT lock, and an absence is not
+		// something a reader notices.
+		if c.roomCrypto.isEncrypted(cookie) {
+			who := sender
+			if who == "" {
+				who = "the sender"
+			}
+			return roomDecode{
+				Text:   "⚠ [UNENCRYPTED — sent in the clear into an encrypted room, so it did not come from " + who + "'s BENCchat] " + text,
+				Forged: true,
+			}
+		}
 		return roomDecode{Text: text}
 	}
 	rk := c.roomCrypto.get(cookie)

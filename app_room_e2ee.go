@@ -221,10 +221,21 @@ func (a *App) handleRoomInvite(from string, inv e2ee.RoomInvite) {
 	// it directly: prompting to "join" a room the user is sitting in would be
 	// nonsense, and re-joining would open a second connection to it.
 	//
-	// Accepting silently is safe enough — the sender already had to reach us over
-	// our encrypted 1:1 channel, and a bogus key only makes the room unreadable
-	// to us, which is visible immediately.
+	// Only from someone we deliberately gave this room's key to, though. Reaching
+	// us over the encrypted 1:1 channel proves nothing about room membership —
+	// peer keys are fetched on demand for anyone — so without this check any
+	// account that learns the room name can replace the key we SEND under, and
+	// our messages get sealed to them instead of to the room. The reasoning this
+	// replaces (that a bogus key only makes the room unreadable to us, which is
+	// immediately visible) holds for receiving and fails for sending.
 	if cookie, ok := a.roomCookieByName(inv.Room); ok {
+		if !a.isRoomMember(cookie, from) {
+			slog.Default().Warn("ignoring a room key rotation from a non-member",
+				"peer", from, "room", inv.Room)
+			a.store.Notify(state.NoticeWarn, from+" tried to change the key for “"+inv.Room+
+				"” but was never given it. Ignored.")
+			return
+		}
 		a.client.SetRoomKey(cookie, inv.Key)
 		a.saveRoomKeys(cookie)
 		a.store.Notify(state.NoticeInfo, "The key for “"+inv.Room+"” was rotated by "+from+".")

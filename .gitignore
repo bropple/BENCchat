@@ -10,9 +10,10 @@ open-oscar-server/
 # Generated bundle (rebuilt from benchat-tls/ sources)
 benchat-tls.tar.gz
 
-# Deployment specifics: server address, VPS details, test-account notes.
-# Deliberately untracked — the address is not something to publish.
-DEPLOYMENT.local.md
+# Working notes kept out of source control: deployment specifics (server
+# address, VPS details, test-account notes) and security findings that are
+# still open. Neither is something to publish — an unfixed finding least of all.
+*.local.md
 
 # Never track a database or its backups
 *.sqlite

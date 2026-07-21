@@ -605,7 +605,7 @@ export function renderRoster(
         // be noise on every message the user ever receives.
         const roomMsg = activeRoom !== null;
         const lock = m.forged
-          ? `<span class="chat__lock chat__lock--forged benco-caption" title="This message is NOT signed by the person it claims to be from — someone in the room may be impersonating them">⚠</span>`
+          ? `<span class="chat__lock chat__lock--forged benco-caption" title="This message did not come from the person it claims to be from — it is either unsigned by them or was sent in the clear into an encrypted room">⚠</span>`
           : m.encrypted && (m.senderVerified || !roomMsg)
             ? `<span class="chat__lock benco-caption" title="End-to-end encrypted">🔒</span>`
             : m.encrypted
