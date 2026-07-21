@@ -9,8 +9,9 @@ re-keys the rooms it could read.
 
 §7 (roles and authority) is **decided but unbuilt**: owner, senior mod and mod;
 roles as signed statements the server stores and enforces. §8 is a measurement,
-not a proposal — the room size ceiling is 61 members and the reason is the
-feedbag buddy cap, not the cryptography. Nothing else here is built.
+not a proposal — and it was wrong once already: the advertised buddy and
+occupancy limits are decoration, and the real ceiling is how long a re-key is
+allowed to take. Nothing else here is built.
 
 The organizing idea: **a group invite carries two separate consent questions,
 and a single room-type choice answers both.**
@@ -712,66 +713,72 @@ to advance or replace a room's key is exactly what that touches.
 
 ## 8. How big a room can actually be
 
-**61 members, and the limit is the buddy list, not the cryptography.**
+**Corrected 2026-07-21.** An earlier version of this section said the ceiling was
+61 members, taken from `maxItemsByClass[FeedbagClassIdBuddy]` in
+`foodgroup/feedbag.go`. **That number is advertised and never enforced**, and so
+is the room occupancy figure next to it. Both were read as limits when they are
+decoration. The corrected picture is below; the method failure is worth noting
+too, since reading a constant is not the same as checking whether anything
+consults it.
 
-Every key delivery — invites, rotations, chain views — rides the 1:1 E2EE
-channel, and that channel requires a connection. BENCoscar caps buddies at
-**61** (`foodgroup/feedbag.go:76`, `maxItemsByClass[FeedbagClassIdBuddy] = 61`).
-You cannot be connected to a 62nd person, so you cannot hand a key to one.
-
-That number is also the whole buddy list. A room of 61 is a room where you have
-no other contacts at all. Alongside a normal roster the practical ceiling is
-more like **twenty to forty**.
-
-Everything else has more headroom than that:
-
-| Limit | Value | Binding? |
+| Limit | Value | Real? |
 |---|---|---|
-| Buddies (feedbag) | **61** | **yes** — no connection, no key delivery |
-| Chat room occupancy | 100 (`state/chat.go:110`) | no |
-| Message rate | ~1/sec sustained, ~50 burst (rate class 3) | no — 60 sends is about a minute |
-| ICBM body | ~65 KB measured (512 advertised, not enforced) | no — a 60-name roster is ~1.4 KB sealed |
+| Buddies, advertised | 61 | **no** — built into `FeedbagRightsReply` and never consulted on insert. The server's own comment says the values "are not well understood but seem to make the AIM client happy". BENCchat never reads them. |
+| Room occupancy, advertised | 100 | **no** — a TLV in the room info block, never checked on join |
+| Feedbag on the wire | ~2,000 items | **yes, hard** — the whole feedbag ships in one `FeedbagReply`, FLAP payloads are `uint16`-prefixed, and nothing chunks |
+| Message rate | ~1/sec sustained, ~50 burst | **yes** — rate class 3, verified live |
 
-The occupancy number is worth noticing because it is *larger* than the buddy cap:
-**OSCAR will let more people into a room than anybody can give keys to.** A room
-can be full of people who cannot read it, and nothing in the protocol objects.
+So there is no buddy cap worth planning around, and **the ceiling is time rather
+than count**: how big a room can be is really how long anybody is willing to wait
+for it to re-key.
 
-### What per-sender chains change
+### The cost of a removal
 
-Not the ceiling — the **shape of the graph underneath it**.
+Lazy rotation, so only members who actually speak start a fresh chain:
 
-With one shared key, only the person rotating needs to be connected to everyone.
-A single well-connected member can hold a room together while the rest are
-strangers to each other.
+| Room | Speakers | Shared key | Per-sender chains | Chains, at ~1/sec |
+|---|---|---|---|---|
+| 200 | 10 | ~200 | ~1,990 | ~33 min |
+| 100 | 10 | ~100 | ~990 | ~17 min |
+| 50 | 8 | ~50 | ~390 | ~7 min |
+| 20 | 5 | ~20 | ~95 | under 2 min |
 
-With per-sender chains, **every member who speaks must be connected to every
-member**, because each of them distributes their own chain. The requirement goes
-from one hub to a fully-connected core, and in a room of thirty that is
-twenty-nine buddies spent on one room by every active participant, against a cap
-of sixty-one.
+A shared key costs one rotator's fan-out regardless of how many people talk.
+Chains cost roughly **one fan-out per active speaker**, so they are around an
+order of magnitude more expensive on removal — and it is a *trickle*, spread as
+each speaker's first message after the removal triggers their own rotation,
+rather than a single burst.
 
-Removal costs (lazy rotation, so only members who actually speak rotate):
+Somewhere between 100 and 200 members that stops being acceptable, and it is a
+judgement about tolerable latency rather than a wall the protocol imposes.
 
-| Room | Speakers | Messages | At ~1/sec |
-|---|---|---|---|
-| 61 | 10 | ~600 | ~10 min |
-| 30 | 8 | ~230 | ~4 min |
-| 10 | 5 | ~45 | under a minute |
+Naive rotation — every member re-keying rather than only speakers — is 200 x 199
+and about eleven hours. That is the reason lazy rotation is part of the design
+and not an optimisation to add afterwards.
 
-Workable at this scale, and only at this scale. Naive rotation — every member
-re-keying rather than only speakers — is 61 x 60 = ~3,700 messages, over an hour,
-which is why lazy rotation is part of the design rather than an optimisation to
-add later.
+### What per-sender chains really cost
+
+Not a hard limit; a **social** one. Key delivery still requires a mutual
+connection, because it rides the 1:1 E2EE channel and the consensual-connections
+gate is real and enforced.
+
+With one shared key, only the person rotating needs to be connected to everyone,
+so a single well-connected member can hold a room together while the rest are
+strangers to each other. With chains, every member who speaks distributes their
+own, so **every speaker must be connected to every member**. One hub becomes a
+fully-connected core.
+
+That is now a matter of how many buddies somebody is willing to keep rather than
+how many they are allowed — 199 buddies is a fifth of the feedbag wall and an
+unpleasant amount of UI, but it is permitted.
 
 ### Raising the ceiling needs a channel, not a ratchet
 
-The fix is not a better ratchet or a cleverer key schedule. It is that key
-delivery has to stop requiring a mutual connection.
-
-§2 already identified this for invites — a stranger invite travels the native
-chat-invite SNAC precisely because the E2EE path is gated — and the same argument
-applies to *every* key delivery, which §2 does not say. Until there is an ungated
-delivery channel, 61 is a hard wall and no amount of protocol design moves it.
+Unchanged by the correction, and the fix is still not a better ratchet: key
+delivery has to stop requiring a mutual connection. §2 already identified that
+for invites — a stranger invite travels the native chat-invite SNAC precisely
+because the E2EE path is gated — and the same argument applies to *every* key
+delivery, which §2 does not say.
 
 ---
 
