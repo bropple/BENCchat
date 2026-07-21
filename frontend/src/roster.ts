@@ -31,6 +31,11 @@ import { applyTone, toneable, toneVariants, onSkinToneChange, setSkinTonePref } 
 /** How long after the last keystroke we tell the other end we stopped typing. */
 const TYPING_IDLE_MS = 3000;
 
+/** The default buddy group (matches the Go DefaultGroupName). A lone group with
+ *  this name is redundant with the "Buddies" section header, so its sub-label is
+ *  hidden; any other group name is always shown. Compared case-insensitively. */
+const DEFAULT_GROUP_NAME = "buddies";
+
 export interface RosterHandle {
   destroy(): void;
 }
@@ -486,14 +491,19 @@ export function renderRoster(
       buddiesHTML += groups
         .map((g) => {
           const online = g.members.filter((b) => b.presence !== "offline").length;
-          // Only show a per-group sub-label when there's more than one group;
-          // a single default group would just repeat the "Buddies" header.
-          const sub = multiGroup
-            ? `<div class="roster__group-head roster__group-head--sub">
-                 <span class="benco-caption">${escapeHTML(g.name)}</span>
-                 <span class="benco-caption">${online}/${g.members.length}</span>
-               </div>`
-            : "";
+          // Show a per-group sub-label whenever the name carries information:
+          // more than one group, OR a single group that isn't the default one.
+          // Otherwise a lone default "Buddies" group would just repeat the header
+          // above it — but a lone CUSTOM group (e.g. after moving your only buddy)
+          // must show its name, or the move looks like it did nothing.
+          const isDefault = g.name.trim().toLowerCase() === DEFAULT_GROUP_NAME;
+          const sub =
+            multiGroup || !isDefault
+              ? `<div class="roster__group-head roster__group-head--sub">
+                   <span class="benco-caption">${escapeHTML(g.name)}</span>
+                   <span class="benco-caption">${online}/${g.members.length}</span>
+                 </div>`
+              : "";
           return `<div class="roster__group">${sub}${g.members.map(buddyRow).join("")}</div>`;
         })
         .join("");
