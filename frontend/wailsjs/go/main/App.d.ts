@@ -7,6 +7,8 @@ export function AcceptRoomInvite(arg1:string):Promise<string>;
 
 export function AddBuddy(arg1:string,arg2:string):Promise<string>;
 
+export function ApproveConnectionRequest(arg1:string):Promise<string>;
+
 export function AutoSignIn():Promise<void>;
 
 export function BeginIdentitySetup():Promise<main.RecoveryKeyInfo>;
@@ -15,6 +17,8 @@ export function BeginRecoveryKeyRotation(arg1:string):Promise<main.RecoveryKeyIn
 
 export function BlockBuddy(arg1:string):Promise<string>;
 
+export function BlockedUsers():Promise<Array<string>>;
+
 export function CancelIdentitySetup():Promise<void>;
 
 export function CancelRecoveryKeyRotation():Promise<void>;
@@ -22,6 +26,8 @@ export function CancelRecoveryKeyRotation():Promise<void>;
 export function ChangeEmail(arg1:string):Promise<string>;
 
 export function ChangePassword(arg1:string,arg2:string):Promise<string>;
+
+export function ClearConversation(arg1:string):Promise<void>;
 
 export function ClearCustomSound(arg1:string):Promise<string>;
 
@@ -38,6 +44,8 @@ export function ConfirmRecoveryKeyRotation():Promise<string>;
 export function ConversationEncrypted(arg1:string):Promise<boolean>;
 
 export function CreateEncryptedRoom(arg1:string):Promise<string>;
+
+export function DeclineConnectionRequest(arg1:string):Promise<string>;
 
 export function DeclineRoomInvite(arg1:string):Promise<void>;
 
@@ -79,11 +87,17 @@ export function LinkDevice(arg1:string):Promise<string>;
 
 export function ListDevices():Promise<Array<main.DeviceInfo>>;
 
+export function LookupProfile(arg1:string):Promise<main.ProfilePreview>;
+
 export function MarkRead(arg1:string):Promise<void>;
 
 export function MarkVerified(arg1:string):Promise<string>;
 
 export function MinimizeWindow():Promise<void>;
+
+export function MoveBuddy(arg1:string,arg2:string):Promise<string>;
+
+export function PendingConnectionRequests():Promise<Array<main.ConnectionRequestInfo>>;
 
 export function PendingRoomInvites():Promise<Array<main.RoomInviteInfo>>;
 
@@ -96,6 +110,8 @@ export function RemoveBuddy(arg1:string):Promise<string>;
 export function RemoveDevice(arg1:string,arg2:string):Promise<string>;
 
 export function RenameBuddy(arg1:string,arg2:string):Promise<string>;
+
+export function ReopenConversation(arg1:string):Promise<void>;
 
 export function RequestUserInfo(arg1:string):Promise<void>;
 
@@ -126,6 +142,8 @@ export function SetHistoryEnabled(arg1:boolean):Promise<string>;
 export function SetHistoryRetention(arg1:number):Promise<string>;
 
 export function SetProfile(arg1:string):Promise<string>;
+
+export function SetSkinTone(arg1:number):Promise<string>;
 
 export function SetSoundEnabled(arg1:boolean):Promise<string>;
 

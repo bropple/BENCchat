@@ -38,6 +38,20 @@ export namespace e2ee {
 
 export namespace main {
 	
+	export class ConnectionRequestInfo {
+	    screenName: string;
+	    reason: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ConnectionRequestInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.screenName = source["screenName"];
+	        this.reason = source["reason"];
+	    }
+	}
 	export class DeviceInfo {
 	    key: string;
 	    fingerprint: string;
@@ -84,6 +98,7 @@ export namespace main {
 	    e2eeEnabled: boolean;
 	    profile: string;
 	    customFrame: boolean;
+	    skinTone: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Preferences(source);
@@ -100,6 +115,7 @@ export namespace main {
 	        this.e2eeEnabled = source["e2eeEnabled"];
 	        this.profile = source["profile"];
 	        this.customFrame = source["customFrame"];
+	        this.skinTone = source["skinTone"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -119,6 +135,22 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+	export class ProfilePreview {
+	    screenName: string;
+	    profile: string;
+	    away: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProfilePreview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.screenName = source["screenName"];
+	        this.profile = source["profile"];
+	        this.away = source["away"];
+	    }
 	}
 	export class RecoveryKeyInfo {
 	    recoveryKey: string;
@@ -258,6 +290,7 @@ export namespace state {
 	    awayMessage?: string;
 	    profile?: string;
 	    blocked?: boolean;
+	    pending?: boolean;
 	    iconHash?: string;
 	    e2eeCapable?: boolean;
 	    capsKnown?: boolean;
@@ -280,6 +313,7 @@ export namespace state {
 	        this.awayMessage = source["awayMessage"];
 	        this.profile = source["profile"];
 	        this.blocked = source["blocked"];
+	        this.pending = source["pending"];
 	        this.iconHash = source["iconHash"];
 	        this.e2eeCapable = source["e2eeCapable"];
 	        this.capsKnown = source["capsKnown"];
@@ -357,6 +391,7 @@ export namespace state {
 	    screenName: string;
 	    messages: Message[];
 	    unread: number;
+	    hidden?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Conversation(source);
@@ -368,6 +403,7 @@ export namespace state {
 	        this.screenName = source["screenName"];
 	        this.messages = this.convertValues(source["messages"], Message);
 	        this.unread = source["unread"];
+	        this.hidden = source["hidden"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

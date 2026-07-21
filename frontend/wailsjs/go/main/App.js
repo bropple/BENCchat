@@ -10,6 +10,10 @@ export function AddBuddy(arg1, arg2) {
   return window['go']['main']['App']['AddBuddy'](arg1, arg2);
 }
 
+export function ApproveConnectionRequest(arg1) {
+  return window['go']['main']['App']['ApproveConnectionRequest'](arg1);
+}
+
 export function AutoSignIn() {
   return window['go']['main']['App']['AutoSignIn']();
 }
@@ -26,6 +30,10 @@ export function BlockBuddy(arg1) {
   return window['go']['main']['App']['BlockBuddy'](arg1);
 }
 
+export function BlockedUsers() {
+  return window['go']['main']['App']['BlockedUsers']();
+}
+
 export function CancelIdentitySetup() {
   return window['go']['main']['App']['CancelIdentitySetup']();
 }
@@ -40,6 +48,10 @@ export function ChangeEmail(arg1) {
 
 export function ChangePassword(arg1, arg2) {
   return window['go']['main']['App']['ChangePassword'](arg1, arg2);
+}
+
+export function ClearConversation(arg1) {
+  return window['go']['main']['App']['ClearConversation'](arg1);
 }
 
 export function ClearCustomSound(arg1) {
@@ -72,6 +84,10 @@ export function ConversationEncrypted(arg1) {
 
 export function CreateEncryptedRoom(arg1) {
   return window['go']['main']['App']['CreateEncryptedRoom'](arg1);
+}
+
+export function DeclineConnectionRequest(arg1) {
+  return window['go']['main']['App']['DeclineConnectionRequest'](arg1);
 }
 
 export function DeclineRoomInvite(arg1) {
@@ -154,6 +170,10 @@ export function ListDevices() {
   return window['go']['main']['App']['ListDevices']();
 }
 
+export function LookupProfile(arg1) {
+  return window['go']['main']['App']['LookupProfile'](arg1);
+}
+
 export function MarkRead(arg1) {
   return window['go']['main']['App']['MarkRead'](arg1);
 }
@@ -164,6 +184,14 @@ export function MarkVerified(arg1) {
 
 export function MinimizeWindow() {
   return window['go']['main']['App']['MinimizeWindow']();
+}
+
+export function MoveBuddy(arg1, arg2) {
+  return window['go']['main']['App']['MoveBuddy'](arg1, arg2);
+}
+
+export function PendingConnectionRequests() {
+  return window['go']['main']['App']['PendingConnectionRequests']();
 }
 
 export function PendingRoomInvites() {
@@ -188,6 +216,10 @@ export function RemoveDevice(arg1, arg2) {
 
 export function RenameBuddy(arg1, arg2) {
   return window['go']['main']['App']['RenameBuddy'](arg1, arg2);
+}
+
+export function ReopenConversation(arg1) {
+  return window['go']['main']['App']['ReopenConversation'](arg1);
 }
 
 export function RequestUserInfo(arg1) {
@@ -248,6 +280,10 @@ export function SetHistoryRetention(arg1) {
 
 export function SetProfile(arg1) {
   return window['go']['main']['App']['SetProfile'](arg1);
+}
+
+export function SetSkinTone(arg1) {
+  return window['go']['main']['App']['SetSkinTone'](arg1);
 }
 
 export function SetSoundEnabled(arg1) {
