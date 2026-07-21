@@ -260,6 +260,44 @@ name. Note that a kick asks the server to enforce something it *already observes
   that actually closes the metadata gap, and it is purely a server-side join
   check on top of everything a kick already did.
 
+**A kick is an event; a ban is state.** That is the whole difference and it is
+worth holding onto, because it decides what gets stored where. A kick happens and
+is over — its effect is instantaneous and there is nothing left to preserve
+afterwards, so it belongs in a log of things that occurred. A ban is a standing
+condition the server consults on every join attempt, so it belongs in a list of
+things that are currently true.
+
+### Timed exclusion is a ban with an expiry, not a third thing
+
+Wanting somebody gone for an hour rather than forever is a real need, and the
+temptation is to build a "timed kick" alongside the other two. Don't: a kick is
+instantaneous, so there is no such thing as a kick that lasts an hour. What that
+actually describes is **a ban that expires**, and the ban record already carries
+who set it, at what tier, and when. Adding *until when* is one nullable column
+and a time comparison in the join check that already exists.
+
+So the spectrum is one axis with one mechanism behind it:
+
+| | Duration | Who may set it |
+|---|---|---|
+| Kick | none — evicted, may return at once | mod, senior mod, owner |
+| Timed ban | bounded, expires on its own | senior mod, owner |
+| Ban | until lifted | senior mod, owner |
+
+Mods still do not touch bans, exactly as before: a mod evicts, and the person may
+come straight back. Everything with a duration is a ban and needs ban authority,
+which keeps the tier rule unchanged rather than introducing a second axis of "how
+long may each tier exclude somebody for".
+
+If mods ever need more teeth than that, the smaller change is to let them set a
+*capped* duration rather than to give them the ban power outright — but that adds
+a cap to configure and argue about, and it is not needed yet.
+
+An expired ban is not a lifted one. It stops blocking joins and stays in the log
+with its original author and tier, because "banned for a day last March" is
+history somebody may need, and silently vanishing records make a moderation log
+worth less than no log at all.
+
 Two operations, and the UI must not blur them: "removed" and "cannot come back"
 are different promises, and only one of them is enforceable without the server.
 
@@ -361,6 +399,13 @@ Two things about that reason worth deciding deliberately rather than discovering
   attributable and unmistakably a moderation notice rather than something that
   reads like a DM, and it should respect blocking the same way anything else
   does. Optional, and blank is a perfectly good answer.
+
+**The reason stays with the kick and cannot be withdrawn.** It has already been
+delivered, so unsending it was never on the table, and the log entry is the
+record of what was actually said. A mod who typed something regrettable has said
+it; letting them quietly rewrite the log afterwards would leave the person who
+received it holding a message the room's own history denies. An audit trail that
+can be edited by the people it audits is not one.
 
 ### A ban manager, per room
 
@@ -535,7 +580,13 @@ to advance or replace a room's key is exactly what that touches.
   optional reason.
 - **Does the kick log survive a reform?** Bans do, because they are authority
   state. A kick log is operational history and the argument is weaker either way.
-- **Can a kick reason be edited or withdrawn** once sent? It has already been
-  delivered, so no — but the log entry is what everyone else sees afterwards, and
-  a mod who typed something regrettable will want to. Probably: the delivered
-  notice stands, the log keeps what was sent.
+- ~~**Can a kick reason be edited or withdrawn**~~ Answered in §7: no. The notice
+  is delivered and the log keeps what was sent, because an audit trail editable
+  by the people it audits is not one.
+- **How long may a timed ban run** before it should just be a permanent one? No
+  technical limit is needed, but an interface offering "1 hour / 1 day / 1 week /
+  forever" makes better decisions likely than a free-form duration box.
+- **Is the room told when somebody is kicked or banned?** The person on the
+  receiving end is. The other members currently learn nothing, which is either
+  discretion or opacity depending on the room — and §3's open room is built on
+  membership changes being visible.
