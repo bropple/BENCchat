@@ -772,10 +772,67 @@ That is now a matter of how many buddies somebody is willing to keep rather than
 how many they are allowed — 199 buddies is a fifth of the feedbag wall and an
 unpleasant amount of UI, but it is permitted.
 
+### Making it faster: broadcast the chain, do not fan it out
+
+The cost above is entirely an artefact of *how* keys are delivered, not of what
+is being delivered. Every chain view goes out as its own 1:1 message, so a
+rotation costs one message per member and the rate limiter turns that into
+minutes. But a room is a broadcast medium and we are not using it.
+
+**Put the new chain view in the room as a single message, sealed once per
+recipient.** One blob, one send, everybody who has a slot opens theirs. The
+member being removed receives it like everyone else and can open nothing, which
+is exactly the property a rotation needs.
+
+The chat channel can carry it. `ChatRoomTLVMaxMsgLen` advertises 1024 and — like
+the buddy and occupancy figures above — **nothing enforces it**, so the real
+bound is the FLAP payload at 65,535 bytes. A slot is a 24-byte nonce over a
+sealed 36-byte chain view, 76 bytes, and the body is base64 like every other room
+envelope:
+
+    65,000 usable x 3/4 = ~48,700 raw = ~640 device slots per message
+
+That is ~320 members at two devices each, ~128 at five. Past that it chunks into
+a handful of messages rather than hundreds.
+
+| Room | Speakers | Fan-out today | Broadcast | At ~1/sec |
+|---|---|---|---|---|
+| 200 | 10 | ~1,990 msgs, ~33 min | ~10 msgs | ~10 sec |
+| 100 | 10 | ~990 msgs, ~17 min | ~10 msgs | ~10 sec |
+| 50 | 8 | ~390 msgs, ~7 min | ~8 msgs | ~8 sec |
+
+Roughly two orders of magnitude, and it applies to **adds as well as removals** —
+including the roster update every invite currently sends to every member, which
+becomes one message instead of N.
+
+Constraints this has to respect, all of them already solved once for the room
+envelope: the server strips custom TLVs from chat messages, so this rides in-band
+in the message text; and it runs an HTML tokenizer and a `^//roll` regex over
+that text, so the body is an ESC-prefixed base64 blob that can neither match the
+pattern nor be mistaken for markup.
+
+Two details worth deciding rather than discovering:
+
+- **Label the slots.** Unlabelled, a recipient trial-opens up to 640 boxes to
+  find theirs — tolerable but wasteful. An 8-byte device hint per slot makes it a
+  lookup. The usual objection to labelling is that it leaks the recipient set,
+  which does not apply here: this is a room, and the server already knows who is
+  in it.
+- **A pull path for whoever was away.** A broadcast only reaches people who are
+  present, so anyone offline comes back to messages under a chain they do not
+  have. That is already a state the client renders ("sent with a key you don't
+  have"); it needs to become actionable — ask the sender 1:1 for the chain view.
+  Demand-driven, so only people actually reading pay for it.
+
+What the server learns from a broadcast: that a rotation happened, and the slot
+count. The slot count is roughly the room's device population, which it can
+already observe by watching who is connected. Nothing is added.
+
 ### Raising the ceiling needs a channel, not a ratchet
 
-Unchanged by the correction, and the fix is still not a better ratchet: key
-delivery has to stop requiring a mutual connection. §2 already identified that
+Broadcasting fixes the speed. It does not fix reach: an in-room broadcast only
+reaches members, so the FIRST handover to somebody still needs a 1:1 channel, and
+that still requires a mutual connection. §2 already identified that
 for invites — a stranger invite travels the native chat-invite SNAC precisely
 because the E2EE path is gated — and the same argument applies to *every* key
 delivery, which §2 does not say.
