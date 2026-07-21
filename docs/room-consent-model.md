@@ -161,15 +161,15 @@ open is flagged there.
 
 ### Three roles: owner, senior mod, mod
 
-| | Promote / demote | Ban | Lift a ban | Kick | Removable by |
-|---|---|---|---|---|---|
-| **Owner** | yes | any duration | any, including a senior mod's | yes | nobody |
-| **Senior mod** | no | any duration | any except one the owner set | yes | owner only |
-| **Mod** | no | temp only, ≤ 1 hour | only ones set at mod tier | yes | owner only |
-| **Member** | no | no | no | no | owner, senior mod, mod |
+| | Promote / demote | Timeout | Kick | Ban | Lift | Removable by |
+|---|---|---|---|---|---|---|
+| **Owner** | yes | ≤ 3 days | yes | any duration | anything | nobody |
+| **Senior mod** | no | ≤ 3 days | yes | any duration | all but the owner's | owner only |
+| **Mod** | no | ≤ 1 hour | yes | no | only mod-tier | owner only |
+| **Member** | no | no | no | no | no | owner, senior mod, mod |
 
-Duration is where the mod boundary sits rather than kind — see the temp ban
-section below for why, and for the ceilings.
+Mods get the two recoverable tools and neither of the door-locking ones. See the
+sections below for what each actually does — they differ in more than severity.
 
 Two invariants do all the work here, and they are worth stating separately from
 the table because everything else follows from them:
@@ -267,47 +267,93 @@ afterwards, so it belongs in a log of things that occurred. A ban is a standing
 condition the server consults on every join attempt, so it belongs in a list of
 things that are currently true.
 
-### Temp bans: a ban with an expiry, not a third mechanism
+### Timeout: sitting out, without leaving
 
-Wanting somebody gone for an hour rather than forever is a real need, and the
-temptation is to build a "timed kick" alongside the other two. Don't: a kick is
-instantaneous, so there is no such thing as a kick that lasts an hour. What that
-actually describes is **a ban that expires**, and the ban record already carries
-who set it, at what tier, and when. Adding *until when* is one nullable column
-and a time comparison in the join check that already exists.
+A "temp ban" was reaching for something a ban is the wrong shape for. Wanting
+somebody to sit out an argument for ten minutes is not wanting them *removed* —
+they are still one of the group, and treating a cooling-off period as a short
+expulsion gets both the social meaning and the mechanics wrong.
 
-So there is one axis, one mechanism, and the tier gates **how long**:
+**A timeout keeps you a member and keeps you your key. The server simply will
+not connect you to the room until it expires.**
 
-| | Duration | Mod | Senior mod | Owner |
-|---|---|---|---|---|
-| **Kick** | none — evicted, may return at once | yes | yes | yes |
-| **Temp ban** | up to 1 hour | yes | yes | yes |
-| **Temp ban** | up to 3 days | no | yes | yes |
-| **Perma ban** | until lifted | no | yes | yes |
+That single decision is what makes it the right tool, because of what it avoids:
 
-**Three days is the ceiling for any temp ban.** Past that the honest description
-is "banned", and dressing a month-long exclusion up as temporary helps nobody —
-least of all the person on the receiving end, who is better served by being told
-plainly that they are out until somebody lifts it.
+- **No rotation.** Kicks and bans rotate the key, so the room re-keys and every
+  member's client redistributes. Doing that because one person got ten minutes
+  punishes everybody in the room for one person's behaviour, and it does it
+  repeatedly — timeouts are the *common* moderation action, the one that should
+  be cheap.
+- **No re-invitation.** Reinstatement is the absence of an obstacle rather than
+  an act somebody has to remember to perform. Nobody has to be online at 15:42 to
+  let you back in.
+- **No membership change.** You never left, so there is nothing to restore. The
+  member list shows you, marked as timed out.
 
-**One hour is the ceiling for a mod.** Long enough to cool a room down mid-
-argument, which is what the power is for; short enough that a mod acting badly or
-mistakenly costs somebody an afternoon rather than a week. Anything more
-consequential wants a tier that can also undo it.
+**It is a moderation tool, not a confidentiality boundary, and must be described
+as one.** The person keeps the room key throughout; what stops them reading is
+the server declining to relay to them, so anyone who obtained the ciphertext
+another way could still read it. That is the same honesty §5 demands elsewhere —
+a timeout is enforcement, and enforcement is the server's, so it is exactly as
+strong as the server and no stronger. Anybody who needs a cryptographic boundary
+wants a kick or a ban, which spend the key.
 
-This revises the earlier "mods do not touch bans at all". The rule that replaces
-it is the same one as everywhere else — **the more irreversible the act, the
-higher the tier** — applied to duration rather than to kind.
+### The three tools, and what each actually does
 
-**Lifting follows the rule already in place** with no special case: a ban may be
-overridden by an equal or higher tier than set it, so a mod-tier temp ban may be
-lifted at mod tier, including by the mod who set it after a misfire. Senior mods
-and the owner reach everything below them, and nothing reaches the owner.
+| | Membership | Their key | Rotation | Returns | Mod | Senior mod | Owner |
+|---|---|---|---|---|---|---|---|
+| **Timeout** | keeps it | keeps it | no | on expiry, by itself | ✓ | ✓ | ✓ |
+| **Kick** | removed | spent | yes | when re-invited | ✓ | ✓ | ✓ |
+| **Ban** (temp or perma) | removed | spent | yes | when lifted or expired, then re-invited | — | ✓ | ✓ |
 
-An expired ban is not a lifted one. It stops blocking joins and stays in the log
-with its original author, tier and duration, because "banned for a day last
-March" is history somebody may need, and silently vanishing records make a
-moderation log worth less than no log at all.
+This restores the cleaner rule the temp-ban detour cost us: **mods do not touch
+bans.** A mod may time somebody out and may kick them — both recoverable, neither
+locking a door — while everything that refuses a rejoin belongs to a tier that
+can also undo it.
+
+Durations. A mod's timeout caps at **one hour**: long enough to cool a room mid-
+argument, which is what it is for, short enough that a mod acting badly or by
+mistake costs somebody an afternoon. Senior mods and the owner cap at **three
+days**, because past that the honest word is "banned" and dressing a fortnight up
+as temporary serves nobody — least of all the person on the receiving end, who is
+better told plainly they are out until somebody lifts it.
+
+Lifting needs no new rule: the existing one — a state may be overridden by an
+equal or higher tier than set it — covers timeouts as it covers bans, so a mod
+can undo their own misfire and the owner can undo anything.
+
+An expired timeout or ban is not a lifted one. It stops taking effect and stays
+in the log with its original author, tier and duration, because "timed out for an
+hour last March" is history somebody may need, and records that silently vanish
+make a moderation log worth less than no log at all.
+
+### What a timed-out room looks like
+
+The question a design like this lives or dies on, because "you are excluded" and
+"the app is broken" look identical if nobody thought about it.
+
+- **The room stays in the list.** Removing it would say *you were thrown out*,
+  which is the wrong message and the wrong tool. It renders muted, with a clock
+  rather than the usual encryption badge, and a plain line of status: **Timed out
+  — 42 minutes left**, counting down.
+- **Your existing history stays readable.** It is on your disk and it is yours;
+  losing it would be both impossible to enforce and wrong to attempt. You can
+  open the room and read everything up to the moment you were timed out.
+- **The composer is disabled**, with the reason on it rather than a greyed box
+  that looks like a bug. Not silently swallowing what somebody types is the whole
+  point — the failure mode to avoid is a person writing a paragraph into a dead
+  field.
+- **Nothing new arrives**, including the participant list and typing indicators.
+  A timeout is stronger than the equivalent elsewhere: you do not sit watching a
+  conversation you cannot join, because the server has stopped relaying to you.
+- **On expiry it simply reactivates** and catch-up fills the gap from a member
+  who was present, which is the mechanism rooms already use for anyone who was
+  away. Nothing said during the timeout is lost — you read it when you return,
+  which is the difference between sitting out and being erased.
+
+The room, meanwhile, sees the notice described below: **X was timed out for an
+hour** — so the silence has a stated reason rather than looking like somebody
+storming off.
 
 Two operations, and the UI must not blur them: "removed" and "cannot come back"
 are different promises, and only one of them is enforceable without the server.
@@ -425,8 +471,9 @@ Only the person on the receiving end learned anything, which sits badly against
 vanishing mid-conversation with no explanation is the opposite. So the room sees
 it as well:
 
+> **X was timed out for 1 hour**
 > **X was kicked**
-> **X was banned for 2 hours**
+> **X was banned for 2 days**
 > **X was banned permanently**
 
 Whether the reason is shown to the room as well as to the person is a separate
@@ -639,8 +686,9 @@ to advance or replace a room's key is exactly what that touches.
 - ~~**Can a kick reason be edited or withdrawn**~~ Answered in §7: no. The notice
   is delivered and the log keeps what was sent, because an audit trail editable
   by the people it audits is not one.
-- ~~**How long may a timed ban run**~~ Answered in §7: temp bans cap at 3 days,
-  and at 1 hour for a mod. Past 3 days the honest word is "banned".
+- ~~**How long may a timed ban run**~~ Answered in §7, and the shape changed: what
+  a "temp ban" was reaching for is a TIMEOUT, which keeps membership and the key
+  and does not rotate. Timeouts cap at 3 days, and at 1 hour for a mod.
 - ~~**Is the room told when somebody is kicked or banned?**~~ Answered in §7: yes,
   posted by the acting moderator's client as an encrypted, signed room message —
   never injected by the server, which is the capability the plaintext-injection
@@ -648,8 +696,10 @@ to advance or replace a room's key is exactly what that touches.
 - **Is the kick reason shown to the ROOM, or only to the person kicked?** A reason
   written for one recipient is not automatically fit for an audience. Probably the
   moderator's choice at the time, defaulting to private.
-- **What happens to a temp ban when the room is reformed?** Bans carry over, but a
-  1-hour ban set before a reform that takes a minute is a different thing from a
-  perma ban carried deliberately. Possibly they should simply expire on schedule
-  regardless, which needs the reformed room to inherit the clock and not just the
-  entry.
+- **What happens to a timeout when the room is reformed?** A reform re-keys and
+  re-invites, which is exactly what a timeout avoids doing — so a timed-out member
+  either gets carried across (and the timeout must survive) or quietly gains
+  access early. The reformed room needs to inherit the clock, not just the entry.
+- **Can somebody be timed out repeatedly to fake a ban?** Four consecutive
+  one-hour timeouts is a mod imposing half a day, which the tier cap exists to
+  prevent. The log makes it visible; whether anything should stop it is open.
