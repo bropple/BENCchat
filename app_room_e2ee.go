@@ -446,27 +446,10 @@ func (a *App) DeclineRoomInvite(roomName string) {
 // reading everything said afterwards. Messages already sent stay readable to
 // everyone who had the old key — rotation bounds the future, not the past.
 func (a *App) RotateRoomKey(cookie string, drop []string) string {
-	if !a.client.RoomEncrypted(cookie) {
-		return "This room isn't encrypted."
+	failed, errMsg := a.rekeyRoom(cookie, drop)
+	if errMsg != "" {
+		return errMsg
 	}
-	room, ok := a.store.Room(cookie)
-	if !ok {
-		return "You're not in that room."
-	}
-	dropped := map[string]bool{}
-	for _, d := range drop {
-		dropped[state.NormalizeScreenName(d)] = true
-		a.members.remove(cookie, d)
-	}
-
-	key, err := e2ee.GenerateRoomKey()
-	if err != nil {
-		return err.Error()
-	}
-	a.client.SetRoomKey(cookie, key)
-	a.saveRoomKeys(cookie)
-
-	failed := a.distributeRoomKey(cookie, room.Name, key, dropped)
 	if len(failed) > 0 {
 		// Say so rather than leaving people silently unable to read: they need a
 		// re-invite once they're reachable again.
@@ -476,6 +459,89 @@ func (a *App) RotateRoomKey(cookie string, drop []string) string {
 	}
 	a.store.Notify(state.NoticeInfo, "Room key rotated.")
 	return ""
+}
+
+// rekeyRoom mints a new group key and distributes it, dropping anyone named.
+//
+// Says nothing to the user. A rotation somebody asked for and one triggered by a
+// device disappearing elsewhere in the room want very different words — and the
+// second kind can affect several rooms at once, where a notice each would be
+// noise rather than information.
+func (a *App) rekeyRoom(cookie string, drop []string) (failed []string, errMsg string) {
+	if !a.client.RoomEncrypted(cookie) {
+		return nil, "This room isn't encrypted."
+	}
+	room, ok := a.store.Room(cookie)
+	if !ok {
+		return nil, "You're not in that room."
+	}
+	dropped := map[string]bool{}
+	for _, d := range drop {
+		dropped[state.NormalizeScreenName(d)] = true
+		a.members.remove(cookie, d)
+	}
+
+	key, err := e2ee.GenerateRoomKey()
+	if err != nil {
+		return nil, err.Error()
+	}
+	a.client.SetRoomKey(cookie, key)
+	a.saveRoomKeys(cookie)
+
+	return a.distributeRoomKey(cookie, room.Name, key, dropped), ""
+}
+
+// rotateRoomsAfterDeviceRemoval re-keys the encrypted rooms a removed device
+// could still read.
+//
+// Room membership is by SCREEN NAME, and the key is sealed to every device an
+// account publishes — so removing a device from an account takes nothing back
+// from it. It keeps every room key it ever held, and OSCAR has no way to stop it
+// rejoining a room whose name it knows. Rotation is the only thing that bounds
+// what it reads next, which is the same reason removing a member triggers one.
+//
+// peer is the account that lost a device, or "" when it was ours — in which case
+// every encrypted room we are in is affected, since our own removed device holds
+// all of their keys. Bounds the future, not the past.
+func (a *App) rotateRoomsAfterDeviceRemoval(peer string) {
+	var done, failed []string
+	for _, r := range a.store.Rooms() {
+		if !r.Joined || !a.client.RoomEncrypted(r.Cookie) {
+			continue
+		}
+		if peer != "" && !a.isRoomMember(r.Cookie, peer) {
+			continue
+		}
+		unreachable, errMsg := a.rekeyRoom(r.Cookie, nil)
+		if errMsg != "" {
+			slog.Default().Warn("could not re-key a room after a device removal",
+				"room", r.Name, "peer", peer, "err", errMsg)
+			failed = append(failed, r.Name)
+			continue
+		}
+		if len(unreachable) > 0 {
+			slog.Default().Warn("re-keyed a room but could not reach everyone",
+				"room", r.Name, "unreachable", unreachable)
+		}
+		done = append(done, r.Name)
+	}
+	if len(done) == 0 && len(failed) == 0 {
+		return
+	}
+
+	who := "You removed a device"
+	if peer != "" {
+		who = peer + " removed a device"
+	}
+	if len(done) > 0 {
+		a.store.Notify(state.NoticeInfo, who+", so "+strings.Join(done, ", ")+
+			" got a new key — the removed device can't read what's said from now on. "+
+			"What it already received stays readable to it.")
+	}
+	if len(failed) > 0 {
+		a.store.Notify(state.NoticeWarn, who+", but "+strings.Join(failed, ", ")+
+			" could not be re-keyed. Rotate those rooms by hand.")
+	}
 }
 
 // ReformRoom is the closest thing to removing someone: OSCAR has no kick, so

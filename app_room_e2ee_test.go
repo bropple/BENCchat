@@ -306,3 +306,100 @@ func TestRosterOnTheWireIncludesUs(t *testing.T) {
 		t.Errorf("roster = %v, want alice,bob,carol", roster)
 	}
 }
+
+// TestRemovingAMemberDropsThemFromTheRoster is R3's backend half: the drop list
+// has always been supported, and until now the UI never passed one.
+func TestRemovingAMemberDropsThemFromTheRoster(t *testing.T) {
+	a := rosterTestApp(t, "me")
+	key, err := e2ee.GenerateRoomKey()
+	if err != nil {
+		t.Fatalf("GenerateRoomKey: %v", err)
+	}
+	a.client.SetRoomKey("room-1", key)
+	a.members.setAll("room-1", []string{"alice", "bob"}, "me")
+
+	a.RotateRoomKey("room-1", []string{"bob"})
+
+	if got := sortedMembers(a, "room-1"); got != "alice" {
+		t.Errorf("members = %q, want %q", got, "alice")
+	}
+	cur, ok := a.client.RoomKey("room-1")
+	if !ok || cur.ID() == key.ID() {
+		t.Error("removing a member did not rotate the key, so they can still read")
+	}
+	// The roster that goes to the people who remain must not name the removed
+	// person, or their next rotation would invite them straight back in.
+	for _, r := range a.roomRoster("room-1") {
+		if r == "bob" {
+			t.Errorf("a removed member is still on the outgoing roster: %v", a.roomRoster("room-1"))
+		}
+	}
+}
+
+// TestDeviceRemovalRekeysOnlyAffectedRooms is K6.
+//
+// A room key is sealed to every device an account publishes, so dropping one
+// device from a manifest takes nothing back — it keeps every room key it held,
+// and OSCAR lets it rejoin any room whose name it knows. Rooms it could read get
+// a new key; rooms it was never in are left alone.
+func TestDeviceRemovalRekeysOnlyAffectedRooms(t *testing.T) {
+	store := state.NewStore()
+	a := &App{store: store, client: client.New(store, nil)}
+	a.cfg.LastScreenName = "me"
+
+	store.UpsertRoom("room-a", "alpha")
+	store.SetRoomJoined("room-a", true)
+	store.UpsertRoom("room-b", "beta")
+	store.SetRoomJoined("room-b", true)
+
+	keyA, _ := e2ee.GenerateRoomKey()
+	keyB, _ := e2ee.GenerateRoomKey()
+	a.client.SetRoomKey("room-a", keyA)
+	a.client.SetRoomKey("room-b", keyB)
+	a.members.add("room-a", "bob")
+	a.members.add("room-b", "carol")
+
+	a.rotateRoomsAfterDeviceRemoval("bob")
+
+	if got, ok := a.client.RoomKey("room-a"); !ok || got.ID() == keyA.ID() {
+		t.Error("a room the removed device could read was not re-keyed")
+	}
+	if got, ok := a.client.RoomKey("room-b"); !ok || got.ID() != keyB.ID() {
+		t.Error("a room the removed device was never in was re-keyed anyway")
+	}
+}
+
+// TestOwnDeviceRemovalRekeysEveryRoom: our own removed device held the keys to
+// every encrypted room we are in, so all of them are affected.
+func TestOwnDeviceRemovalRekeysEveryRoom(t *testing.T) {
+	store := state.NewStore()
+	a := &App{store: store, client: client.New(store, nil)}
+	a.cfg.LastScreenName = "me"
+
+	store.UpsertRoom("room-a", "alpha")
+	store.SetRoomJoined("room-a", true)
+	store.UpsertRoom("room-b", "beta")
+	store.SetRoomJoined("room-b", true)
+	// A room we are in but which is NOT encrypted has no key to rotate.
+	store.UpsertRoom("room-c", "plain")
+	store.SetRoomJoined("room-c", true)
+
+	keyA, _ := e2ee.GenerateRoomKey()
+	keyB, _ := e2ee.GenerateRoomKey()
+	a.client.SetRoomKey("room-a", keyA)
+	a.client.SetRoomKey("room-b", keyB)
+	a.members.add("room-a", "bob")
+
+	a.rotateRoomsAfterDeviceRemoval("")
+
+	if got, _ := a.client.RoomKey("room-a"); got.ID() == keyA.ID() {
+		t.Error("room-a was not re-keyed after our own device was removed")
+	}
+	// room-b has no other members, but our removed device still held its key.
+	if got, _ := a.client.RoomKey("room-b"); got.ID() == keyB.ID() {
+		t.Error("a room with no other members was skipped, but the removed device held its key")
+	}
+	if a.client.RoomEncrypted("room-c") {
+		t.Error("an unencrypted room was given a key")
+	}
+}

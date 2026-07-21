@@ -195,9 +195,18 @@ func (a *App) notePeerKey(screenName string, keys, _ [][32]byte) {
 		a.store.Notify(state.NoticeInfo, screenName+" added another device. Messages to them "+
 			"are now encrypted to all of their devices. Your safety number is unchanged — it "+
 			"follows their account, not their machines.")
+		return
 	}
-	// A device that disappeared is a removal the peer signed, which is a normal
-	// operation now rather than something to raise an eyebrow at.
+
+	// A device disappeared. For 1:1 that is a removal the peer signed and needs
+	// no eyebrow — but their ROOM keys are a different matter. A room key is
+	// sealed to every device an account publishes, so the removed one still holds
+	// every room key it was ever given, and OSCAR will happily let it rejoin a
+	// room whose name it knows. Re-key the rooms it could still read.
+	//
+	// Off this goroutine: this runs on the client's read loop, and re-keying
+	// makes a send per member per room.
+	go a.rotateRoomsAfterDeviceRemoval(screenName)
 }
 
 // wireProfile is the profile as sent to the server: the user's bio, and nothing

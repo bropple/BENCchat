@@ -616,6 +616,12 @@ func (a *App) RemoveDevice(keyB64, recoveryKey string) string {
 	a.store.Notify(state.NoticeInfo, fmt.Sprintf(
 		"Device %s removed. It can no longer read messages sent to this account.",
 		e2ee.Fingerprint(target)))
+
+	// That notice is true of 1:1 and false of rooms until this runs. Dropping a
+	// device from the manifest stops peers ENCRYPTING to it; it takes nothing
+	// back, and the removed device still holds every room key it was given. Ours
+	// was in all of our encrypted rooms, so all of them need re-keying.
+	go a.rotateRoomsAfterDeviceRemoval("")
 	return ""
 }
 

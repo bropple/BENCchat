@@ -1965,14 +1965,19 @@ export function renderRoster(
       `Invited and able to read: ${members.length ? members.join(", ") : "nobody yet"}\n` +
       (nonReaders.length
         ? `\n⚠ Present but unable to read: ${nonReaders.join(", ")}\n` +
-          `They can still see who is talking and when. There is no way to remove someone from ` +
-          `an OSCAR room — moving the conversation to a new room is the only option.\n`
+          `They can still see who is talking and when. OSCAR has no way to eject anyone from a ` +
+          `room, so the choices are to take away their key or to move the conversation.\n`
         : "\nEveryone here can read it.\n");
 
+    // Danger options last, and only offered when there is actually somebody to
+    // act on — "remove" with an empty member list is a dead end, not a choice.
     const action = await choiceDialog(summary, [
       { label: "Invite someone", value: "invite" },
       { label: "Rotate key", value: "rotate" },
-      ...(nonReaders.length ? [{ label: "Move to a new room", value: "reform", danger: true }] : []),
+      ...(members.length ? [{ label: "Remove someone", value: "remove", danger: true }] : []),
+      ...(members.length || nonReaders.length
+        ? [{ label: "Move to a new room", value: "reform", danger: true }]
+        : []),
     ], { title: "Room encryption" });
     if (action === null) return;
 
@@ -1980,8 +1985,8 @@ export function renderRoster(
       const who = await promptDialog(
         `Who should be able to read “${room.name}”?\n\n` +
           `They'll be sent the key over your encrypted 1:1 conversation, so you must have ` +
-          `messaged them before. Once someone has the key it can't be taken back — the only ` +
-          `remedy is moving the room.`,
+          `messaged them before. You can take away their access later, but only from that ` +
+          `point on — whatever they can already read, they keep.`,
         "",
         { title: "Invite to encrypted room" },
       );
@@ -2005,17 +2010,55 @@ export function renderRoster(
       return;
     }
 
+    if (action === "remove") {
+      const who = await choiceDialog(
+        `Who should lose access to “${room.name}”?`,
+        members.map((m) => ({ label: m, value: m, danger: true })),
+        { title: "Remove from room" },
+      );
+      if (who === null) return;
+      const ok = await confirmDialog(
+        `Remove ${who} from “${room.name}”?\n\n` +
+          `Everyone else gets a new key, and ${who} does not — so they can't read anything ` +
+          `said from now on.\n\n` +
+          `Two things this does NOT do. Messages already sent stay readable to them, because ` +
+          `they already have the old key and there is no taking it back. And OSCAR has no way ` +
+          `to eject anyone from a room, so ${who} can stay sitting in it — seeing who is here ` +
+          `and that people are talking, just not what is said. If that isn't enough, move the ` +
+          `conversation to a new room instead.`,
+        { title: "Remove from room", okLabel: "Remove", danger: true },
+      );
+      if (!ok) return;
+      const err = await Bridge.rotateRoomKey(cookie, [who]);
+      if (err) void alertDialog(err, { title: "Couldn't remove" });
+      else void refreshRoomSecurity(room);
+      return;
+    }
+
     if (action === "reform") {
+      // Default to the people who already cannot read the room; otherwise ask.
+      // Before, this was only ever offered when nonReaders existed, so there was
+      // no way to move a room away from an invited member at all.
+      let leaveBehind = nonReaders;
+      if (!leaveBehind.length) {
+        const who = await choiceDialog(
+          `Who should be left behind in “${room.name}”?`,
+          members.map((m) => ({ label: m, value: m, danger: true })),
+          { title: "Move to a new room" },
+        );
+        if (who === null) return;
+        leaveBehind = [who];
+      }
       const ok = await confirmDialog(
         `Move this conversation to a new room?\n\n` +
           `A fresh room with an unguessable name and a new key. Everyone on the invited list ` +
-          `comes along; ${nonReaders.join(", ")} stays behind.\n\n` +
+          `comes along; ${leaveBehind.join(", ")} stays behind.\n\n` +
           `They will see everyone leave at once — this is a relocation, not a silent removal.`,
         { title: "Move to a new room", okLabel: "Move", danger: true },
       );
       if (!ok) return;
       wantOpenRoom = true;
-      const err = await Bridge.reformRoom(cookie, nonReaders);
+      const err = await Bridge.reformRoom(cookie, leaveBehind);
       if (err) {
         wantOpenRoom = false;
         void alertDialog(err, { title: "Couldn't move the room" });
