@@ -734,27 +734,53 @@ for it to re-key.
 
 ### The cost of a removal
 
-Lazy rotation, so only members who actually speak start a fresh chain:
+**Corrected again 2026-07-21.** Earlier figures here multiplied speakers by
+messages and read the product as wall-clock. That is wrong: **the rate limiter is
+per connection**, so ten speakers each sending their own fan-out are ten people
+sending in parallel, not a queue. What matters is what one speaker pays, and the
+old table overstated it by roughly the speaker count.
 
-| Room | Speakers | Shared key | Per-sender chains | Chains, at ~1/sec |
-|---|---|---|---|---|
-| 200 | 10 | ~200 | ~1,990 | ~33 min |
-| 100 | 10 | ~100 | ~990 | ~17 min |
-| 50 | 8 | ~50 | ~390 | ~7 min |
-| 20 | 5 | ~20 | ~95 | under 2 min |
+With chain views broadcast into the room rather than fanned out 1:1, and rate
+class 2 retuned (216 burst, ~1/sec sustained — see `wire/rate_limit.go`):
 
-A shared key costs one rotator's fan-out regardless of how many people talk.
-Chains cost roughly **one fan-out per active speaker**, so they are around an
-order of magnitude more expensive on removal — and it is a *trickle*, spread as
-each speaker's first message after the removal triggers their own rotation,
-rather than a single burst.
+| Room | Slots @2 devices | Broadcast | Time | Fan-out 1:1 | Time |
+|---|---|---|---|---|---|
+| 10 | 20 | 1 msg | instant | 9 | instant |
+| 20 | 40 | 1 msg | instant | 19 | instant |
+| 50 | 100 | 1 msg | instant | 49 | instant |
+| 100 | 200 | 1 msg | instant | 99 | ~46 s |
+| 200 | 400 | 1 msg | instant | 199 | ~2.4 min |
+| 290 | 580 | 1 msg | instant | 289 | ~3.9 min |
+| 500 | 1,000 | 2 msgs | instant | 499 | ~7.4 min |
 
-Somewhere between 100 and 200 members that stops being acceptable, and it is a
-judgement about tolerable latency rather than a wall the protocol imposes.
+A slot is 84 bytes — 24-byte nonce, 36-byte chain view, 16-byte box tag, 8-byte
+device label — and a base64 body inside a 65,535-byte FLAP payload holds **580
+slots**, so one message covers:
 
-Naive rotation — every member re-keying rather than only speakers — is 200 x 199
-and about eleven hours. That is the reason lazy rotation is part of the design
-and not an optimisation to add afterwards.
+| Devices per member | Members in one broadcast |
+|---|---|
+| 1 | 580 |
+| 2 | 290 |
+| 3 | 193 |
+| 5 | 116 |
+
+Past that it chunks, and two or three messages are still inside the burst.
+
+**Fan-out was never the bottleneck at this deployment's size.** Class 3's burst is
+53 messages, so a room of fifty re-keys instantly either way. Broadcasting is a
+scaling fix that starts mattering around a hundred members and dominates past
+two hundred — worth building for what a room could be, not for what one is today.
+
+Where it does matter immediately is **volume the server carries**, which is
+per-message rather than per-connection and does not parallelise away:
+
+| Room | Broadcast | Fan-out | |
+|---|---|---|---|
+| 50 | 10 msgs | 490 | 49x |
+| 100 | 10 msgs | 990 | 99x |
+| 200 | 10 msgs | 1,990 | 199x |
+
+(One removal, ten speakers.)
 
 ### What per-sender chains really cost
 
