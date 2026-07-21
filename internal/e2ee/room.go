@@ -44,6 +44,7 @@ const (
 	roomEnvelopePrefix   = "\x1bBENCO-ROOM:v1:"
 	roomEnvelopePrefixV2 = "\x1bBENCO-ROOM:v2:"
 	roomInvitePrefix     = "\x1bBENCO-ROOMINV:v1:"
+	roomInvitePrefixV2   = "\x1bBENCO-ROOMINV:v2:"
 
 	// roomKeyIDLen is how many bytes of the key's hash identify it. Eight is
 	// ample to tell a handful of keys apart and keeps the envelope short.
@@ -218,25 +219,57 @@ func OpenRoomSigned(room, envelope string, keys map[string]RoomKey, senderKeys [
 type RoomInvite struct {
 	Room string
 	Key  RoomKey
+	// Members is everyone the sender believes holds this key, INCLUDING the
+	// sender. It travels with the key because that is precisely what it
+	// describes — the set of people this key was given to.
+	//
+	// Without it each client only ever learned who IT had invited, so in a room
+	// of three the member sets never agreed: invited by Alice, Bob and Carol
+	// both knew only Alice, and a rotation by either reached nobody else. Empty
+	// for a v1 invite from an older client.
+	Members []string
 }
 
 // EncodeRoomInvite builds the invite body.
+//
+// Always emits v2. Both ends of an invite are BENCchat, and a client too old to
+// parse v2 fails visibly (the invite does not arrive) rather than quietly, so a
+// flag day is the right trade for a deployment this size — see CLAUDE.md.
 func EncodeRoomInvite(inv RoomInvite) string {
-	return roomInvitePrefix +
+	// Each name is base64'd before joining, so a screen name can never contain
+	// the separator. base64 emits no commas.
+	encoded := make([]string, 0, len(inv.Members))
+	for _, m := range inv.Members {
+		encoded = append(encoded, base64.StdEncoding.EncodeToString([]byte(m)))
+	}
+	return roomInvitePrefixV2 +
 		base64.StdEncoding.EncodeToString([]byte(inv.Room)) + ":" +
-		EncodeRoomKey(inv.Key)
+		EncodeRoomKey(inv.Key) + ":" +
+		strings.Join(encoded, ",")
 }
 
 // IsRoomInvite reports whether a 1:1 message body is a room invite. These are
 // machine-to-machine and must never be shown as chat text.
-func IsRoomInvite(body string) bool { return strings.HasPrefix(body, roomInvitePrefix) }
+func IsRoomInvite(body string) bool {
+	return strings.HasPrefix(body, roomInvitePrefix) ||
+		strings.HasPrefix(body, roomInvitePrefixV2)
+}
 
-// DecodeRoomInvite parses one.
+// DecodeRoomInvite parses either version. v1 yields no Members, which callers
+// must treat as "this client told us nothing about the roster" rather than as
+// "the room is empty".
 func DecodeRoomInvite(body string) (RoomInvite, bool) {
-	if !IsRoomInvite(body) {
+	var rest string
+	v2 := strings.HasPrefix(body, roomInvitePrefixV2)
+	switch {
+	case v2:
+		rest = body[len(roomInvitePrefixV2):]
+	case strings.HasPrefix(body, roomInvitePrefix):
+		rest = body[len(roomInvitePrefix):]
+	default:
 		return RoomInvite{}, false
 	}
-	rest := body[len(roomInvitePrefix):]
+
 	i := strings.Index(rest, ":")
 	if i <= 0 {
 		return RoomInvite{}, false
@@ -245,11 +278,33 @@ func DecodeRoomInvite(body string) (RoomInvite, bool) {
 	if err != nil || len(nameRaw) == 0 {
 		return RoomInvite{}, false
 	}
-	key, err := DecodeRoomKey(rest[i+1:])
+	keyPart := rest[i+1:]
+
+	var members []string
+	if v2 {
+		j := strings.Index(keyPart, ":")
+		if j < 0 {
+			return RoomInvite{}, false
+		}
+		roster := keyPart[j+1:]
+		keyPart = keyPart[:j]
+		for _, enc := range strings.Split(roster, ",") {
+			if enc == "" {
+				continue
+			}
+			raw, derr := base64.StdEncoding.DecodeString(enc)
+			if derr != nil || len(raw) == 0 {
+				return RoomInvite{}, false
+			}
+			members = append(members, string(raw))
+		}
+	}
+
+	key, err := DecodeRoomKey(keyPart)
 	if err != nil {
 		return RoomInvite{}, false
 	}
-	return RoomInvite{Room: string(nameRaw), Key: key}, true
+	return RoomInvite{Room: string(nameRaw), Key: key, Members: members}, true
 }
 
 // --- Room catch-up ----------------------------------------------------------

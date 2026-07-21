@@ -70,6 +70,40 @@ func (m *roomMembers) forget(cookie string) {
 	m.mu.Unlock()
 }
 
+// addAll unions names into a room's set, skipping self.
+//
+// Used when a roster arrives alongside a key we ALREADY hold: somebody added a
+// member, and the news is additive. Replacing on that would lose anyone we
+// invited concurrently, whose invite the sender had not seen yet.
+func (m *roomMembers) addAll(cookie string, names []string, self string) {
+	for _, n := range names {
+		if state.NormalizeScreenName(n) == self {
+			continue
+		}
+		m.add(cookie, n)
+	}
+}
+
+// setAll replaces a room's set with names, skipping self.
+//
+// Used when a roster arrives with a NEW key. A rotation is authoritative about
+// who holds the key it carries — that is the whole point of rotating — so this
+// is the path by which a removal actually propagates.
+func (m *roomMembers) setAll(cookie string, names []string, self string) {
+	m.mu.Lock()
+	if m.invited == nil {
+		m.invited = map[string]map[string]bool{}
+	}
+	set := map[string]bool{}
+	for _, n := range names {
+		if norm := state.NormalizeScreenName(n); norm != self {
+			set[norm] = true
+		}
+	}
+	m.invited[cookie] = set
+	m.mu.Unlock()
+}
+
 // saveRoomKeys persists the current key set for a room, so a restart doesn't
 // lock the user out of their own encrypted rooms.
 func (a *App) saveRoomKeys(cookie string) {
@@ -202,13 +236,86 @@ func (a *App) InviteToRoom(cookie, screenName string) string {
 	if !ok {
 		return "You're not in that room."
 	}
-	if err := a.client.InviteToRoom(screenName, room.Name, key); err != nil {
-		return err.Error()
-	}
+	// Record them BEFORE distributing, so the roster that goes out already names
+	// the newcomer — that is how the existing members learn about them.
 	a.members.add(cookie, screenName)
 	a.saveRoomKeys(cookie)
+
+	// Sent to everyone, not just the newcomer. The key is unchanged for the
+	// people who already had it; what they are being told is the new roster,
+	// without which their own rotations would never reach the person just added.
+	if failed := a.distributeRoomKey(cookie, room.Name, key, nil); len(failed) > 0 {
+		if len(failed) == 1 && state.NormalizeScreenName(failed[0]) == state.NormalizeScreenName(screenName) {
+			// The invitee themselves is the one we could not reach, so nothing
+			// happened at all. Undo, rather than leaving a member recorded who
+			// never got a key.
+			a.members.remove(cookie, screenName)
+			a.saveRoomKeys(cookie)
+			return "Couldn't reach " + screenName + " — they haven't been invited."
+		}
+		a.store.Notify(state.NoticeWarn, "Invited "+screenName+", but couldn't tell "+
+			strings.Join(failed, ", ")+" about it — their next key rotation may miss people.")
+		return ""
+	}
 	a.store.Notify(state.NoticeInfo, screenName+" can now read this room.")
 	return ""
+}
+
+// roomRoster is the member list as it goes on the wire: everyone we believe
+// holds this room's key, INCLUDING us.
+//
+// Recipients strip themselves back out, which keeps a.members meaning "other
+// people who hold the key" on every machine. Leaving ourselves off instead would
+// mean a person we invited never learns WE hold it, and would then refuse our
+// own rotations as coming from a non-member.
+func (a *App) roomRoster(cookie string) []string {
+	roster := a.members.list(cookie)
+	if self := state.NormalizeScreenName(a.currentAccount()); self != "" {
+		roster = append(roster, self)
+	}
+	sort.Strings(roster)
+	return roster
+}
+
+// distributeRoomKey sends a room's key and current roster to every member,
+// skipping anyone in dropped, and returns those it could not reach.
+//
+// Shared by invite, rotation and reform so all three compute the roster
+// identically — the bug this exists to prevent is three call sites drifting into
+// three different ideas of who is in the room.
+func (a *App) distributeRoomKey(cookie, roomName string, key e2ee.RoomKey, dropped map[string]bool) []string {
+	roster := a.roomRoster(cookie)
+	var failed []string
+	for _, sn := range a.members.list(cookie) {
+		if dropped[sn] {
+			continue
+		}
+		if err := a.client.InviteToRoom(sn, roomName, key, roster); err != nil {
+			failed = append(failed, sn)
+			slog.Default().Warn("could not deliver a room key", "peer", sn, "room", roomName, "err", err)
+		}
+	}
+	return failed
+}
+
+// learnRoomRoster folds an inbound roster into what we know.
+//
+// keyIsNew decides union versus replace, and the distinction matters: a
+// rotation is authoritative about who holds the key it carries, so it replaces
+// (this is how a removal propagates), while a roster arriving with a key we
+// already hold is somebody announcing an ADD, so it unions (replacing there
+// would drop anyone we invited concurrently, whose invite the sender had not
+// seen yet).
+func (a *App) learnRoomRoster(cookie string, roster []string, keyIsNew bool) {
+	if len(roster) == 0 {
+		return // a v1 invite told us nothing; that is not "the room is empty"
+	}
+	self := state.NormalizeScreenName(a.currentAccount())
+	if keyIsNew {
+		a.members.setAll(cookie, roster, self)
+		return
+	}
+	a.members.addAll(cookie, roster, self)
 }
 
 // handleRoomInvite surfaces an inbound room key for the user to accept.
@@ -234,6 +341,18 @@ func (a *App) handleRoomInvite(from string, inv e2ee.RoomInvite) {
 				"peer", from, "room", inv.Room)
 			a.store.Notify(state.NoticeWarn, from+" tried to change the key for “"+inv.Room+
 				"” but was never given it. Ignored.")
+			return
+		}
+		// Not every one of these is a rotation. An invite sent to somebody ELSE
+		// goes to the whole room so everyone learns the new roster, and it
+		// carries the key we already hold. Announcing that as "the key was
+		// rotated" would be a lie, and a frequent one.
+		cur, hadKey := a.client.RoomKey(cookie)
+		keyIsNew := !hadKey || cur.ID() != inv.Key.ID()
+		a.learnRoomRoster(cookie, inv.Members, keyIsNew)
+
+		if !keyIsNew {
+			a.saveRoomKeys(cookie)
 			return
 		}
 		a.client.SetRoomKey(cookie, inv.Key)
@@ -301,8 +420,13 @@ func (a *App) AcceptRoomInvite(roomName string) string {
 		return "Joined but couldn't identify the room."
 	}
 	a.client.SetRoomKey(cookie, inv.Key)
-	a.saveRoomKeys(cookie)
+	// The roster names everyone who holds this key, so take the lot — knowing
+	// only the person who invited us is what left three-way rooms unable to
+	// rotate. `from` is added regardless: a v1 invite carries no roster, and
+	// even in v2 the inviter is the one member we can be certain of.
 	a.members.add(cookie, from)
+	a.learnRoomRoster(cookie, inv.Members, false)
+	a.saveRoomKeys(cookie)
 	go a.requestRoomCatchup(cookie)
 	return ""
 }
@@ -342,16 +466,7 @@ func (a *App) RotateRoomKey(cookie string, drop []string) string {
 	a.client.SetRoomKey(cookie, key)
 	a.saveRoomKeys(cookie)
 
-	var failed []string
-	for _, sn := range a.members.list(cookie) {
-		if dropped[sn] {
-			continue
-		}
-		if err := a.client.InviteToRoom(sn, room.Name, key); err != nil {
-			failed = append(failed, sn)
-			slog.Default().Warn("could not deliver a rotated room key", "peer", sn, "err", err)
-		}
-	}
+	failed := a.distributeRoomKey(cookie, room.Name, key, dropped)
 	if len(failed) > 0 {
 		// Say so rather than leaving people silently unable to read: they need a
 		// re-invite once they're reachable again.
@@ -406,12 +521,15 @@ func (a *App) ReformRoom(cookie string, drop []string) string {
 	}
 	a.client.SetRoomKey(newCookie, key)
 
+	// Record everyone being carried over BEFORE distributing, so the roster each
+	// of them receives already names all the others. Doing it as each invite
+	// succeeded meant the first person invited was told the room contained only
+	// themselves. Anyone unreachable is dropped again immediately below.
 	for _, sn := range carry {
-		if err := a.client.InviteToRoom(sn, newName, key); err != nil {
-			slog.Default().Warn("could not invite to the reformed room", "peer", sn, "err", err)
-			continue
-		}
 		a.members.add(newCookie, sn)
+	}
+	for _, sn := range a.distributeRoomKey(newCookie, newName, key, nil) {
+		a.members.remove(newCookie, sn)
 	}
 	a.saveRoomKeys(newCookie)
 

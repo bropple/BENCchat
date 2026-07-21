@@ -465,13 +465,14 @@ func (c *Client) sendRoomMessageReflected(cookie, text string) error {
 // It refuses to send unless that channel is actually encrypted: handing out a
 // group key in the clear would publish the room to anyone watching the wire,
 // which defeats the whole arrangement.
-func (c *Client) InviteToRoom(screenName, roomName string, key e2ee.RoomKey) error {
+func (c *Client) InviteToRoom(screenName, roomName string, key e2ee.RoomKey, members []string) error {
 	if !c.CanEncryptTo(screenName) {
 		return errors.New("client: can't invite them privately — no encryption key for that person yet")
 	}
 	return c.sendProtocolMessage(screenName, e2ee.EncodeRoomInvite(e2ee.RoomInvite{
-		Room: roomName,
-		Key:  key,
+		Room:    roomName,
+		Key:     key,
+		Members: members,
 	}))
 }
 

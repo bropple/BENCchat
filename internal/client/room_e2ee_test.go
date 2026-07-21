@@ -190,7 +190,7 @@ func TestRoomInviteNeedsAnEncryptedChannel(t *testing.T) {
 	key, _ := e2ee.GenerateRoomKey()
 
 	// No 1:1 key for this peer, so no encrypted channel exists.
-	if err := c.InviteToRoom("stranger", "room", key); err == nil {
+	if err := c.InviteToRoom("stranger", "room", key, nil); err == nil {
 		t.Fatal("a room key was sent over an unencrypted channel")
 	}
 }
@@ -769,7 +769,7 @@ func TestProtocolTrafficIsNotStoredAsAMessage(t *testing.T) {
 	// No session, so the send fails at the wire — but the point is that nothing
 	// is recorded in the conversation either way.
 	key, _ := e2ee.GenerateRoomKey()
-	_ = c.InviteToRoom("bob", "secret-room", key)
+	_ = c.InviteToRoom("bob", "secret-room", key, nil)
 	_ = c.RequestCatchup("bob", "secret-room", time.Now())
 	_ = c.SendCatchup("bob", e2ee.CatchupResponse{Room: "secret-room"})
 

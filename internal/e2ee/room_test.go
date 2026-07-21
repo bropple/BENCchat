@@ -292,3 +292,67 @@ func TestCatchupMalformedRejected(t *testing.T) {
 		t.Error("catch-up traffic was mistaken for an invite")
 	}
 }
+
+// TestRoomInviteRosterRoundTrips: the roster travels with the key because it
+// describes exactly that — who the key was given to.
+func TestRoomInviteRosterRoundTrips(t *testing.T) {
+	key, err := GenerateRoomKey()
+	if err != nil {
+		t.Fatalf("GenerateRoomKey: %v", err)
+	}
+	in := RoomInvite{
+		Room: "a room: with punctuation",
+		Key:  key,
+		// A name with a comma would split a naive roster encoding.
+		Members: []string{"alice", "bob, jr", "carol"},
+	}
+	out, ok := DecodeRoomInvite(EncodeRoomInvite(in))
+	if !ok {
+		t.Fatal("a v2 invite did not decode")
+	}
+	if out.Room != in.Room {
+		t.Errorf("room = %q, want %q", out.Room, in.Room)
+	}
+	if out.Key.ID() != in.Key.ID() {
+		t.Errorf("key id = %s, want %s", out.Key.ID(), in.Key.ID())
+	}
+	if strings.Join(out.Members, "|") != strings.Join(in.Members, "|") {
+		t.Errorf("members = %v, want %v", out.Members, in.Members)
+	}
+}
+
+// TestRoomInviteWithEmptyRosterRoundTrips: a room of one has no other members,
+// which must not be confused with a malformed invite.
+func TestRoomInviteWithEmptyRosterRoundTrips(t *testing.T) {
+	key, _ := GenerateRoomKey()
+	out, ok := DecodeRoomInvite(EncodeRoomInvite(RoomInvite{Room: "solo", Key: key}))
+	if !ok {
+		t.Fatal("an invite with no roster did not decode")
+	}
+	if len(out.Members) != 0 {
+		t.Errorf("members = %v, want none", out.Members)
+	}
+}
+
+// TestRoomInviteV1StillDecodes: an older client emits v1, which carries no
+// roster. Absent must read as "told us nothing", never as "the room is empty".
+func TestRoomInviteV1StillDecodes(t *testing.T) {
+	key, _ := GenerateRoomKey()
+	v1 := roomInvitePrefix +
+		base64.StdEncoding.EncodeToString([]byte("old room")) + ":" +
+		EncodeRoomKey(key)
+
+	if !IsRoomInvite(v1) {
+		t.Fatal("a v1 invite is no longer recognized as one")
+	}
+	out, ok := DecodeRoomInvite(v1)
+	if !ok {
+		t.Fatal("a v1 invite did not decode")
+	}
+	if out.Room != "old room" || out.Key.ID() != key.ID() {
+		t.Errorf("v1 decoded wrong: %+v", out)
+	}
+	if len(out.Members) != 0 {
+		t.Errorf("v1 produced members from nowhere: %v", out.Members)
+	}
+}

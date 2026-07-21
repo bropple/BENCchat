@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -152,5 +153,156 @@ func TestRoomKeyRotationOnlyFromMembers(t *testing.T) {
 	a.handleRoomInvite("alice", e2ee.RoomInvite{Room: "secret room", Key: rotated})
 	if got, _ = a.client.RoomKey("room-1"); got.ID() != rotated.ID() {
 		t.Error("a legitimate rotation from the member who invited us was rejected")
+	}
+}
+
+// rosterTestApp is an App wired just enough to drive the room roster paths.
+func rosterTestApp(t *testing.T, self string) *App {
+	t.Helper()
+	store := state.NewStore()
+	a := &App{store: store, client: client.New(store, nil)}
+	a.cfg.LastScreenName = self
+	store.UpsertRoom("room-1", "secret room")
+	store.SetRoomJoined("room-1", true)
+	return a
+}
+
+func sortedMembers(a *App, cookie string) string {
+	got := a.members.list(cookie)
+	sort.Strings(got)
+	return strings.Join(got, ",")
+}
+
+// TestRosterFromInviteReachesEveryMember is the three-way bug.
+//
+// Membership used to be recorded only for people WE invited, so in a room where
+// Alice invited both Bob and Carol, Carol knew only Alice. A rotation by Carol
+// then reached nobody but Alice, and Bob silently lost the room. The roster
+// travelling with the key is what closes that.
+func TestRosterFromInviteReachesEveryMember(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	key, err := e2ee.GenerateRoomKey()
+	if err != nil {
+		t.Fatalf("GenerateRoomKey: %v", err)
+	}
+	a.client.SetRoomKey("room-1", key)
+	a.members.add("room-1", "alice") // all we learn from being invited
+
+	if got := sortedMembers(a, "room-1"); got != "alice" {
+		t.Fatalf("precondition: members = %q", got)
+	}
+
+	// Alice adds Dave and tells the whole room. Same key, so this is a roster
+	// announcement rather than a rotation.
+	a.handleRoomInvite("alice", e2ee.RoomInvite{
+		Room:    "secret room",
+		Key:     key,
+		Members: []string{"alice", "bob", "carol", "dave"},
+	})
+
+	// Everyone but ourselves — a.members means "other people holding this key".
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave" {
+		t.Errorf("members = %q, want %q", got, "alice,bob,dave")
+	}
+	if cur, ok := a.client.RoomKey("room-1"); !ok || cur.ID() != key.ID() {
+		t.Error("a roster announcement changed the room key")
+	}
+}
+
+// TestRotationRosterPropagatesRemoval: a rotation is authoritative about who
+// holds the key it carries, so it REPLACES the roster. This is the mechanism by
+// which a removal actually reaches the rest of the room.
+func TestRotationRosterPropagatesRemoval(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	oldKey, _ := e2ee.GenerateRoomKey()
+	a.client.SetRoomKey("room-1", oldKey)
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+
+	newKey, _ := e2ee.GenerateRoomKey()
+	a.handleRoomInvite("alice", e2ee.RoomInvite{
+		Room:    "secret room",
+		Key:     newKey,
+		Members: []string{"alice", "bob", "carol"}, // dave is out
+	})
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q, want %q — a removal did not propagate", got, "alice,bob")
+	}
+	if cur, ok := a.client.RoomKey("room-1"); !ok || cur.ID() != newKey.ID() {
+		t.Error("the rotated key was not installed")
+	}
+}
+
+// TestSameKeyRosterUnionsRatherThanReplaces: two people inviting at once must
+// not erase each other's newcomer. Only a rotation replaces.
+func TestSameKeyRosterUnionsRatherThanReplaces(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	key, _ := e2ee.GenerateRoomKey()
+	a.client.SetRoomKey("room-1", key)
+	// We invited Eve a moment ago; Alice has not heard about her yet.
+	a.members.setAll("room-1", []string{"alice", "eve"}, "carol")
+
+	a.handleRoomInvite("alice", e2ee.RoomInvite{
+		Room:    "secret room",
+		Key:     key,
+		Members: []string{"alice", "carol", "dave"},
+	})
+
+	if got := sortedMembers(a, "room-1"); got != "alice,dave,eve" {
+		t.Errorf("members = %q, want %q — a concurrent invite was lost", got, "alice,dave,eve")
+	}
+}
+
+// TestV1InviteDoesNotWipeRoster: an older client sends no roster. Absent means
+// "said nothing", not "the room is empty".
+func TestV1InviteDoesNotWipeRoster(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	oldKey, _ := e2ee.GenerateRoomKey()
+	a.client.SetRoomKey("room-1", oldKey)
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
+
+	newKey, _ := e2ee.GenerateRoomKey()
+	a.handleRoomInvite("alice", e2ee.RoomInvite{Room: "secret room", Key: newKey})
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q, want %q — a rosterless invite emptied the room", got, "alice,bob")
+	}
+}
+
+// TestNonMemberCannotInjectRoster: the membership check that stops a stranger
+// replacing the room key must also stop them rewriting who is in the room —
+// otherwise they could add themselves and rotate next time.
+func TestNonMemberCannotInjectRoster(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	key, _ := e2ee.GenerateRoomKey()
+	a.client.SetRoomKey("room-1", key)
+	a.members.add("room-1", "alice")
+
+	attackerKey, _ := e2ee.GenerateRoomKey()
+	a.handleRoomInvite("mallory", e2ee.RoomInvite{
+		Room:    "secret room",
+		Key:     attackerKey,
+		Members: []string{"mallory", "carol"},
+	})
+
+	if got := sortedMembers(a, "room-1"); got != "alice" {
+		t.Errorf("members = %q — a non-member rewrote the roster", got)
+	}
+	if cur, ok := a.client.RoomKey("room-1"); !ok || cur.ID() != key.ID() {
+		t.Error("a non-member replaced the room key")
+	}
+}
+
+// TestRosterOnTheWireIncludesUs: a roster we send must name us, or the person
+// receiving it never learns WE hold the key and will refuse our own rotations
+// as coming from a non-member.
+func TestRosterOnTheWireIncludesUs(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
+
+	roster := a.roomRoster("room-1")
+	sort.Strings(roster)
+	if strings.Join(roster, ",") != "alice,bob,carol" {
+		t.Errorf("roster = %v, want alice,bob,carol", roster)
 	}
 }
