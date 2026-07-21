@@ -226,6 +226,19 @@ longer read, and the only escape is `ReformRoom` relocating everyone to a new
 name. Note that a kick asks the server to enforce something it *already observes*
 — so it extends the server's power, never its knowledge.
 
+**Kick removes from the member list. Ban additionally locks the door.**
+
+- **Kick** = drop them from the signed member list, rotate so the key they hold
+  is spent, and eject them from the room. The door is not locked: they can rejoin
+  by name, hold no key, and are not a member. So a kick alone does not fully
+  close the metadata gap — it evicts, and they can walk back in and watch.
+- **Ban** = a kick, plus the server refusing their rejoin. This is the only thing
+  that actually closes the metadata gap, and it is purely a server-side join
+  check on top of everything a kick already did.
+
+Two operations, and the UI must not blur them: "removed" and "cannot come back"
+are different promises, and only one of them is enforceable without the server.
+
 ### Owner succession, in preference order
 
 The room must not ossify when its owner goes, and the obvious fix is the one
@@ -256,6 +269,42 @@ for identity, and it is still the worst of the three options:
 
 Build (1) and (2). Keep (3) as an explicitly-logged escape hatch, not a routine
 tool, and never as the answer to "the owner is on holiday".
+
+**Inactive means three months, measured on the account, not the room.**
+
+Long enough that a sabbatical does not cost somebody their room; short enough
+that a room does not sit frozen for a year. Measured on the owner's last sign-on
+rather than their last message *in this room*, because the stricter reading would
+transfer a room away from someone who is simply quiet in it, and the failure mode
+of getting this wrong is taking somebody's room off them. Prefer the forgiving
+measure. The server observes sign-on already, so this needs nothing new.
+
+### When there is nobody to inherit
+
+The ladder can run out: an owner goes quiet and appointed no mods. The answer is
+that **the claim falls to the most senior surviving tier** — mods if any exist,
+otherwise any member — on the same single timeout. One rule, one window, no
+second clock to reason about.
+
+An ownerless room is not a broken state and it is worth being clear why: it is
+exactly the model BENCchat ships **today**, and what §3 calls an open room. Any
+member may invite and rotate. So the degradation path is "falls back to the
+behaviour that already exists", not "deadlocks".
+
+It is still a change to the room's properties, so it must be a deliberate act
+rather than a silent expiry. After the window, a member *may claim* ownership —
+announced, counter-bumped, visible to everyone — rather than the room quietly
+becoming uncontrolled on a timer. Somebody who joined a gated room should never
+discover it became open while nobody was looking.
+
+**Contested claims need no new mechanism.** Two mods claiming at once is resolved
+by the counter rule already built for device manifests: the server accepts the
+first statement at counter N+1 and refuses the second as stale. Deterministic,
+first-writer-wins, and identical to how a manifest race already resolves.
+
+If there are no members either, the room is empty and there is nothing to decide.
+The row persists server-side — chat rooms are `UNIQUE(exchange, name)` and never
+garbage collected — but an empty room has no state anyone is contending for.
 
 ### What this changes elsewhere
 
@@ -288,10 +337,18 @@ to advance or replace a room's key is exactly what that touches.
   Ownership and role changes are statements signed by the account identity key,
   stored and enforced by the server but authored by the owner — so a server that
   invents a promotion is caught rather than obeyed.
-- **How long is "inactive"** for mod inheritance? Long enough that a holiday does
-  not transfer a room, short enough that a room does not ossify for a month.
-  Probably weeks, and it wants a real answer before it is built.
-- **Does a kick imply removal from the member list**, or can somebody be ejected
-  from the room while still holding the key? They are separate operations on
-  separate layers (§7's table) and conflating them in the UI would misrepresent
-  what each one did.
+- ~~**How long is "inactive"**~~ Answered in §7: three months, measured on the
+  owner's last sign-on rather than their last message in the room.
+- ~~**Does a kick imply removal from the member list**~~ Answered in §7: yes, and
+  a kick is distinct from a ban — the first evicts, the second also refuses the
+  rejoin.
+- ~~**What if there is nobody to inherit?**~~ Answered in §7: the claim falls to
+  the most senior surviving tier, and an ownerless room is the open room of §3
+  rather than a broken one.
+- **Does a ban survive a room being reformed?** `ReformRoom` creates a room with
+  a new name, which is a new row and therefore an empty ban list. Probably right —
+  a reform is a fresh start by definition — but it means ban is per-room and not
+  per-person, which somebody will eventually be surprised by.
+- **Can a mod ban, or only kick?** Ban is the more permanent act and the argument
+  for reserving it to the owner is the same one that stops mods demoting each
+  other. Leaning: mods kick, owner bans.
