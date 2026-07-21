@@ -64,11 +64,27 @@ type Client struct {
 	// e2eeKeys maps a peer to the SET of device keys they publish — one account
 	// can be signed in from several machines, each with its own key.
 	e2eeKeys map[string][][32]byte
+	// e2eeKeysAt records when each peer's set was last checked against the
+	// directory, so a stale one can be re-fetched.
+	//
+	// Nothing else expires this cache. A peer who removes a device publishes a
+	// new manifest without it, but we only ever re-read a manifest on a cache
+	// MISS or a failed decrypt — and a removed device decrypts our messages
+	// perfectly well, so neither fires. Without a clock here, a client left
+	// running keeps encrypting to a device its owner removed for as long as the
+	// process happens to stay up, which is unbounded.
+	e2eeKeysAt map[string]time.Time
 	// onPeerKey is notified when a peer's device set is learned, so the app layer
 	// can compare it against the persisted record and warn on a change.
 	onPeerKey func(screenName string, keys, prev [][32]byte)
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// keyLookupProbe, when set, stands in for the directory round trip in
+	// RefreshPeerKeys. A test hook: the difference between "answered: nothing
+	// published" and "would not answer" decides whether a send goes out in the
+	// clear, and that is worth testing without a live server. See
+	// setKeyLookupProbe.
+	keyLookupProbe func(screenName string) peerKeyLookup
 	// profileProbe, when set, receives every locate reply. LookupProfile uses it
 	// to catch a one-shot profile fetch for someone who isn't a buddy (the store
 	// only retains buddies' profiles). Guarded by e2eeMu.
@@ -143,6 +159,7 @@ func New(store *state.Store, log *slog.Logger) *Client {
 		serviceReply: make(chan []byte, 1),
 		navReply:     make(chan []byte, 1),
 		e2eeKeys:     make(map[string][][32]byte),
+		e2eeKeysAt:   make(map[string]time.Time),
 	}
 }
 
@@ -236,6 +253,11 @@ func (c *Client) SignOff() error {
 	if cancel != nil {
 		cancel()
 	}
+	// Peers' device sets belong to the session that learned them. Keeping them
+	// across a sign-off would carry one account's view of who holds which keys
+	// into the next account signed on here, and would let a set learned before
+	// the disconnect outlive whatever changed while we were away.
+	c.forgetPeerKeys()
 	return session.Close()
 }
 
@@ -383,6 +405,17 @@ func (c *Client) dropSendLocked(p *pendingSend) {
 // encapsulation, say) lands exactly here.
 func (c *Client) sealOutbound(to, text string) (wireText string, encrypted bool, err error) {
 	peerKeys, ourPriv, ok := c.sealFor(to)
+	if ok && c.peerKeysStale(to) {
+		// Re-read a set we have been using for a while. Nothing else expires it,
+		// and the case it exists for — the peer removed a device — is invisible
+		// from here: a removed device decrypts everything we send to it, so no
+		// failure ever prompts a re-fetch.
+		//
+		// Asynchronous on purpose. This bounds how long a removed device keeps
+		// receiving; it is not a correctness gate on THIS message, so it must not
+		// put a directory round trip in front of the user pressing send.
+		go c.RefreshPeerKeys(to)
+	}
 	if !ok && c.e2eeReady() {
 		// We hold no keys for this peer YET. That is the normal state for the
 		// first message to someone: nothing has fetched their manifest, because
@@ -393,7 +426,17 @@ func (c *Client) sealOutbound(to, text string) (wireText string, encrypted bool,
 		// goes in the clear forever. So look once: query and verify their
 		// manifest, then decide. RefreshPeerKeys is a no-op once keys are cached,
 		// so only the first send to a peer pays the round trip.
-		c.RefreshPeerKeys(to)
+		if c.RefreshPeerKeys(to) == peerKeysUnavailable {
+			// The directory gave no answer. "I could not find out" is not "they
+			// have no keys", and sending plaintext on it is exactly how a server
+			// that declines key lookups gets to read a conversation — the only
+			// hint to the user would be a lock that never appeared. Refuse; the
+			// message is kept and a retry encrypts once the directory answers.
+			c.log.Warn("refusing to send in the clear: key directory gave no answer", "to", to)
+			return "", false, errors.New(
+				"client: couldn't check whether this conversation can be encrypted, " +
+					"so nothing was sent — try again in a moment")
+		}
 		peerKeys, ourPriv, ok = c.sealFor(to)
 	}
 	if !ok {

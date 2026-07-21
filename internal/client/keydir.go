@@ -268,6 +268,28 @@ func (c *Client) GetIdentityBackup() (IdentityBackup, bool) {
 	}
 }
 
+// peerKeyLookup is why a peer's device keys are, or are not, in hand after
+// asking the directory for them.
+//
+// The distinction that matters is absent vs unavailable. Collapsing them is how
+// a server that simply declines to answer key lookups reads a conversation it
+// has no key for: every send falls back to plaintext, and the only signal to the
+// user is a lock that never appears.
+type peerKeyLookup int
+
+const (
+	// peerKeysFound: verified keys are cached and encryption can proceed.
+	peerKeysFound peerKeyLookup = iota
+	// peerKeysAbsent: the directory answered, and this account has published
+	// nothing. Not a BENCchat user, or one that never turned E2EE on. Plaintext
+	// is correct here and is the only thing that will ever work.
+	peerKeysAbsent
+	// peerKeysUnavailable: no usable answer — timed out, could not be sent, or a
+	// manifest arrived that taught us nothing. Says nothing about whether the
+	// peer has keys, so it must not be treated as though it said they have none.
+	peerKeysUnavailable
+)
+
 // RefreshPeerKeys learns a peer's device keys from the directory.
 //
 // The trailing Locate fetch is no longer a key-learning fallback: profiles stop
@@ -278,15 +300,47 @@ func (c *Client) GetIdentityBackup() (IdentityBackup, bool) {
 //
 // Blocking, because the directory round trip has to complete first. Callers run
 // it in a goroutine.
-func (c *Client) RefreshPeerKeys(screenName string) {
-	if c.SupportsKeyDir() {
-		if sm, ok := c.QueryManifest(screenName); ok && sm.Present {
-			// handleKeyDir already verified and cached these if a verifier is
-			// installed; nothing further to do.
-			return
-		}
+func (c *Client) RefreshPeerKeys(screenName string) peerKeyLookup {
+	c.markPeerKeysChecked(screenName)
+
+	c.e2eeMu.Lock()
+	probe := c.keyLookupProbe
+	c.e2eeMu.Unlock()
+	if probe != nil {
+		return probe(screenName)
 	}
-	c.RequestUserInfo(screenName)
+
+	if !c.SupportsKeyDir() {
+		// The server carries no key directory at all, so nobody has keys and no
+		// retry changes that. Reported as absent rather than unavailable on
+		// purpose: it is a property of the whole deployment, visible everywhere
+		// at once (no locks, no safety numbers, anywhere), not a per-peer answer
+		// that might be different in a moment. Refusing every send against such
+		// a server would be a worse failure than sending as it always has.
+		c.RequestUserInfo(screenName)
+		return peerKeysAbsent
+	}
+
+	sm, ok := c.QueryManifest(screenName)
+	switch {
+	case !ok:
+		// Timed out, or the query could not be sent. NOT an answer.
+		c.RequestUserInfo(screenName)
+		return peerKeysUnavailable
+	case !sm.Present:
+		c.RequestUserInfo(screenName)
+		return peerKeysAbsent
+	}
+
+	// A manifest came back. handleKeyDir already ran it past the verifier and
+	// cached the keys if it passed, so whether we now hold keys is the answer:
+	// a manifest that failed its signature, or lost to the counter rule, taught
+	// us nothing and must not be mistaken for the account having published none.
+	if _, held := c.PeerKeys(screenName); held {
+		return peerKeysFound
+	}
+	c.log.Warn("a manifest arrived but taught us no keys", "screen_name", screenName)
+	return peerKeysUnavailable
 }
 
 // handleKeyDir dispatches an inbound key directory SNAC.

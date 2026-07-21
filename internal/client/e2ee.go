@@ -1,6 +1,8 @@
 package client
 
 import (
+	"time"
+
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/oscar"
 	"github.com/benco-holdings/benchat/internal/state"
@@ -34,6 +36,7 @@ func (c *Client) learnPeerKeys(screenName string, keys [][32]byte) {
 	key := state.NormalizeScreenName(screenName)
 	prev := c.e2eeKeys[key]
 	c.e2eeKeys[key] = keys
+	c.e2eeKeysAt[key] = time.Now()
 	onChange := c.onPeerKey
 	c.e2eeMu.Unlock()
 
@@ -95,12 +98,51 @@ func (c *Client) e2eeReady() bool {
 	return c.e2eeOn && c.e2eeHasKP
 }
 
+// peerKeyTTL bounds how long a cached device set is used without re-checking it
+// against the directory.
+//
+// This is the window in which a device its owner has already removed still
+// receives everything we send. Short enough that the window is a coffee break
+// rather than however long the app happens to stay open; long enough that a
+// conversation is not paying a directory round trip every few messages.
+const peerKeyTTL = 20 * time.Minute
+
+// peerKeysStale reports whether a peer's cached device set is old enough to be
+// worth re-reading. True for a peer we have never checked.
+func (c *Client) peerKeysStale(screenName string) bool {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	at, ok := c.e2eeKeysAt[state.NormalizeScreenName(screenName)]
+	return !ok || time.Since(at) > peerKeyTTL
+}
+
+// markPeerKeysChecked restarts a peer's staleness clock without changing their
+// keys, so a refresh already in flight doesn't get queued again behind every
+// message sent while it runs.
+func (c *Client) markPeerKeysChecked(screenName string) {
+	c.e2eeMu.Lock()
+	c.e2eeKeysAt[state.NormalizeScreenName(screenName)] = time.Now()
+	c.e2eeMu.Unlock()
+}
+
+// forgetPeerKeys drops every cached device set. Called on sign-off.
+func (c *Client) forgetPeerKeys() {
+	c.e2eeMu.Lock()
+	c.e2eeKeys = make(map[string][][32]byte)
+	c.e2eeKeysAt = make(map[string]time.Time)
+	c.e2eeMu.Unlock()
+}
+
 // EnsurePeerKeys fetches a peer's manifest if we do not already have their keys,
-// so a conversation shows its lock state and encrypts from the first message
-// rather than after the first reply. Blocking; callers that must not stall (the
-// UI opening a conversation) should run it in a goroutine.
+// or if what we have is stale, so a conversation shows its lock state and
+// encrypts from the first message rather than after the first reply. Blocking;
+// callers that must not stall (the UI opening a conversation) should run it in a
+// goroutine.
 func (c *Client) EnsurePeerKeys(screenName string) {
-	if !c.e2eeReady() || c.CanEncryptTo(screenName) {
+	if !c.e2eeReady() {
+		return
+	}
+	if c.CanEncryptTo(screenName) && !c.peerKeysStale(screenName) {
 		return
 	}
 	c.RefreshPeerKeys(screenName)
