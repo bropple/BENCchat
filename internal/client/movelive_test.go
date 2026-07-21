@@ -133,6 +133,39 @@ func TestLiveMoveConnectedBuddy(t *testing.T) {
 		t.Errorf("buddy VANISHED from the server after move (severed?)")
 	}
 
-	// Cleanup.
-	_ = a.RemoveBuddy(bName)
+	// Rename the group live, then confirm the buddy's group follows on the server.
+	if err := fresh.RenameGroup(newGroup, "MoveProbe2"); err != nil {
+		t.Errorf("RenameGroup error: %v", err)
+	}
+	time.Sleep(1200 * time.Millisecond)
+	d := New(state.NewStore(), nil)
+	if err := d.SignOn(ctx, addr, oscar.Credentials{ScreenName: aName, Password: aPw}, liveTransport(t)...); err != nil {
+		t.Fatalf("SignOn D: %v", err)
+	}
+	defer func() { _ = d.SignOff() }()
+	time.Sleep(800 * time.Millisecond)
+	for _, x := range d.store.Buddies() {
+		if state.NormalizeScreenName(x.ScreenName) == state.NormalizeScreenName(bName) {
+			t.Logf("SERVER after rename: group=%q", x.Group)
+			if x.Group != "MoveProbe2" {
+				t.Errorf("group rename didn't persist: group=%q want MoveProbe2", x.Group)
+			}
+		}
+	}
+
+	// Remove the buddy; its now-empty custom group should be pruned server-side.
+	_ = fresh.RemoveBuddy(bName)
+	time.Sleep(1200 * time.Millisecond)
+	e := New(state.NewStore(), nil)
+	if err := e.SignOn(ctx, addr, oscar.Credentials{ScreenName: aName, Password: aPw}, liveTransport(t)...); err != nil {
+		t.Fatalf("SignOn E: %v", err)
+	}
+	defer func() { _ = e.SignOff() }()
+	time.Sleep(800 * time.Millisecond)
+	for _, g := range e.Groups() {
+		if g.Name == "MoveProbe2" {
+			t.Errorf("emptied custom group %q was NOT pruned server-side", g.Name)
+		}
+	}
+	t.Logf("groups after cleanup: %+v", e.Groups())
 }

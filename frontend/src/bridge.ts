@@ -105,6 +105,12 @@ export interface ProfilePreview {
   away: string;
 }
 
+/** A buddy group and how many buddies are filed under it. */
+export interface GroupInfo {
+  name: string;
+  count: number;
+}
+
 export interface Theme {
   name?: string;
   tokens?: Record<string, string>;
@@ -298,6 +304,9 @@ interface AppBindings {
   BlockBuddy(screenName: string): Promise<string>;
   UnblockBuddy(screenName: string): Promise<string>;
   BlockedUsers(): Promise<string[]>;
+  Groups(): Promise<GroupInfo[]>;
+  RenameGroup(oldName: string, newName: string): Promise<string>;
+  DeleteGroup(name: string): Promise<string>;
   ClearConversation(screenName: string): Promise<void>;
   SetAway(message: string): Promise<string>;
   RequestUserInfo(screenName: string): Promise<void>;
@@ -414,6 +423,9 @@ export const Bridge = {
   blockBuddy: (screenName: string) => app().BlockBuddy(screenName),
   unblockBuddy: (screenName: string) => app().UnblockBuddy(screenName),
   blockedUsers: () => app().BlockedUsers(),
+  groups: () => app().Groups(),
+  renameGroup: (oldName: string, newName: string) => app().RenameGroup(oldName, newName),
+  deleteGroup: (name: string) => app().DeleteGroup(name),
   lookupProfile: (screenName: string) => app().LookupProfile(screenName),
   setAway: (message: string) => app().SetAway(message),
   requestUserInfo: (screenName: string) => app().RequestUserInfo(screenName),

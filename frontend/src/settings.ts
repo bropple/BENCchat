@@ -30,7 +30,7 @@ import {
   setSoundMuted,
   type SoundKey,
 } from "./sound";
-import { alertDialog, confirmDialog, recoveryKeyDialog } from "./dialog";
+import { alertDialog, confirmDialog, promptDialog, recoveryKeyDialog } from "./dialog";
 import { offerRecoveryKeyRotation } from "./identity";
 import { setSkinTonePref } from "./emojiTone";
 
@@ -97,6 +97,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
             <button class="settings__tab is-active" data-tab="appearance">Appearance</button>
             <button class="settings__tab" data-tab="sound">Sound</button>
             <button class="settings__tab" data-tab="privacy">Privacy &amp; Security</button>
+            <button class="settings__tab" data-tab="organization">Organization</button>
             <button class="settings__tab" data-tab="account">Account</button>
             <button class="settings__tab" data-tab="profile">Profile</button>
           </nav>
@@ -246,6 +247,14 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                 <div class="benco-label">Blocked users</div>
                 <p class="benco-caption settings__hint">Blocked people can't message you, see when you're online, or ask to connect. Unblock anyone here to allow them again.</p>
                 <div class="settings__blocked" id="blockedList"></div>
+              </section>
+            </div>
+
+            <div class="settings__panel" data-panel="organization">
+              <section class="settings__section">
+                <div class="benco-label">Buddy groups</div>
+                <p class="benco-caption settings__hint">Groups are your own private way of organizing your buddy list — nobody else sees them. Rename a group, or delete one to move its buddies back to the default group. An empty group tidies itself away on its own.</p>
+                <div class="settings__groups" id="groupList"></div>
               </section>
             </div>
 
@@ -571,6 +580,70 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
       }
     };
     void renderBlocked();
+
+    // Buddy groups (Organization tab). Rendered on open and after each edit.
+    const groupListEl = overlay.querySelector<HTMLDivElement>("#groupList")!;
+    const renderGroups = async (): Promise<void> => {
+      let groups: Awaited<ReturnType<typeof Bridge.groups>> = [];
+      try {
+        groups = (await Bridge.groups()) ?? [];
+      } catch {
+        groups = [];
+      }
+      if (!groups.length) {
+        groupListEl.innerHTML = `<p class="benco-caption">No groups yet — add a buddy to create one.</p>`;
+        return;
+      }
+      groupListEl.innerHTML = groups
+        .map((g) => {
+          const isDefault = g.name.trim().toLowerCase() === "buddies";
+          const count = `${g.count} ${g.count === 1 ? "buddy" : "buddies"}`;
+          return `
+          <div class="settings__group-row">
+            <span class="settings__group-name">${escapeHTML(g.name)}</span>
+            <span class="benco-caption settings__group-count">${count}</span>
+            <div class="settings__group-acts">
+              <button class="benco-button benco-button--ghost settings__group-rename" data-name="${escapeHTML(g.name)}">Rename</button>
+              ${isDefault ? "" : `<button class="benco-button benco-button--ghost settings__group-delete" data-name="${escapeHTML(g.name)}">Delete</button>`}
+            </div>
+          </div>`;
+        })
+        .join("");
+      for (const btn of groupListEl.querySelectorAll<HTMLButtonElement>(".settings__group-rename")) {
+        btn.addEventListener("click", async () => {
+          const old = btn.dataset.name!;
+          const name = await promptDialog(`Rename group “${old}” to:`, old, {
+            title: "Rename group",
+            okLabel: "Rename",
+          });
+          if (name === null || !name.trim() || name.trim() === old) return;
+          const err = await Bridge.renameGroup(old, name.trim());
+          if (err) {
+            void alertDialog(err.replace(/^oscar:\s*/, ""), { title: "Couldn't rename group" });
+            return;
+          }
+          void renderGroups();
+        });
+      }
+      for (const btn of groupListEl.querySelectorAll<HTMLButtonElement>(".settings__group-delete")) {
+        btn.addEventListener("click", async () => {
+          const name = btn.dataset.name!;
+          const count = groups.find((x) => x.name === name)?.count ?? 0;
+          const msg =
+            count > 0
+              ? `Delete group “${name}”? Its ${count === 1 ? "buddy moves" : `${count} buddies move`} to the default group — nobody is removed or disconnected.`
+              : `Delete the empty group “${name}”?`;
+          if (!(await confirmDialog(msg, { title: "Delete group", okLabel: "Delete", danger: true }))) return;
+          const err = await Bridge.deleteGroup(name);
+          if (err) {
+            void alertDialog(err.replace(/^oscar:\s*/, ""), { title: "Couldn't delete group" });
+            return;
+          }
+          void renderGroups();
+        });
+      }
+    };
+    void renderGroups();
 
     // The recovery key line (proposal §13). Rendered when the panel opens and
     // after a check; nothing else triggers it, and nothing triggers it on a

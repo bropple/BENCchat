@@ -2,6 +2,7 @@ package oscar
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/benco-holdings/benchat/internal/wire"
@@ -329,6 +330,79 @@ func TestApplyServerEditPropagatesAcrossDevices(t *testing.T) {
 		if normName(n) == "meanie" {
 			t.Error("relayed unblock did not propagate")
 		}
+	}
+}
+
+func hasGroup(bl BuddyList, name string) bool {
+	for _, g := range bl.Groups {
+		if strings.EqualFold(g, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRemoveBuddyPrunesEmptyCustomGroup(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Work") // creates a "Work" group
+	if !hasGroup(fb.BuddyList(), "Work") {
+		t.Fatal("Work group not created")
+	}
+	fb.RemoveBuddy("alice")
+	if hasGroup(fb.BuddyList(), "Work") {
+		t.Error("an emptied custom group should be pruned, not left orphaned")
+	}
+}
+
+func TestRemoveBuddyKeepsEmptyDefaultGroup(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Buddies")
+	fb.RemoveBuddy("alice")
+	if !hasGroup(fb.BuddyList(), "Buddies") {
+		t.Error("the default group should survive even when empty")
+	}
+}
+
+func TestMoveBuddyPrunesEmptiedSourceGroup(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Work")
+	fb.MoveBuddy("alice", "Home")
+	if hasGroup(fb.BuddyList(), "Work") {
+		t.Error("moving the last buddy out of a custom group should prune it")
+	}
+	if b, _ := findBuddyEntry(fb.BuddyList(), "alice"); b.Group != "Home" {
+		t.Errorf("alice group = %q, want Home", b.Group)
+	}
+}
+
+func TestRenameGroup(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Work")
+	if _, err := fb.RenameGroup("Work", "Job"); err != nil {
+		t.Fatalf("RenameGroup: %v", err)
+	}
+	if b, _ := findBuddyEntry(fb.BuddyList(), "alice"); b.Group != "Job" {
+		t.Errorf("alice group after rename = %q, want Job", b.Group)
+	}
+	// Collision with another existing group is refused.
+	fb.AddBuddy("bob", "Home")
+	if _, err := fb.RenameGroup("Home", "Job"); err == nil {
+		t.Error("renaming into an existing group name should error")
+	}
+}
+
+func TestDeleteEmptyGroup(t *testing.T) {
+	fb := NewFeedbag(nil)
+	fb.EnsureBaseStructure("Buddies")
+	fb.AddBuddy("alice", "Work")
+	fb.MoveBuddy("alice", "Buddies") // Work now pruned automatically
+	// A non-empty group refuses direct deletion.
+	if _, err := fb.DeleteGroup("Buddies"); err == nil {
+		t.Error("deleting the default group should error")
 	}
 }
 

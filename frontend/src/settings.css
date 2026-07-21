@@ -517,7 +517,8 @@
   background: var(--benco-panel-2);
 }
 
-.settings__blocked {
+.settings__blocked,
+.settings__groups {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -528,6 +529,33 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.settings__group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--benco-border);
+  border-radius: var(--benco-radius);
+  background: var(--benco-panel-2);
+}
+.settings__group-name {
+  color: var(--benco-phosphor);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings__group-count {
+  margin-left: auto;
+  flex: none;
+}
+.settings__group-acts {
+  display: flex;
+  gap: 4px;
+  flex: none;
 }
 
 .settings__device-id {

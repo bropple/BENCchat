@@ -141,7 +141,7 @@ func (f *Feedbag) AddBuddy(screenName, group string) ([]editOp, error) {
 }
 
 // RemoveBuddy deletes screenName from the list and drops it from its group's
-// ordering.
+// ordering, cleaning up the group if that left it empty.
 func (f *Feedbag) RemoveBuddy(screenName string) ([]editOp, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -155,17 +155,41 @@ func (f *Feedbag) RemoveBuddy(screenName string) ([]editOp, error) {
 	ops := []editOp{
 		{wire.FeedbagDeleteItem, wire.SNAC_0x13_0x0A_FeedbagDeleteItem{Items: []wire.FeedbagItem{buddy}}},
 	}
+	f.items = removeAt(f.items, bIdx)
+	ops = append(ops, f.pruneGroupMembership(buddy.GroupID, buddy.ItemID)...)
+	return ops, nil
+}
 
-	// Drop the buddy from its group's ordering, if the group is present.
-	if gIdx := f.findGroupByID(buddy.GroupID); gIdx >= 0 {
-		grp := f.items[gIdx]
-		grp.SetOrder(without(grp.Order(), buddy.ItemID))
-		f.items[gIdx] = grp
-		ops = append(ops, editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{grp}}})
+// pruneGroupMembership removes itemID from group groupID's member ordering. If
+// that empties a NON-default group, the group is deleted and unlinked from the
+// root, so removing the last buddy from a custom group doesn't leave an orphaned
+// empty group behind. The default group is kept even when empty — it's where new
+// buddies land. Returns the resulting edit ops and mutates the mirror.
+func (f *Feedbag) pruneGroupMembership(groupID, itemID uint16) []editOp {
+	gIdx := f.findGroupByID(groupID)
+	if gIdx < 0 {
+		return nil
+	}
+	grp := f.items[gIdx]
+	grp.SetOrder(without(grp.Order(), itemID))
+
+	if len(grp.Order()) == 0 && !strings.EqualFold(grp.Name, DefaultGroupName) {
+		var ops []editOp
+		if rIdx := f.rootIndex(); rIdx >= 0 {
+			root := f.items[rIdx]
+			root.SetOrder(without(root.Order(), groupID))
+			f.items[rIdx] = root
+			ops = append(ops, editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{root}}})
+		}
+		ops = append(ops, editOp{wire.FeedbagDeleteItem, wire.SNAC_0x13_0x0A_FeedbagDeleteItem{Items: []wire.FeedbagItem{grp}}})
+		if gj := f.findGroupByID(groupID); gj >= 0 {
+			f.items = removeAt(f.items, gj)
+		}
+		return ops
 	}
 
-	f.items = removeAt(f.items, bIdx)
-	return ops, nil
+	f.items[gIdx] = grp
+	return []editOp{{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{grp}}}}
 }
 
 // BlockBuddy blocks a user: it adds a deny item and ensures the privacy mode is
@@ -239,6 +263,67 @@ func (f *Feedbag) RenameBuddy(screenName, alias string) ([]editOp, error) {
 	}, nil
 }
 
+// RenameGroup changes a group's display name. Members ride along automatically —
+// they reference the group by id, and each buddy's .Group is derived from this
+// name. Errors if the group is missing or if a DIFFERENT group already has the
+// target name; a case-only change of the same group is allowed.
+func (f *Feedbag) RenameGroup(oldName, newName string) ([]editOp, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	newName = strings.TrimSpace(newName)
+	if newName == "" {
+		return nil, fmt.Errorf("oscar: group name is required")
+	}
+	gIdx := f.findGroupByName(oldName)
+	if gIdx < 0 {
+		return nil, fmt.Errorf("oscar: no group named %q", oldName)
+	}
+	if gj := f.findGroupByName(newName); gj >= 0 && gj != gIdx {
+		return nil, fmt.Errorf("oscar: a group named %q already exists", newName)
+	}
+	grp := f.items[gIdx]
+	grp.Name = newName
+	f.items[gIdx] = grp
+	return []editOp{
+		{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{grp}}},
+	}, nil
+}
+
+// DeleteGroup removes an EMPTY group and unlinks it from the root. It refuses a
+// non-empty group (move its members out first) and the default group. Deleting a
+// non-empty group is done at a higher layer by moving members to the default,
+// which auto-prunes the group; this handles a group that is already empty (e.g.
+// one left orphaned before empty-group cleanup existed).
+func (f *Feedbag) DeleteGroup(name string) ([]editOp, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if strings.EqualFold(strings.TrimSpace(name), DefaultGroupName) {
+		return nil, fmt.Errorf("oscar: the default group cannot be deleted")
+	}
+	gIdx := f.findGroupByName(name)
+	if gIdx < 0 {
+		return nil, fmt.Errorf("oscar: no group named %q", name)
+	}
+	grp := f.items[gIdx]
+	if len(grp.Order()) > 0 {
+		return nil, fmt.Errorf("oscar: group %q is not empty", name)
+	}
+	var ops []editOp
+	if rIdx := f.rootIndex(); rIdx >= 0 {
+		root := f.items[rIdx]
+		root.SetOrder(without(root.Order(), grp.GroupID))
+		f.items[rIdx] = root
+		ops = append(ops, editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{root}}})
+	}
+	ops = append(ops, editOp{wire.FeedbagDeleteItem, wire.SNAC_0x13_0x0A_FeedbagDeleteItem{Items: []wire.FeedbagItem{grp}}})
+	if gj := f.findGroupByName(name); gj >= 0 {
+		f.items = removeAt(f.items, gj)
+	}
+	return ops, nil
+}
+
 // MoveBuddy moves an existing buddy to a different group WITHOUT severing the
 // connection. A group change in OSCAR is a delete of the old row plus an insert
 // under the target group; done in that order the server would see a bare buddy
@@ -302,22 +387,18 @@ func (f *Feedbag) MoveBuddy(screenName, newGroup string) ([]editOp, error) {
 		)
 	}
 
-	// 2. Delete the old row and drop it from the old group's ordering.
+	// 2. Delete the old row, remove it from the mirror, then prune its old group
+	// (which auto-deletes the group if this was its last member and it isn't the
+	// default). Remove by original identity — the appends above shifted indices,
+	// and the old row's name now matches the moved row too.
 	ops = append(ops, editOp{wire.FeedbagDeleteItem, wire.SNAC_0x13_0x0A_FeedbagDeleteItem{Items: []wire.FeedbagItem{old}}})
-	if gi := f.findGroupByID(old.GroupID); gi >= 0 {
-		grp := f.items[gi]
-		grp.SetOrder(without(grp.Order(), old.ItemID))
-		f.items[gi] = grp
-		ops = append(ops, editOp{wire.FeedbagUpdateItem, wire.SNAC_0x13_0x09_FeedbagUpdateItem{Items: []wire.FeedbagItem{grp}}})
-	}
-	// Remove the old row from the mirror by its original identity (appends above
-	// may have shifted indices, and its name now matches the moved row too).
 	for i := range f.items {
 		if f.items[i].IsBuddy() && f.items[i].GroupID == old.GroupID && f.items[i].ItemID == old.ItemID {
 			f.items = removeAt(f.items, i)
 			break
 		}
 	}
+	ops = append(ops, f.pruneGroupMembership(old.GroupID, old.ItemID)...)
 
 	return ops, nil
 }
@@ -397,6 +478,16 @@ func (s *Session) RenameBuddy(screenName, alias string) (BuddyList, error) {
 // move as a removal.
 func (s *Session) MoveBuddy(screenName, newGroup string) (BuddyList, error) {
 	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.MoveBuddy(screenName, newGroup) })
+}
+
+// RenameGroup renames a buddy group.
+func (s *Session) RenameGroup(oldName, newName string) (BuddyList, error) {
+	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.RenameGroup(oldName, newName) })
+}
+
+// DeleteGroup removes an empty group.
+func (s *Session) DeleteGroup(name string) (BuddyList, error) {
+	return s.applyEdit(func() ([]editOp, error) { return s.feedbag.DeleteGroup(name) })
 }
 
 // BlockBuddy blocks a user.

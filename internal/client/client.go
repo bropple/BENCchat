@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -340,6 +341,67 @@ func (c *Client) MoveBuddy(screenName, group string) error {
 	return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
 		return s.MoveBuddy(screenName, group)
 	})
+}
+
+// GroupInfo is a buddy group and how many buddies are filed under it.
+type GroupInfo struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// Groups lists the buddy groups with member counts, in feedbag order.
+func (c *Client) Groups() []GroupInfo {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return nil
+	}
+	bl := session.BuddyList()
+	counts := map[string]int{}
+	for _, b := range bl.Buddies {
+		counts[b.Group]++
+	}
+	out := make([]GroupInfo, 0, len(bl.Groups))
+	for _, g := range bl.Groups {
+		out = append(out, GroupInfo{Name: g, Count: counts[g]})
+	}
+	return out
+}
+
+// RenameGroup renames a buddy group. Members follow automatically.
+func (c *Client) RenameGroup(oldName, newName string) error {
+	return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
+		return s.RenameGroup(oldName, newName)
+	})
+}
+
+// DeleteGroup removes a group. Any members are moved to the default group (which
+// auto-prunes the now-empty group); an already-empty group is deleted directly.
+func (c *Client) DeleteGroup(name string) error {
+	c.mu.Lock()
+	session := c.session
+	c.mu.Unlock()
+	if session == nil {
+		return errors.New("client: not signed on")
+	}
+	var members []string
+	for _, b := range session.BuddyList().Buddies {
+		if strings.EqualFold(b.Group, name) {
+			members = append(members, b.ScreenName)
+		}
+	}
+	if len(members) == 0 {
+		return c.editList(func(s *oscar.Session) (oscar.BuddyList, error) {
+			return s.DeleteGroup(name)
+		})
+	}
+	for _, sn := range members {
+		if err := c.MoveBuddy(sn, oscar.DefaultGroupName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // BlockedUsers returns the screen names on the deny list, which may include

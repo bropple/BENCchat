@@ -593,6 +593,27 @@ func (a *App) BlockedUsers() []string {
 	return a.client.BlockedUsers()
 }
 
+// Groups lists buddy groups with member counts, for the Organization manager.
+func (a *App) Groups() []client.GroupInfo {
+	return a.client.Groups()
+}
+
+// RenameGroup renames a buddy group; its members follow automatically.
+func (a *App) RenameGroup(oldName string, newName string) string {
+	if err := a.client.RenameGroup(oldName, newName); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// DeleteGroup removes a buddy group, moving any members to the default group.
+func (a *App) DeleteGroup(name string) string {
+	if err := a.client.DeleteGroup(name); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 // ProfilePreview is a one-shot profile lookup, for previewing who's asking to
 // connect before you accept.
 type ProfilePreview struct {
