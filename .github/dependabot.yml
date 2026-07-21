@@ -1,0 +1,64 @@
+# Dependency update automation.
+#
+# The point is not that BENCchat has a dependency problem — an audit on
+# 2026-07-21 found nothing reachable in either repo. The point is that a clean
+# scan is a SNAPSHOT, and without this nothing ever reports when it stops being
+# true. This is the only part of the security picture that decays while nobody
+# is looking.
+#
+# Minor and patch updates are grouped into one PR per ecosystem so a project
+# this size gets a single reviewable bump a week rather than a stream of them.
+# Major versions still arrive separately, because those deserve to be read.
+
+version: 2
+
+updates:
+  # Go modules for the client. Note the tree also contains a gitignored clone of
+  # open-oscar-server as a reference; it has no go.mod committed here, so it is
+  # invisible to Dependabot and needs no ignore rule.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      go-minor-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # Frontend build tooling. There are no RUNTIME dependencies — the shipped app
+  # serves frontend/dist from Wails' embedded filesystem — so everything here is
+  # devDependencies (typescript, vite) plus their transitive tree. That is why
+  # the Vite dev-server advisories that npm audit reports do not apply to a
+  # built binary, and why bumping is routine rather than urgent.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(frontend)"
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]
+
+  # The workflows pin actions by major tag (actions/checkout@v4 and friends).
+  # Those tags move, so this mostly catches major bumps — which is exactly the
+  # case worth a PR, since a major action bump can break a build silently.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types: ["minor", "patch"]

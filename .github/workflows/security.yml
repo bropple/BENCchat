@@ -1,0 +1,106 @@
+# Scheduled vulnerability scan.
+#
+# This is the half Dependabot does not do. Dependabot tells you a newer version
+# exists; govulncheck tells you whether a vulnerable SYMBOL is actually reached
+# from this code. That distinction is the whole game: the 2026-07-21 audit found
+# several advisories against modules in the tree and NONE of them reachable, so
+# a scanner that only compares version numbers would have produced noise where
+# govulncheck produced an answer.
+#
+# It runs on a schedule because the interesting failure is not "we changed
+# something" — it is a vulnerability being disclosed against code that has not
+# changed in months. Nothing else in CI would ever notice that.
+
+name: Security
+
+on:
+  schedule:
+    # Mondays, a little after Dependabot's window, so a bump and its scan land
+    # near each other rather than a week apart.
+    - cron: "0 7 * * 1"
+  pull_request:
+    # Also scan when the dependency graph itself moves — including on
+    # Dependabot's own PRs, which is how you find out whether a proposed bump
+    # actually resolves the advisory it claims to.
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "frontend/package.json"
+      - "frontend/package-lock.json"
+      - ".github/workflows/security.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # govulncheck type-checks the whole program, so everything the build needs
+      # must be present first. Two things are load-bearing here and both bite
+      # silently if omitted:
+      #
+      #  1. main.go has //go:embed all:frontend/dist and dist is gitignored, so
+      #     on a fresh clone the ROOT package does not compile until the frontend
+      #     has been built. Without this the scan fails with an embed error that
+      #     looks nothing like a dependency problem.
+      #  2. Wails needs GTK/WebKit headers via cgo on Linux.
+      #
+      # Same ordering as build.yml's check job, for the same reasons.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Frontend install
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend build
+        working-directory: frontend
+        run: npm run build
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      # Fails the job on a reachable vulnerability. Module-level advisories in
+      # packages this code never imports are reported but do not fail, which is
+      # the behaviour that keeps this signal worth reading.
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        # Reported, never fatal. Every advisory in this tree so far has been
+        # against the Vite DEV SERVER, which no shipped artifact runs — the app
+        # serves a static build out of Wails' embedded FS. Failing the build on
+        # those would train everyone to ignore this job, so it prints and
+        # passes; read it when something new appears.
+        run: npm audit --audit-level=moderate || true
