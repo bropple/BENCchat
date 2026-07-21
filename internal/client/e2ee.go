@@ -188,36 +188,90 @@ func (c *Client) openFrom(screenName string) (senderKeys [][32]byte, ourPriv [32
 
 // openWithAny tries every candidate sender key against an envelope, returning
 // the plaintext from whichever authenticates.
-func openWithAny(envelope string, senderKeys [][32]byte, ourPriv [32]byte) (string, bool) {
+func openWithAny(envelope string, senderKeys [][32]byte, ourPriv [32]byte) (e2ee.Stamped, bool) {
 	for _, sk := range senderKeys {
 		if plain, err := e2ee.OpenAny(envelope, sk, ourPriv); err == nil {
 			return plain, true
 		}
 	}
-	return "", false
+	return e2ee.Stamped{}, false
 }
 
 // decodeIncoming returns the display text, whether it decrypted, and — when it
 // did not — the raw envelope, so the message can be recovered once the sender's
 // key arrives rather than being stranded behind a placeholder.
 func (c *Client) decodeIncoming(from, body string) (text string, encrypted bool, cipher string) {
+	text, encrypted, cipher, _ = c.decodeIncomingStamped(from, body)
+	return text, encrypted, cipher
+}
+
+// decodeIncomingStamped is decodeIncoming plus the sender's own claim about when
+// they sent the message.
+//
+// That claim is sealed, so it cannot be forged without the sending key, and it
+// is what makes a replay visible: a server redelivering last month's message
+// gets it rendered with last month's timestamp rather than as something said
+// just now. Zero when the sender told us nothing — a legacy envelope, or a
+// plaintext message — in which case the caller falls back to its own clock.
+func (c *Client) decodeIncomingStamped(from, body string) (text string, encrypted bool, cipher string, sentAt time.Time) {
 	if !e2ee.IsEnvelopeAny(body) {
-		return body, false, ""
+		return body, false, "", time.Time{}
 	}
 	senderKeys, ourPriv, ok := c.openFrom(from)
 	if !ok {
 		go c.RefreshPeerKeys(from) // learn their keys, then retry via learnPeerKeys
-		return "🔒 [encrypted message — waiting for the sender's key…]", false, body
+		return "🔒 [encrypted message — waiting for the sender's key…]", false, body, time.Time{}
 	}
 	if plain, opened := openWithAny(body, senderKeys, ourPriv); opened {
-		return plain, true, ""
+		if c.seenBefore(from, plain.ID) {
+			// An exact duplicate. Not merely odd — the same sealed message
+			// arriving twice is the server handing us a copy it kept.
+			c.log.Warn("dropping a duplicate message", "from", from)
+			return "", false, "", time.Time{}
+		}
+		return plain.Text, true, "", plain.SentAt
 	}
 	// Keep the envelope. This is also what a message sealed before the sender
 	// knew about this device looks like, and re-fetching their keys may add the
 	// sender key that opens it.
 	go c.RefreshPeerKeys(from)
-	return "🔒 [encrypted message — couldn't decrypt]", false, body
+	return "🔒 [encrypted message — couldn't decrypt]", false, body, time.Time{}
 }
+
+// seenBefore records a message ID and reports whether it had already arrived.
+//
+// Bounded and in memory: this catches the replay that is worth catching — the
+// same message delivered twice in a session — without pretending to be a durable
+// ledger. A replay that survives a restart is caught by its timestamp instead,
+// which is the defence that does not depend on remembering anything.
+func (c *Client) seenBefore(from string, id [16]byte) bool {
+	var zero [16]byte
+	if id == zero {
+		return false // a legacy envelope carried no ID; nothing to compare
+	}
+	key := state.NormalizeScreenName(from) + ":" + string(id[:])
+
+	c.seenMu.Lock()
+	defer c.seenMu.Unlock()
+	if c.seenIDs == nil {
+		c.seenIDs = make(map[string]bool, seenIDsMax)
+	}
+	if c.seenIDs[key] {
+		return true
+	}
+	if len(c.seenIDs) >= seenIDsMax {
+		// Cheap eviction: drop everything rather than track an order. The set
+		// exists to catch a burst of duplicates, and losing it costs one missed
+		// duplicate at the boundary, not correctness.
+		c.seenIDs = make(map[string]bool, seenIDsMax)
+	}
+	c.seenIDs[key] = true
+	return false
+}
+
+// seenIDsMax bounds the duplicate set. Large enough to span any plausible burst
+// of redelivery, small enough that it is never a memory concern.
+const seenIDsMax = 4096
 
 // retryPendingDecrypts re-attempts any of this peer's messages that arrived
 // before we held their key. Called whenever a key is learned.
@@ -239,15 +293,15 @@ func (c *Client) retryPendingDecrypts(screenName string) {
 		// and drop the message entirely rather than leaving a placeholder where
 		// the user expects something a person said. An empty result tells the
 		// store to remove it.
-		if e2ee.IsRoomInvite(plain) {
-			c.handleRoomInvite(screenName, plain)
+		if e2ee.IsRoomInvite(plain.Text) {
+			c.handleRoomInvite(screenName, plain.Text)
 			return "", true
 		}
-		if e2ee.IsCatchup(plain) {
-			c.handleCatchup(screenName, plain)
+		if e2ee.IsCatchup(plain.Text) {
+			c.handleCatchup(screenName, plain.Text)
 			return "", true
 		}
-		return plain, true
+		return plain.Text, true
 	})
 }
 

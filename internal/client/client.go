@@ -77,6 +77,12 @@ type Client struct {
 	// onPeerKey is notified when a peer's device set is learned, so the app layer
 	// can compare it against the persisted record and warn on a change.
 	onPeerKey func(screenName string, keys, prev [][32]byte)
+	// seenIDs are the message IDs already delivered this session, for dropping a
+	// message the server hands us twice. Guarded by seenMu, and deliberately
+	// separate from e2eeMu: this is touched on every inbound message and has no
+	// business contending with key lookups.
+	seenMu  sync.Mutex
+	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
 	// keyLookupProbe, when set, stands in for the directory round trip in
@@ -1103,7 +1109,10 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 			return
 		}
 		// Decrypt if it's an E2EE envelope; otherwise it's plaintext as-is.
-		text, encrypted, cipher := c.decodeIncoming(msg.From, msg.Text)
+		text, encrypted, cipher, sentAt := c.decodeIncomingStamped(msg.From, msg.Text)
+		if text == "" && cipher == "" && !encrypted {
+			return // a duplicate the server handed us twice; already logged
+		}
 		// A room invite is machine-to-machine: it carries a group key, not
 		// something a person typed, so it must never land in a conversation.
 		if encrypted && e2ee.IsRoomInvite(text) {
@@ -1114,6 +1123,15 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		if encrypted && e2ee.IsCatchup(text) {
 			c.handleCatchup(msg.From, text)
 			return
+		}
+		// Prefer the sender's own sealed claim about when they sent it. Stamping
+		// the arrival instead is what let a replayed message read as something
+		// said just now: the server chooses when to deliver, so a timestamp it
+		// controls tells you nothing. Falls back to arrival when the sender said
+		// nothing (plaintext, or an older client) or claimed a time far enough
+		// ahead of ours to sort wrongly forever.
+		if e2ee.PlausibleSendTime(sentAt, at) {
+			at = sentAt
 		}
 		c.store.AddMessage(state.Message{
 			From:         msg.From,

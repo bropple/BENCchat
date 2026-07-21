@@ -25,7 +25,8 @@ func TestSealOpenRoundTrip(t *testing.T) {
 		t.Fatal("plaintext leaked into the envelope")
 	}
 
-	got, err := Open(env, alice.Public, bob.Private)
+	gotStamp, err := Open(env, alice.Public, bob.Private)
+	got := gotStamp.Text
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

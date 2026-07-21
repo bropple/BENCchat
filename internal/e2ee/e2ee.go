@@ -68,10 +68,17 @@ func DecodeKey(s string) ([32]byte, error) {
 // envelopePrefix marks an encrypted message body. The leading ESC byte makes an
 // accidental collision with a message a user actually typed essentially
 // impossible, and it survives the ASCII message-text path unchanged.
-const envelopePrefix = "\x1bBENCO-E2EE:v1:"
+const (
+	envelopePrefix = "\x1bBENCO-E2EE:v1:"
+	// v3 is v1 with the sealed plaintext framed by a stamp (see stamp.go), so a
+	// replayed message carries the time its sender actually sent it.
+	envelopePrefixV3 = "\x1bBENCO-E2EE:v3:"
+)
 
-// IsEnvelope reports whether a message body is an E2EE envelope.
-func IsEnvelope(body string) bool { return strings.HasPrefix(body, envelopePrefix) }
+// IsEnvelope reports whether a message body is a single-recipient E2EE envelope.
+func IsEnvelope(body string) bool {
+	return strings.HasPrefix(body, envelopePrefix) || strings.HasPrefix(body, envelopePrefixV3)
+}
 
 // Seal encrypts message for recipientPub, signed with senderPriv. The result is
 // an envelope string safe to carry in a normal (ASCII) message body: the marker
@@ -81,10 +88,14 @@ func Seal(message string, recipientPub, senderPriv [32]byte) (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", fmt.Errorf("e2ee: nonce: %w", err)
 	}
+	stamp, err := NewStamp()
+	if err != nil {
+		return "", err
+	}
 	// Prepend the nonce so the recipient can recover it; box.Seal appends the
 	// ciphertext to whatever is passed as the output prefix.
-	sealed := box.Seal(nonce[:], []byte(message), &nonce, &recipientPub, &senderPriv)
-	return envelopePrefix + base64.StdEncoding.EncodeToString(sealed), nil
+	sealed := box.Seal(nonce[:], encodeStamped(stamp, message), &nonce, &recipientPub, &senderPriv)
+	return envelopePrefixV3 + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
 // BENCchat used to publish device keys inside the Locate profile, hidden in an
@@ -114,22 +125,34 @@ func StripMarker(profile string) string {
 
 // Open decrypts an envelope from senderPub using recipientPriv. It fails if the
 // envelope is malformed or authentication doesn't verify (wrong key / tampered).
-func Open(envelope string, senderPub, recipientPriv [32]byte) (string, error) {
-	if !IsEnvelope(envelope) {
-		return "", errors.New("e2ee: not an envelope")
+func Open(envelope string, senderPub, recipientPriv [32]byte) (Stamped, error) {
+	stamped := strings.HasPrefix(envelope, envelopePrefixV3)
+	var body string
+	switch {
+	case stamped:
+		body = envelope[len(envelopePrefixV3):]
+	case strings.HasPrefix(envelope, envelopePrefix):
+		body = envelope[len(envelopePrefix):]
+	default:
+		return Stamped{}, errors.New("e2ee: not an envelope")
 	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(envelope, envelopePrefix))
+	raw, err := base64.StdEncoding.DecodeString(body)
 	if err != nil {
-		return "", fmt.Errorf("e2ee: decode envelope: %w", err)
+		return Stamped{}, fmt.Errorf("e2ee: decode envelope: %w", err)
 	}
 	if len(raw) < 24 {
-		return "", errors.New("e2ee: envelope too short")
+		return Stamped{}, errors.New("e2ee: envelope too short")
 	}
 	var nonce [24]byte
 	copy(nonce[:], raw[:24])
 	msg, ok := box.Open(nil, raw[24:], &nonce, &senderPub, &recipientPriv)
 	if !ok {
-		return "", errors.New("e2ee: decryption failed (wrong key or tampered)")
+		return Stamped{}, errors.New("e2ee: decryption failed (wrong key or tampered)")
 	}
-	return string(msg), nil
+	if !stamped {
+		// A v1 envelope from an older client carries no stamp. Absent, not zero:
+		// the receiver has nothing better than its own clock.
+		return Stamped{Text: string(msg)}, nil
+	}
+	return decodeStamped(msg)
 }

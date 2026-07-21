@@ -35,7 +35,8 @@ func TestSealForReachesEveryDevice(t *testing.T) {
 	}
 
 	for name, dev := range map[string]KeyPair{"laptop": laptop, "phone": phone, "desktop": desktop} {
-		got, err := OpenAny(env, sender.Public, dev.Private)
+		gotStamp, err := OpenAny(env, sender.Public, dev.Private)
+		got := gotStamp.Text
 		if err != nil {
 			t.Errorf("%s could not open the message: %v", name, err)
 			continue
@@ -82,7 +83,8 @@ func TestSingleRecipientStaysV1(t *testing.T) {
 		t.Fatal("a single-recipient message should use the v1 envelope for compatibility")
 	}
 	// The old opener must still handle it.
-	got, err := Open(env, sender.Public, only.Private)
+	gotStamp, err := Open(env, sender.Public, only.Private)
+	got := gotStamp.Text
 	if err != nil || got != "hi" {
 		t.Fatalf("v1 Open on a single-recipient envelope: %q, %v", got, err)
 	}
@@ -95,7 +97,8 @@ func TestOpenAnyAcceptsV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenAny(env, sender.Public, recip.Private)
+	gotStamp, err := OpenAny(env, sender.Public, recip.Private)
+	got := gotStamp.Text
 	if err != nil || got != "legacy" {
 		t.Fatalf("OpenAny on a v1 envelope: %q, %v", got, err)
 	}

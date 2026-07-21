@@ -53,8 +53,13 @@ const (
 	profileMarkerOpenV2 = "<!--BENCO-E2EE:v2:"
 	profileMarkerOpenV3 = "<!--BENCO-E2EE:v3:"
 	envelopePrefixV2    = "\x1bBENCO-E2EE:v2:"
+	// v4 is v2 with the sealed body framed by a stamp (see stamp.go). Identical
+	// binary layout; only whether the plaintext is framed differs, so the two
+	// share every line of parsing below.
+	envelopePrefixV4 = "\x1bBENCO-E2EE:v4:"
 
 	envelopeVersion2 = 2
+	envelopeVersion4 = 4
 	wrappedKeyLen    = 32 + box.Overhead // a 32-byte message key, sealed
 )
 
@@ -141,7 +146,9 @@ func dedupeKeys(keys [][32]byte) [][32]byte {
 
 // IsEnvelopeAny reports whether a body is an E2EE envelope of either version.
 func IsEnvelopeAny(body string) bool {
-	return IsEnvelope(body) || strings.HasPrefix(body, envelopePrefixV2)
+	return IsEnvelope(body) ||
+		strings.HasPrefix(body, envelopePrefixV2) ||
+		strings.HasPrefix(body, envelopePrefixV4)
 }
 
 // SealFor encrypts message to every recipient device, signed with senderPriv.
@@ -168,8 +175,14 @@ func SealFor(message string, recipients [][32]byte, senderPriv [32]byte) (string
 		return "", fmt.Errorf("e2ee: nonce: %w", err)
 	}
 
-	buf := make([]byte, 0, 1+24+1+len(recipients)*(24+wrappedKeyLen)+len(message)+secretbox.Overhead)
-	buf = append(buf, envelopeVersion2)
+	stamp, err := NewStamp()
+	if err != nil {
+		return "", err
+	}
+	framed := encodeStamped(stamp, message)
+
+	buf := make([]byte, 0, 1+24+1+len(recipients)*(24+wrappedKeyLen)+len(framed)+secretbox.Overhead)
+	buf = append(buf, envelopeVersion4)
 	buf = append(buf, bodyNonce[:]...)
 	buf = append(buf, byte(len(recipients)))
 
@@ -185,9 +198,9 @@ func SealFor(message string, recipients [][32]byte, senderPriv [32]byte) (string
 		buf = append(buf, wrapNonce[:]...)
 		buf = append(buf, wrapped...)
 	}
-	buf = secretbox.Seal(buf, []byte(message), &bodyNonce, &msgKey)
+	buf = secretbox.Seal(buf, framed, &bodyNonce, &msgKey)
 
-	return envelopePrefixV2 + base64.StdEncoding.EncodeToString(buf), nil
+	return envelopePrefixV4 + base64.StdEncoding.EncodeToString(buf), nil
 }
 
 // OpenAny decrypts either envelope version with this device's private key.
@@ -195,31 +208,42 @@ func SealFor(message string, recipients [][32]byte, senderPriv [32]byte) (string
 // For a multi-recipient envelope it tries each wrapped slot until one opens —
 // the sender doesn't label which slot belongs to whom, since that would leak
 // the recipient set to anyone watching the wire.
-func OpenAny(envelope string, senderPub, ourPriv [32]byte) (string, error) {
+func OpenAny(envelope string, senderPub, ourPriv [32]byte) (Stamped, error) {
 	if IsEnvelope(envelope) {
 		return Open(envelope, senderPub, ourPriv)
 	}
-	if !strings.HasPrefix(envelope, envelopePrefixV2) {
-		return "", errors.New("e2ee: not an envelope")
+	stamped := strings.HasPrefix(envelope, envelopePrefixV4)
+	var body string
+	switch {
+	case stamped:
+		body = envelope[len(envelopePrefixV4):]
+	case strings.HasPrefix(envelope, envelopePrefixV2):
+		body = envelope[len(envelopePrefixV2):]
+	default:
+		return Stamped{}, errors.New("e2ee: not an envelope")
 	}
-	raw, err := base64.StdEncoding.DecodeString(envelope[len(envelopePrefixV2):])
+	raw, err := base64.StdEncoding.DecodeString(body)
 	if err != nil {
-		return "", fmt.Errorf("e2ee: decode envelope: %w", err)
+		return Stamped{}, fmt.Errorf("e2ee: decode envelope: %w", err)
 	}
-	if len(raw) < 1+24+1 || raw[0] != envelopeVersion2 {
-		return "", errors.New("e2ee: malformed envelope")
+	wantVersion := byte(envelopeVersion2)
+	if stamped {
+		wantVersion = envelopeVersion4
+	}
+	if len(raw) < 1+24+1 || raw[0] != wantVersion {
+		return Stamped{}, errors.New("e2ee: malformed envelope")
 	}
 
 	var bodyNonce [24]byte
 	copy(bodyNonce[:], raw[1:25])
 	count := int(raw[25])
 	if count == 0 || count > maxRecipients {
-		return "", errors.New("e2ee: implausible recipient count")
+		return Stamped{}, errors.New("e2ee: implausible recipient count")
 	}
 	slotLen := 24 + wrappedKeyLen
 	headerLen := 1 + 24 + 1 + count*slotLen
 	if len(raw) < headerLen {
-		return "", errors.New("e2ee: truncated envelope")
+		return Stamped{}, errors.New("e2ee: truncated envelope")
 	}
 
 	for i := 0; i < count; i++ {
@@ -234,11 +258,14 @@ func OpenAny(envelope string, senderPub, ourPriv [32]byte) (string, error) {
 		copy(msgKey[:], msgKeyBytes)
 		plain, ok := secretbox.Open(nil, raw[headerLen:], &bodyNonce, &msgKey)
 		if !ok {
-			return "", errors.New("e2ee: body failed authentication")
+			return Stamped{}, errors.New("e2ee: body failed authentication")
 		}
-		return string(plain), nil
+		if !stamped {
+			return Stamped{Text: string(plain)}, nil
+		}
+		return decodeStamped(plain)
 	}
-	return "", ErrNotForUs
+	return Stamped{}, ErrNotForUs
 }
 
 // KeysOnlyAdded reports whether every previously-seen key is still present.

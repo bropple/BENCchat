@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/state"
@@ -491,5 +492,66 @@ func TestSealOutboundHonoursTheE2EEToggle(t *testing.T) {
 	}
 	if encrypted || wire != "hello" {
 		t.Errorf("E2EE off still encrypted: encrypted=%v wire=%q", encrypted, wire)
+	}
+}
+
+// TestReplayedMessageKeepsItsOriginalTime is K8's main defence.
+//
+// The server chooses when to deliver, so a timestamp it controls says nothing. A
+// message redelivered weeks later must render with the time its sender sealed
+// into it, which is the tell — a month-old "yes, go ahead" that displays as a
+// month old is not much of an attack.
+func TestReplayedMessageKeepsItsOriginalTime(t *testing.T) {
+	alice, alicePub := newE2EEClient(t)
+	bob, bobPub := newE2EEClient(t)
+	alice.learnPeerKeys("bob", [][32]byte{bobPub})
+	bob.learnPeerKeys("alice", [][32]byte{alicePub})
+
+	peerPub, ourPriv, _ := alice.sealFor("bob")
+	env, err := e2ee.SealFor("yes, go ahead", peerPub, ourPriv)
+	if err != nil {
+		t.Fatalf("SealFor: %v", err)
+	}
+
+	text, encrypted, _, sentAt := bob.decodeIncomingStamped("alice", env)
+	if !encrypted || text != "yes, go ahead" {
+		t.Fatalf("decode = %q encrypted=%v", text, encrypted)
+	}
+	if sentAt.IsZero() {
+		t.Fatal("no send time, so a replay would render as something said just now")
+	}
+	if d := time.Since(sentAt); d < 0 || d > time.Minute {
+		t.Errorf("send time is %v old, want ~now", d)
+	}
+	// The stamp is sealed, so a server holding the envelope cannot move it.
+	if e2ee.PlausibleSendTime(sentAt.Add(48*time.Hour), time.Now()) {
+		t.Error("a send time far in the future was accepted")
+	}
+}
+
+// TestDuplicateMessageIsDropped: the same sealed envelope arriving twice is the
+// server handing us a copy it kept, not something said twice.
+func TestDuplicateMessageIsDropped(t *testing.T) {
+	alice, alicePub := newE2EEClient(t)
+	bob, bobPub := newE2EEClient(t)
+	alice.learnPeerKeys("bob", [][32]byte{bobPub})
+	bob.learnPeerKeys("alice", [][32]byte{alicePub})
+
+	peerPub, ourPriv, _ := alice.sealFor("bob")
+	env, _ := e2ee.SealFor("transfer approved", peerPub, ourPriv)
+
+	if text, encrypted, _, _ := bob.decodeIncomingStamped("alice", env); !encrypted || text == "" {
+		t.Fatalf("first delivery was not accepted: %q encrypted=%v", text, encrypted)
+	}
+	text, encrypted, cipher, _ := bob.decodeIncomingStamped("alice", env)
+	if text != "" || encrypted || cipher != "" {
+		t.Errorf("a replayed message was accepted a second time: %q", text)
+	}
+
+	// A genuinely different message from the same sender still gets through —
+	// the check is on identity, not on content.
+	again, _ := e2ee.SealFor("transfer approved", peerPub, ourPriv)
+	if text, encrypted, _, _ := bob.decodeIncomingStamped("alice", again); !encrypted || text != "transfer approved" {
+		t.Errorf("an identical-text message was mistaken for a replay: %q", text)
 	}
 }
