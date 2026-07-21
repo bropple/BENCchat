@@ -2,9 +2,11 @@ package e2ee
 
 import (
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func mustSigner(t *testing.T) SigningKeyPair {
@@ -99,7 +101,10 @@ func TestTamperedTextFailsVerification(t *testing.T) {
 	if err != nil || !opened.Verified {
 		t.Fatal("setup failed")
 	}
-	forged := signPayload("r", "pay mallory 1000", mustSigner(t)) // different signer
+	forged, err := signPayload("r", "pay mallory 1000", mustSigner(t)) // different signer
+	if err != nil {
+		t.Fatalf("signPayload: %v", err)
+	}
 	tampered, err := sealRoomPayload(forged, key, roomEnvelopePrefixV2)
 	if err != nil {
 		t.Fatal(err)
@@ -228,5 +233,106 @@ func TestDeviceKeySplit(t *testing.T) {
 	// Duplicate devices must not produce duplicate envelope slots.
 	if got := BoxKeysOf(append(devices, Device{Box: box1.Public})); len(got) != 3 {
 		t.Errorf("BoxKeysOf did not dedupe: %d keys, want 3", len(got))
+	}
+}
+
+// TestRoomMessageCarriesSignedStamp: a room message must say when it was sent,
+// or the server can redeliver last month's and have it read as current.
+func TestRoomMessageCarriesSignedStamp(t *testing.T) {
+	alice := mustSigner(t)
+	key := mustRoomKey(t)
+
+	before := time.Now().Add(-time.Second)
+	env, err := SealRoomSigned("r", "ship it", key, alice)
+	if err != nil {
+		t.Fatalf("SealRoomSigned: %v", err)
+	}
+	got, err := OpenRoomSigned("r", env, map[string]RoomKey{key.ID(): key},
+		[]ed25519.PublicKey{alice.Public})
+	if err != nil {
+		t.Fatalf("OpenRoomSigned: %v", err)
+	}
+	if !got.Verified {
+		t.Fatal("a freshly signed message did not verify")
+	}
+	if got.SentAt.Before(before) || got.SentAt.After(time.Now().Add(time.Second)) {
+		t.Errorf("sent-at = %v, not close to now", got.SentAt)
+	}
+	if got.ID == ([16]byte{}) {
+		t.Error("no message ID, so duplicates are undetectable")
+	}
+}
+
+// TestRoomStampIsCoveredBySignature is the whole point of R6.
+//
+// A timestamp the sender does not sign is one anybody downstream can rewrite —
+// and rewriting it is exactly the attack, since a replay is only convincing if
+// it looks recent. Moving a single byte of the stamp must break the signature.
+func TestRoomStampIsCoveredBySignature(t *testing.T) {
+	alice := mustSigner(t)
+	key := mustRoomKey(t)
+
+	payload, err := signPayload("r", "ship it", alice)
+	if err != nil {
+		t.Fatalf("signPayload: %v", err)
+	}
+	// [1] version, [8] signer id, [64] signature, then the stamp.
+	const stampAt = 1 + signerIDLen + ed25519.SignatureSize
+	if len(payload) < stampAt+stampLen {
+		t.Fatalf("payload is %d bytes, too short to carry a stamp", len(payload))
+	}
+
+	// Wind the claimed send time forward, as a server replaying it would.
+	tampered := append([]byte(nil), payload...)
+	tampered[stampAt] ^= 0xFF
+
+	env, err := sealRoomPayload(tampered, key, roomEnvelopePrefixV2)
+	if err != nil {
+		t.Fatalf("sealRoomPayload: %v", err)
+	}
+	_, err = OpenRoomSigned("r", env, map[string]RoomKey{key.ID(): key},
+		[]ed25519.PublicKey{alice.Public})
+	if !errors.Is(err, ErrForgedSignature) {
+		t.Errorf("a rewritten send time was accepted (err=%v)", err)
+	}
+
+	// Same for the message ID, which is what makes a duplicate detectable.
+	tampered = append([]byte(nil), payload...)
+	tampered[stampAt+8] ^= 0xFF
+	env, _ = sealRoomPayload(tampered, key, roomEnvelopePrefixV2)
+	if _, err := OpenRoomSigned("r", env, map[string]RoomKey{key.ID(): key},
+		[]ed25519.PublicKey{alice.Public}); !errors.Is(err, ErrForgedSignature) {
+		t.Errorf("a rewritten message ID was accepted (err=%v)", err)
+	}
+}
+
+// TestRoomV1PayloadStillVerifies: an older client signs without a stamp, and
+// those messages must still open and attribute correctly.
+func TestRoomV1PayloadStillVerifies(t *testing.T) {
+	alice := mustSigner(t)
+	key := mustRoomKey(t)
+
+	// Build a v1 payload by hand — the shape an older BENCchat emits.
+	sig := ed25519.Sign(alice.Private, signingContext("r", "hello from v1"))
+	id, _ := hex.DecodeString(SignerID(alice.Public))
+	payload := []byte{signedPayloadV1}
+	payload = append(payload, id...)
+	payload = append(payload, sig...)
+	payload = append(payload, "hello from v1"...)
+
+	env, err := sealRoomPayload(payload, key, roomEnvelopePrefixV2)
+	if err != nil {
+		t.Fatalf("sealRoomPayload: %v", err)
+	}
+	got, err := OpenRoomSigned("r", env, map[string]RoomKey{key.ID(): key},
+		[]ed25519.PublicKey{alice.Public})
+	if err != nil {
+		t.Fatalf("a v1 signed payload did not open: %v", err)
+	}
+	if !got.Verified || got.Text != "hello from v1" {
+		t.Errorf("v1 payload = %+v, want verified text", got)
+	}
+	if !got.SentAt.IsZero() {
+		t.Errorf("v1 produced a send time from nowhere: %v", got.SentAt)
 	}
 }

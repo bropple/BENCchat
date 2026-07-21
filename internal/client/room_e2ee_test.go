@@ -832,3 +832,43 @@ func TestPlaintextRoomIsUnaffected(t *testing.T) {
 		t.Fatalf("ordinary room message was altered: %+v", d)
 	}
 }
+
+// TestDuplicateRoomMessageIsDropped: the same signed room message arriving twice
+// is the server handing us a copy it kept, not somebody saying it again.
+func TestDuplicateRoomMessageIsDropped(t *testing.T) {
+	sender, _ := newTestClient(t)
+	recipient, _ := newTestClient(t)
+
+	key, _ := e2ee.GenerateRoomKey()
+	signer, _ := e2ee.GenerateSigningKey()
+	sender.SetSigningKey(signer, true)
+	sender.store.UpsertRoom("4-0-r", "project")
+	recipient.store.UpsertRoom("4-0-r", "project")
+	sender.SetRoomKey("4-0-r", key)
+	recipient.SetRoomKey("4-0-r", key)
+	recipient.learnPeerSigningKeys("alice", []ed25519.PublicKey{signer.Public})
+
+	env, encrypted, err := sender.sealRoomMessage("4-0-r", "ship it")
+	if err != nil || !encrypted {
+		t.Fatalf("seal failed: %v", err)
+	}
+
+	first := recipient.decodeRoomMessageFrom("4-0-r", "alice", env)
+	if first.Duplicate || first.Text != "ship it" || !first.Verified {
+		t.Fatalf("first delivery was not accepted: %+v", first)
+	}
+	if first.SentAt.IsZero() {
+		t.Error("no send time, so a replay would render as something said just now")
+	}
+
+	if again := recipient.decodeRoomMessageFrom("4-0-r", "alice", env); !again.Duplicate {
+		t.Errorf("a replayed room message was accepted a second time: %+v", again)
+	}
+
+	// The same words sent again are a new message, not a replay — the check is
+	// on identity, not on content.
+	env2, _, _ := sender.sealRoomMessage("4-0-r", "ship it")
+	if d := recipient.decodeRoomMessageFrom("4-0-r", "alice", env2); d.Duplicate {
+		t.Error("an identical-text message was mistaken for a replay")
+	}
+}

@@ -354,6 +354,14 @@ type roomDecode struct {
 	Encrypted bool
 	Verified  bool
 	Forged    bool
+	// SentAt is when the sender says they sent it, covered by their signature.
+	// Zero for anything that carried no stamp, in which case the caller has
+	// nothing better than its own clock.
+	SentAt time.Time
+	// Duplicate marks a message we have already seen — the same signed message
+	// arriving twice is the server handing us a copy it kept, not somebody
+	// saying the same thing again.
+	Duplicate bool
 }
 
 // decodeRoomMessage turns inbound room text into what to display.
@@ -416,7 +424,11 @@ func (c *Client) decodeRoomMessageFrom(cookie, sender, text string) roomDecode {
 			return roomDecode{Text: "🔒 [encrypted room message — couldn't decrypt]"}
 		}
 	}
-	return roomDecode{Text: msg.Text, Encrypted: true, Verified: msg.Verified}
+	if c.seenBefore(cookie+":"+sender, msg.ID) {
+		c.log.Warn("dropping a duplicate room message", "room", c.roomName(cookie), "from", sender)
+		return roomDecode{Duplicate: true}
+	}
+	return roomDecode{Text: msg.Text, Encrypted: true, Verified: msg.Verified, SentAt: msg.SentAt}
 }
 
 // onRoomInvite is notified when someone shares a room key with us.

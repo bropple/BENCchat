@@ -141,7 +141,11 @@ func SealRoom(message string, k RoomKey) (string, error) {
 // be replayed into a different room, and it sits inside the sealed payload so
 // the server learns nothing about which device sent what.
 func SealRoomSigned(room, message string, k RoomKey, signer SigningKeyPair) (string, error) {
-	return sealRoomPayload(signPayload(room, message, signer), k, roomEnvelopePrefixV2)
+	payload, err := signPayload(room, message, signer)
+	if err != nil {
+		return "", err
+	}
+	return sealRoomPayload(payload, k, roomEnvelopePrefixV2)
 }
 
 func sealRoomPayload(payload []byte, k RoomKey, prefix string) (string, error) {
@@ -198,12 +202,18 @@ func OpenRoomSigned(room, envelope string, keys map[string]RoomKey, senderKeys [
 		return out, errors.New("e2ee: room message failed authentication")
 	}
 
-	text, signerID, sig, signed := parseSignedPayload(plain)
+	text, signerID, sig, stamp, signed := parseSignedPayload(plain)
 	out = SignedMessage{Text: text, SignerID: signerID, Signed: signed}
+	if stamp != nil {
+		// Decoded for the caller's convenience; verification uses the raw bytes.
+		if st, derr := decodeStamped(stamp); derr == nil {
+			out.SentAt, out.ID = st.SentAt, st.ID
+		}
+	}
 	if !signed {
 		return out, nil
 	}
-	verified, verr := VerifySigned(room, text, signerID, sig, senderKeys)
+	verified, verr := VerifySigned(room, text, signerID, sig, stamp, senderKeys)
 	if verr != nil {
 		// Return the text alongside the error so a caller can show WHAT was
 		// forged if it wants to, but the error makes ignoring it hard.

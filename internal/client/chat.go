@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/oscar"
 	"github.com/benco-holdings/benchat/internal/state"
 	"github.com/benco-holdings/benchat/internal/wire"
@@ -247,12 +248,23 @@ func (c *Client) handleChatSNAC(cookie string, frame wire.SNACFrame, body []byte
 			return
 		}
 		d := c.decodeRoomMessageFrom(cookie, sender, text)
+		if d.Duplicate {
+			return // already logged; the server handed us a copy it kept
+		}
 		envelope := ""
 		if d.Encrypted {
 			envelope = text
 		}
+		// Prefer the sender's signed claim about when they sent it. Stamping the
+		// arrival is what let a replayed message read as something said just now,
+		// since the server chooses when to deliver — and unlike the arrival time,
+		// this one is covered by the signature and cannot be rewritten in transit.
+		at := time.Now()
+		if e2ee.PlausibleSendTime(d.SentAt, at) {
+			at = d.SentAt
+		}
 		c.store.AddRoomMessage(cookie, state.Message{
-			From: sender, Text: d.Text, At: time.Now(),
+			From: sender, Text: d.Text, At: at,
 			Encrypted: d.Encrypted, SenderVerified: d.Verified, Forged: d.Forged,
 			Envelope: envelope,
 		})

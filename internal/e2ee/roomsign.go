@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Per-sender signatures for room messages.
@@ -35,6 +36,12 @@ const (
 	signerIDLen = 8
 	// signedPayloadV1 prefixes the plaintext inside a sealed room message.
 	signedPayloadV1 = 1
+	// signedPayloadV2 adds a stamp — when the sender sent it, and a message ID —
+	// between the signature and the text, and BINDS both into what is signed.
+	// Without that a room message said nothing about when it was said, so the
+	// server could replay any message it had seen, whenever it liked, and every
+	// copy verified as genuinely the sender's. See stamp.go.
+	signedPayloadV2 = 2
 )
 
 // ErrForgedSignature means a room message carried a signature that does NOT
@@ -106,13 +113,28 @@ func SignerID(pub ed25519.PublicKey) string {
 	return hex.EncodeToString(sum[:signerIDLen])
 }
 
-// signingContext is what actually gets signed: the room name and the message,
+// signingContext is what a v1 payload signed: the room name and the message,
 // separated by a byte that cannot occur in either, so a room named "a" with
 // message "b:c" cannot collide with room "a:b" and message "c".
+//
+// Kept because v1 messages still have to verify.
 func signingContext(room, message string) []byte {
 	out := make([]byte, 0, len(room)+len(message)+1)
 	out = append(out, room...)
 	out = append(out, 0x00)
+	out = append(out, message...)
+	return out
+}
+
+// signingContextV2 additionally covers the stamp, which is the entire point of
+// carrying one: a timestamp the sender does not sign is a timestamp anybody
+// downstream can rewrite, and the attack it defends against is precisely a
+// downstream party choosing when a message appears to have been sent.
+func signingContextV2(room string, stamp []byte, message string) []byte {
+	out := make([]byte, 0, len(room)+1+len(stamp)+len(message))
+	out = append(out, room...)
+	out = append(out, 0x00)
+	out = append(out, stamp...)
 	out = append(out, message...)
 	return out
 }
@@ -122,17 +144,25 @@ func signingContext(room, message string) []byte {
 //	[1] version
 //	[8] signer key ID
 //	[64] signature
+//	[24] stamp — sent-at millis, then message ID
 //	[..] message
-func signPayload(room, message string, kp SigningKeyPair) []byte {
-	sig := ed25519.Sign(kp.Private, signingContext(room, message))
+func signPayload(room, message string, kp SigningKeyPair) ([]byte, error) {
+	st, err := NewStamp()
+	if err != nil {
+		return nil, err
+	}
+	stamp := encodeStamped(st, "") // header only; the text is appended separately
+
+	sig := ed25519.Sign(kp.Private, signingContextV2(room, stamp, message))
 	id, _ := hex.DecodeString(SignerID(kp.Public))
 
-	out := make([]byte, 0, 1+signerIDLen+ed25519.SignatureSize+len(message))
-	out = append(out, signedPayloadV1)
+	out := make([]byte, 0, 1+signerIDLen+ed25519.SignatureSize+stampLen+len(message))
+	out = append(out, signedPayloadV2)
 	out = append(out, id...)
 	out = append(out, sig...)
+	out = append(out, stamp...)
 	out = append(out, message...)
-	return out
+	return out, nil
 }
 
 // SignedMessage is the result of opening a signed room payload.
@@ -146,19 +176,35 @@ type SignedMessage struct {
 	// Verified reports that the signature checked out against a key the claimed
 	// sender publishes.
 	Verified bool
+	// SentAt is when the sender says they sent it, covered by the signature.
+	// Zero for a v1 payload, which carried no stamp.
+	SentAt time.Time
+	// ID is random per message, for spotting a duplicate.
+	ID [16]byte
 }
 
 // parseSignedPayload splits a decrypted payload back into message and
 // signature. A payload that isn't in the signed format is returned as a plain
 // unsigned message — that is what an older client sends.
-func parseSignedPayload(raw []byte) (message string, signerID string, sig []byte, signed bool) {
+func parseSignedPayload(raw []byte) (message string, signerID string, sig []byte, stamp []byte, signed bool) {
 	const header = 1 + signerIDLen + ed25519.SignatureSize
-	if len(raw) < header || raw[0] != signedPayloadV1 {
-		return string(raw), "", nil, false
+	if len(raw) < header {
+		return string(raw), "", nil, nil, false
 	}
-	id := hex.EncodeToString(raw[1 : 1+signerIDLen])
-	sig = raw[1+signerIDLen : header]
-	return string(raw[header:]), id, sig, true
+	switch raw[0] {
+	case signedPayloadV1:
+		id := hex.EncodeToString(raw[1 : 1+signerIDLen])
+		return string(raw[header:]), id, raw[1+signerIDLen : header], nil, true
+	case signedPayloadV2:
+		if len(raw) < header+stampLen {
+			return string(raw), "", nil, nil, false
+		}
+		id := hex.EncodeToString(raw[1 : 1+signerIDLen])
+		return string(raw[header+stampLen:]), id, raw[1+signerIDLen : header],
+			raw[header : header+stampLen], true
+	}
+	// Not the signed format at all — that is what an older client sends.
+	return string(raw), "", nil, nil, false
 }
 
 // VerifySigned checks a parsed payload against the signing keys the claimed
@@ -168,11 +214,18 @@ func parseSignedPayload(raw []byte) (message string, signerID string, sig []byte
 // devices). An empty set means we haven't learned their keys yet, which is
 // "unknown", not "forged" — the two must not be conflated, since one is a
 // routine timing gap and the other is an attack.
-func VerifySigned(room, message, signerID string, sig []byte, senderKeys []ed25519.PublicKey) (bool, error) {
+// stamp is the raw stamp bytes for a v2 payload, or nil for v1. It is passed as
+// bytes rather than a parsed struct so the context is rebuilt from exactly what
+// arrived, never from a re-encoding of it — a signature covers bytes, and any
+// round trip through a struct is a chance to produce different ones.
+func VerifySigned(room, message, signerID string, sig, stamp []byte, senderKeys []ed25519.PublicKey) (bool, error) {
 	if len(senderKeys) == 0 {
 		return false, nil // unknown signer; caller re-checks once keys arrive
 	}
 	ctx := signingContext(room, message)
+	if stamp != nil {
+		ctx = signingContextV2(room, stamp, message)
+	}
 	var sawSigner bool
 	for _, k := range senderKeys {
 		if SignerID(k) != signerID {
