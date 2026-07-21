@@ -102,6 +102,11 @@ type Config struct {
 	// desktop environment's. Off by default — the DE normally handles window
 	// decorations. Read at window-creation time, so a change needs a restart.
 	CustomFrame bool `json:"customFrame,omitempty"`
+
+	// SkinTone is the preferred emoji skin tone: 0 (or absent) = the neutral
+	// yellow default, 1–5 = Fitzpatrick types 1-2…6. Applied to tone-capable
+	// emoji in the picker; a per-emoji long-press can still override it.
+	SkinTone int `json:"skinTone,omitempty"`
 }
 
 // Theme is a saved appearance: a preset name, plus any per-token overrides the

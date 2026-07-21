@@ -1028,6 +1028,35 @@
   padding: 10px 4px;
 }
 
+/* A faint corner dot marks emoji that take a skin tone (long-press for the palette). */
+.chat__emoji--tone {
+  position: relative;
+}
+.chat__emoji--tone::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--benco-dim-2);
+  opacity: 0.5;
+}
+
+/* Floating six-swatch palette shown on long-press. */
+.chat__tone-palette {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: var(--benco-panel);
+  border: 1px solid var(--benco-green-deep);
+  border-radius: var(--benco-radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
 /* Category tab strip. */
 .chat__emoji-tabs {
   display: flex;

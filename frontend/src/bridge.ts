@@ -226,6 +226,8 @@ export interface Preferences {
   e2eeEnabled: boolean;
   profile: string;
   customFrame: boolean;
+  /** Preferred emoji skin tone: 0 = neutral yellow default, 1–5 = Fitzpatrick. */
+  skinTone: number;
 }
 
 /** Event kinds emitted by the Go state store. Mirrors state.Event* constants. */
@@ -325,6 +327,7 @@ interface AppBindings {
   ChangeEmail(email: string): Promise<string>;
   GetPreferences(): Promise<Preferences>;
   SaveTheme(name: string, tokens: Record<string, string>): Promise<string>;
+  SetSkinTone(tone: number): Promise<string>;
   SetSoundEnabled(enabled: boolean): Promise<string>;
   SetSoundPack(name: string): Promise<string>;
   SetSoundMuted(key: string, muted: boolean): Promise<string>;
@@ -463,6 +466,7 @@ export const Bridge = {
   changeEmail: (email: string) => app().ChangeEmail(email),
 
   getPreferences: () => app().GetPreferences(),
+  setSkinTone: (tone: number) => app().SetSkinTone(tone),
   saveTheme: (name: string, tokens: Record<string, string>) =>
     app().SaveTheme(name, tokens),
   setSoundEnabled: (enabled: boolean) => app().SetSoundEnabled(enabled),

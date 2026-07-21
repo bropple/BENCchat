@@ -32,6 +32,7 @@ import {
 } from "./sound";
 import { alertDialog, confirmDialog, recoveryKeyDialog } from "./dialog";
 import { offerRecoveryKeyRotation } from "./identity";
+import { setSkinTonePref } from "./emojiTone";
 
 /** Minimal HTML escape for values interpolated into this panel's markup.
  *  Device keys are base64 and fingerprints are digits, but neither is worth
@@ -81,6 +82,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
     e2eeEnabled: boolean;
     profile: string;
     customFrame: boolean;
+    skinTone: number;
   }): void {
     overlay.innerHTML = `
       <div class="settings" role="dialog" aria-label="Settings">
@@ -119,6 +121,19 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
                   </div>`,
                   )
                   .join("")}
+              </section>
+
+              <section class="settings__section">
+                <div class="benco-label">Emoji skin tone</div>
+                <p class="benco-caption settings__hint">The default tone for emoji in the picker. Long-press any supported emoji (the ones with a dot) to pick a different tone just for that one. This setting lives on this computer.</p>
+                <div class="settings__tones" id="skinTones">
+                  ${["✋", "✋🏻", "✋🏼", "✋🏽", "✋🏾", "✋🏿"]
+                    .map(
+                      (e, i) =>
+                        `<button type="button" class="settings__tone${p.skinTone === i ? " is-active" : ""}" data-tone="${i}" title="${i === 0 ? "Default (yellow)" : "Type " + i}">${e}</button>`,
+                    )
+                    .join("")}
+                </div>
               </section>
 
               <section class="settings__section">
@@ -359,6 +374,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
     e2eeEnabled: boolean;
     profile: string;
     customFrame: boolean;
+    skinTone: number;
   }): void {
     overlay.querySelector<HTMLButtonElement>("#setClose")!.addEventListener("click", close);
     overlay.addEventListener("click", (e) => {
@@ -426,6 +442,19 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
         title: "Window frame",
       });
     });
+
+    // Emoji skin tone: persist and update the live value so the picker reflects
+    // it without a reload.
+    for (const btn of overlay.querySelectorAll<HTMLButtonElement>(".settings__tone")) {
+      btn.addEventListener("click", () => {
+        const tone = Number(btn.dataset.tone);
+        for (const b of overlay.querySelectorAll<HTMLButtonElement>(".settings__tone")) {
+          b.classList.toggle("is-active", b === btn);
+        }
+        void Bridge.setSkinTone(tone);
+        setSkinTonePref(tone);
+      });
+    }
 
     // Sound pack selection + per-event previews. Selecting a pack applies it
     // immediately (so future notifications use it) and persists the choice.
@@ -816,6 +845,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
         e2eeEnabled: prefs.e2eeEnabled,
         profile: prefs.profile ?? "",
         customFrame: prefs.customFrame,
+        skinTone: prefs.skinTone ?? 0,
       });
     })
     .catch(() =>
@@ -827,6 +857,7 @@ export function openSettings(onSoundChange: (on: boolean) => void): SettingsHand
         e2eeEnabled: false,
         profile: "",
         customFrame: false,
+        skinTone: 0,
       }),
     );
 

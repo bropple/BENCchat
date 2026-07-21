@@ -24,8 +24,9 @@ import {
 } from "./sound";
 import { alertDialog, confirmDialog, promptDialog, choiceDialog } from "./dialog";
 import { renderMessageBody } from "./message";
-import { EMOJI_CATEGORIES } from "./emoji";
-import { EMOJI_NAMES, EMOJI_KEYWORDS } from "./emoji_names";
+import { EMOJI_CATEGORIES, EMOJI_NAMES } from "./emoji_data";
+import { EMOJI_KEYWORDS } from "./emoji_synonyms";
+import { applyTone, toneable, toneVariants, onSkinToneChange, setSkinTonePref } from "./emojiTone";
 
 /** How long after the last keystroke we tell the other end we stopped typing. */
 const TYPING_IDLE_MS = 3000;
@@ -1238,13 +1239,72 @@ export function renderRoster(
   // categories only appears once in results.
   const allEmoji = [...new Set(EMOJI_CATEGORIES.flatMap((c) => c.list))];
 
-  // Wire an emoji button: mousedown + preventDefault keeps the textarea's focus
-  // and caret, and the panel stays open so you can pick several in a row.
+  // The tone palette shown on a long-press. One at a time, tracked here so an
+  // outside click or the next long-press can dismiss it.
+  let tonePaletteEl: HTMLDivElement | null = null;
+  function closeTonePalette(): void {
+    tonePaletteEl?.remove();
+    tonePaletteEl = null;
+  }
+  function openTonePalette(anchor: HTMLElement, base: string): void {
+    closeTonePalette();
+    const pal = document.createElement("div");
+    pal.className = "chat__tone-palette";
+    pal.innerHTML = toneVariants(base)
+      .map((v) => `<button type="button" class="chat__emoji" tabindex="-1">${v}</button>`)
+      .join("");
+    // Inside the panel (not the body) so clicking a swatch counts as "inside the
+    // picker" and doesn't close it; position:fixed still places it by the anchor.
+    emojiPanel.appendChild(pal);
+    const r = anchor.getBoundingClientRect();
+    // Sit above the emoji, clamped to the viewport.
+    const w = pal.offsetWidth || 6 * 30;
+    const left = Math.max(6, Math.min(r.left - w / 2 + r.width / 2, window.innerWidth - w - 6));
+    let top = r.top - pal.offsetHeight - 6;
+    if (top < 6) top = r.bottom + 6;
+    pal.style.left = `${left}px`;
+    pal.style.top = `${top}px`;
+    for (const b of pal.querySelectorAll<HTMLButtonElement>(".chat__emoji")) {
+      b.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        insertAtCursor(chatInputEl, b.textContent ?? "");
+        closeTonePalette();
+      });
+    }
+    tonePaletteEl = pal;
+  }
+
+  // Wire an emoji button. A short press inserts the emoji in the current default
+  // tone; holding a tone-capable one opens the six-swatch palette to pick a tone
+  // for that emoji. mousedown preventDefault keeps the textarea's focus and caret,
+  // and the panel stays open so you can pick several in a row.
   function wireEmojiButton(btn: HTMLButtonElement): void {
+    const base = btn.dataset.base ?? btn.textContent ?? "";
+    let timer = 0;
+    let longPressed = false;
+    const clearTimer = (): void => {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = 0;
+      }
+    };
     btn.addEventListener("mousedown", (e) => {
       e.preventDefault();
-      insertAtCursor(chatInputEl, btn.textContent ?? "");
+      longPressed = false;
+      closeTonePalette();
+      if (toneable(base)) {
+        timer = window.setTimeout(() => {
+          longPressed = true;
+          openTonePalette(btn, base);
+        }, 450);
+      }
     });
+    btn.addEventListener("mouseup", () => {
+      clearTimer();
+      // The long-press already opened the palette; don't also insert.
+      if (!longPressed) insertAtCursor(chatInputEl, applyTone(base));
+    });
+    btn.addEventListener("mouseleave", clearTimer);
   }
 
   function buildEmojiPanel(): void {
@@ -1257,7 +1317,7 @@ export function renderRoster(
         <div class="chat__emoji-section" data-cat="${i}">
           <div class="chat__emoji-cat-label">${escapeHTML(c.label)}</div>
           <div class="chat__emoji-row">
-            ${c.list.map((e) => `<button type="button" class="chat__emoji" tabindex="-1">${e}</button>`).join("")}
+            ${c.list.map((e) => `<button type="button" class="chat__emoji${toneable(e) ? " chat__emoji--tone" : ""}" data-base="${escapeAttr(e)}" tabindex="-1">${applyTone(e)}</button>`).join("")}
           </div>
         </div>`,
     ).join("");
@@ -1299,7 +1359,7 @@ export function renderRoster(
       );
       results.innerHTML = hits.length
         ? `<div class="chat__emoji-row">${hits
-            .map((e) => `<button type="button" class="chat__emoji" tabindex="-1">${e}</button>`)
+            .map((e) => `<button type="button" class="chat__emoji${toneable(e) ? " chat__emoji--tone" : ""}" data-base="${escapeAttr(e)}" tabindex="-1">${applyTone(e)}</button>`)
             .join("")}</div>`
         : `<div class="chat__emoji-empty benco-caption">No emoji match “${escapeHTML(q)}”.</div>`;
       for (const btn of results.querySelectorAll<HTMLButtonElement>(".chat__emoji")) {
@@ -1410,6 +1470,10 @@ export function renderRoster(
 
   // Emoji picker: toggle on the button, insert on pick, close on outside click.
   buildEmojiPanel();
+  // Load the saved skin tone, and rebuild the picker whenever it changes (from
+  // Settings) so the grid shows emoji in the chosen tone.
+  void Bridge.getPreferences().then((p) => setSkinTonePref(p.skinTone ?? 0));
+  onSkinToneChange(buildEmojiPanel);
   emojiBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     emojiPanel.hidden = !emojiPanel.hidden;
@@ -1424,12 +1488,15 @@ export function renderRoster(
     }
   });
   document.addEventListener("click", (e) => {
+    // A tone palette that isn't itself being clicked is dismissed.
+    if (tonePaletteEl && !tonePaletteEl.contains(e.target as Node)) closeTonePalette();
     if (
       !emojiPanel.hidden &&
       e.target !== emojiBtn &&
       !emojiPanel.contains(e.target as Node)
     ) {
       emojiPanel.hidden = true;
+      closeTonePalette();
     }
     // A click anywhere but inside the row menu closes it (the ⋯ buttons
     // stopPropagation, so they don't self-close).

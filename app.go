@@ -774,6 +774,7 @@ type Preferences struct {
 	E2EEEnabled          bool         `json:"e2eeEnabled"`
 	Profile              string       `json:"profile"`
 	CustomFrame          bool         `json:"customFrame"`
+	SkinTone             int          `json:"skinTone"`
 }
 
 // GetPreferences returns the persisted theme, sound, history, and encryption
@@ -789,7 +790,21 @@ func (a *App) GetPreferences() Preferences {
 		E2EEEnabled:          a.cfg.E2EEOn(),
 		Profile:              a.cfg.Profile,
 		CustomFrame:          a.cfg.CustomFrame,
+		SkinTone:             a.cfg.SkinTone,
 	}
+}
+
+// SetSkinTone persists the preferred emoji skin tone (0 = neutral yellow default,
+// 1–5 = Fitzpatrick types). Out-of-range values are clamped to the default.
+func (a *App) SetSkinTone(tone int) string {
+	if tone < 0 || tone > 5 {
+		tone = 0
+	}
+	a.cfg.SkinTone = tone
+	if err := config.Save(a.cfg); err != nil {
+		return err.Error()
+	}
+	return ""
 }
 
 // --- Local chat history ---
