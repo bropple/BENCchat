@@ -310,6 +310,58 @@ rather than a row it authors — for the same reason. A server that can invent a
 ban can exclude anyone from any room, and having it check a signature instead
 costs almost nothing given the machinery already exists.
 
+### An invite cannot quietly undo a ban
+
+Inviting somebody who is banned would otherwise produce the worst of both: a
+member holding a valid key who still cannot get through the door, and a ban
+lifted by nobody in particular.
+
+So an invite **refuses** when the target is banned. What happens next depends on
+whether the inviter could have lifted that ban anyway:
+
+- **A mod is refused outright**, and told why: the person is banned and a mod
+  cannot change that. Ask a senior mod. A mod must never be able to route around
+  the ban power they do not have by using the invite they do.
+- **A senior mod or the owner** — only for bans they are permitted to lift — is
+  offered lifting it *and* inviting as one deliberate action. Two things are
+  happening and the dialog says both. The ban is properly lifted and recorded,
+  never silently bypassed.
+
+### Kicks are recorded, and the person is told
+
+A kick used to leave no trace at all, which made "who keeps throwing me out of
+this room?" unanswerable from either side.
+
+**A room keeps a kick log**, server-side, visible to the owner and both mod
+tiers: who was kicked, by whom, when, and why. Like role and ban statements it is
+signed by whoever performed it, so the log is verifiable rather than the server's
+word — otherwise an operator could quietly attribute a kick to a mod who never
+made one.
+
+Bounded, unlike the ban list. Bans are authority state and are kept forever; a
+kick log is operational history, answering "what has been happening lately"
+rather than standing as a permanent record, so it keeps the most recent entries
+and lets the rest go.
+
+**The person kicked is told, with an optional reason** written by whoever kicked
+them:
+
+> You were kicked from **project-planning**.
+> Reason: being an asshole
+
+Two things about that reason worth deciding deliberately rather than discovering:
+
+- **It is not end-to-end encrypted, and the person typing it should be told so.**
+  The kick is enforced by the server, the reason travels with it, and unlike room
+  messages the operator can read it. That is a small leak, but §5's posture
+  applies: be legible about what the cryptography does not cover rather than
+  imply a privacy that is not there.
+- **It is a message to somebody who is being ejected**, which makes it a channel
+  for exactly the behaviour a kick is usually a response to. It should be
+  attributable and unmistakably a moderation notice rather than something that
+  reads like a DM, and it should respect blocking the same way anything else
+  does. Optional, and blank is a perfectly good answer.
+
 ### A ban manager, per room
 
 Bans accumulate silently and are otherwise invisible: nobody can audit a list
@@ -475,10 +527,15 @@ to advance or replace a room's key is exactly what that touches.
 - ~~**Should a reform be able to DROP inherited bans deliberately?**~~ Answered in
   §7: yes, as an explicit choice at reform time. Carrying them over stays the
   default.
-- **Does a ban survive the banned person being re-invited?** A ban blocks the
-  join; an invite hands over a key. Nothing currently stops a mod inviting
-  somebody a senior mod has banned, producing a member who holds the key and
-  cannot get in. The invite should probably refuse, and say why.
-- **Is a kick recorded anywhere?** Bans get a manager and an audit trail; kicks
-  are transient by design and leave no trace. That is defensible, but it means
-  "who keeps kicking me out?" has no answer.
+- ~~**Does a ban survive the banned person being re-invited?**~~ Answered in §7:
+  the invite refuses. A mod is refused outright; a senior mod or the owner is
+  offered lifting and inviting as one deliberate act.
+- ~~**Is a kick recorded anywhere?**~~ Answered in §7: a bounded, signed kick log
+  visible to the owner and both mod tiers, and the person kicked is told with an
+  optional reason.
+- **Does the kick log survive a reform?** Bans do, because they are authority
+  state. A kick log is operational history and the argument is weaker either way.
+- **Can a kick reason be edited or withdrawn** once sent? It has already been
+  delivered, so no — but the log entry is what everyone else sees afterwards, and
+  a mod who typed something regrettable will want to. Probably: the delivered
+  notice stands, the log keeps what was sent.
