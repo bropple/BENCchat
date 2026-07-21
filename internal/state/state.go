@@ -116,6 +116,12 @@ type Message struct {
 	// against the sender's published keys. Absent on 1:1 messages, which are
 	// authenticated by the encryption itself.
 	SenderVerified bool `json:"senderVerified,omitempty"`
+	// Signed means a signature was PRESENT, whether or not it could be checked.
+	// Signed-but-unverified and not-signed-at-all are different situations and
+	// were rendering identically: the first is "we have not fetched this
+	// sender's keys yet", which resolves and which a hostile server can induce by
+	// withholding them, and the second is "there is nothing here to check".
+	Signed bool `json:"signed,omitempty"`
 	// Forged marks a room message whose signature did NOT verify — positive
 	// evidence of impersonation, not merely an unknown sender.
 	Forged bool `json:"forged,omitempty"`
@@ -1173,4 +1179,78 @@ func (s *Store) Reset() {
 	s.rooms = make(map[string]*Room)
 	s.mu.Unlock()
 	s.emit(Event{Kind: EventBuddyListChanged})
+}
+
+// ReverifyRoomMessages re-checks the signatures on room messages from
+// screenName, for when the sender's signing keys arrive after their messages
+// did.
+//
+// check is given the room cookie and the stored envelope and returns whether the
+// signature now verifies, whether it is positively forged, and whether it could
+// be evaluated at all. Only messages that are still unresolved are offered —
+// something already verified or already flagged forged is settled.
+//
+// Follows DecryptPending's shape for the same reason: the callback belongs to
+// the client layer and reads this store, so it must not run under the lock.
+func (s *Store) ReverifyRoomMessages(screenName string, check func(cookie, envelope string) (verified, forged, ok bool)) bool {
+	want := NormalizeScreenName(screenName)
+
+	type pending struct {
+		cookie   string
+		envelope string
+	}
+	var todo []pending
+
+	s.mu.Lock()
+	for cookie, r := range s.rooms {
+		for i := range r.Messages {
+			m := r.Messages[i]
+			if m.Envelope == "" || m.SenderVerified || m.Forged {
+				continue
+			}
+			if NormalizeScreenName(m.From) != want {
+				continue
+			}
+			todo = append(todo, pending{cookie: cookie, envelope: m.Envelope})
+		}
+	}
+	s.mu.Unlock()
+
+	if len(todo) == 0 {
+		return false
+	}
+	type outcome struct{ verified, forged bool }
+	results := make(map[string]outcome, len(todo))
+	for _, p := range todo {
+		if verified, forged, ok := check(p.cookie, p.envelope); ok && (verified || forged) {
+			results[p.envelope] = outcome{verified: verified, forged: forged}
+		}
+	}
+	if len(results) == 0 {
+		return false
+	}
+
+	// Re-acquire and apply, matching on the envelope rather than an index, since
+	// the slice may have grown or been trimmed in the meantime.
+	s.mu.Lock()
+	touched := map[string]bool{}
+	for cookie, r := range s.rooms {
+		for i := range r.Messages {
+			res, hit := results[r.Messages[i].Envelope]
+			if !hit || r.Messages[i].Envelope == "" {
+				continue
+			}
+			if r.Messages[i].SenderVerified != res.verified || r.Messages[i].Forged != res.forged {
+				r.Messages[i].SenderVerified = res.verified
+				r.Messages[i].Forged = res.forged
+				touched[cookie] = true
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	for cookie := range touched {
+		s.emit(Event{Kind: EventRoomChanged, RoomKey: cookie})
+	}
+	return len(touched) > 0
 }

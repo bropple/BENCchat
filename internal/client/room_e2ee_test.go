@@ -872,3 +872,97 @@ func TestDuplicateRoomMessageIsDropped(t *testing.T) {
 		t.Error("an identical-text message was mistaken for a replay")
 	}
 }
+
+// TestUnknownSignerResolvesWhenKeysArrive is R7.
+//
+// A signature we cannot check because the sender's keys have not arrived is a
+// TIMING GAP, not a verdict — but the badge went up on arrival and stayed for
+// the life of the session even after the keys landed. That made a server
+// withholding keys indistinguishable from an ordinary delay.
+func TestUnknownSignerResolvesWhenKeysArrive(t *testing.T) {
+	sender, _ := newTestClient(t)
+	recipient, rstore := newTestClient(t)
+
+	key, _ := e2ee.GenerateRoomKey()
+	signer, _ := e2ee.GenerateSigningKey()
+	sender.SetSigningKey(signer, true)
+	sender.store.UpsertRoom("4-0-r", "project")
+	rstore.UpsertRoom("4-0-r", "project")
+	sender.SetRoomKey("4-0-r", key)
+	recipient.SetRoomKey("4-0-r", key)
+	// Deliberately NOT learning alice's signing keys yet.
+
+	env, encrypted, err := sender.sealRoomMessage("4-0-r", "ship it")
+	if err != nil || !encrypted {
+		t.Fatalf("seal failed: %v", err)
+	}
+
+	d := recipient.decodeRoomMessageFrom("4-0-r", "alice", env)
+	if d.Forged {
+		t.Fatal("an uncheckable signature was reported as forged")
+	}
+	if d.Verified {
+		t.Fatal("a signature verified against keys we do not hold")
+	}
+	if !d.Signed {
+		t.Error("a signature was present but not reported as such — this is what made " +
+			"a withheld key look like an unsigned message from an old client")
+	}
+
+	rstore.AddRoomMessage("4-0-r", state.Message{
+		From: "alice", Text: d.Text, Encrypted: true,
+		SenderVerified: d.Verified, Signed: d.Signed, Envelope: env,
+	})
+
+	// The keys arrive. Everything already shown must be re-checked in place.
+	recipient.learnPeerSigningKeys("alice", []ed25519.PublicKey{signer.Public})
+
+	room, ok := rstore.Room("4-0-r")
+	if !ok || len(room.Messages) != 1 {
+		t.Fatalf("room state lost: ok=%v", ok)
+	}
+	if !room.Messages[0].SenderVerified {
+		t.Error("a message stayed unverified after its sender's keys arrived")
+	}
+	if room.Messages[0].Forged {
+		t.Error("re-verification flagged a genuine message as forged")
+	}
+}
+
+// TestReverifyLeavesAForgeryFlagged: re-checking must not launder a forgery into
+// a verified message just because keys turned up.
+func TestReverifyLeavesAForgeryFlagged(t *testing.T) {
+	mallory, _ := newTestClient(t)
+	recipient, rstore := newTestClient(t)
+
+	key, _ := e2ee.GenerateRoomKey()
+	malloryKey, _ := e2ee.GenerateSigningKey()
+	aliceKey, _ := e2ee.GenerateSigningKey()
+	mallory.SetSigningKey(malloryKey, true)
+	mallory.store.UpsertRoom("4-0-r", "project")
+	rstore.UpsertRoom("4-0-r", "project")
+	mallory.SetRoomKey("4-0-r", key)
+	recipient.SetRoomKey("4-0-r", key)
+
+	// Mallory holds the group key and signs as herself, but claims to be alice.
+	env, _, err := mallory.sealRoomMessage("4-0-r", "pay mallory 1000")
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	rstore.AddRoomMessage("4-0-r", state.Message{
+		From: "alice", Text: "pay mallory 1000", Encrypted: true, Signed: true, Envelope: env,
+	})
+
+	recipient.learnPeerSigningKeys("alice", []ed25519.PublicKey{aliceKey.Public})
+
+	room, _ := rstore.Room("4-0-r")
+	if len(room.Messages) != 1 {
+		t.Fatalf("room state lost")
+	}
+	if room.Messages[0].SenderVerified {
+		t.Error("a forgery was marked verified once the real sender's keys arrived")
+	}
+	if !room.Messages[0].Forged {
+		t.Error("a message signed by somebody else was not flagged on re-verification")
+	}
+}

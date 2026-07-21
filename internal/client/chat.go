@@ -265,7 +265,7 @@ func (c *Client) handleChatSNAC(cookie string, frame wire.SNACFrame, body []byte
 		}
 		c.store.AddRoomMessage(cookie, state.Message{
 			From: sender, Text: d.Text, At: at,
-			Encrypted: d.Encrypted, SenderVerified: d.Verified, Forged: d.Forged,
+			Encrypted: d.Encrypted, SenderVerified: d.Verified, Signed: d.Signed, Forged: d.Forged,
 			Envelope: envelope,
 		})
 		if d.Forged {

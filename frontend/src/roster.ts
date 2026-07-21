@@ -604,13 +604,21 @@ export function renderRoster(
         // nothing unattributable about one, and showing a warning there would
         // be noise on every message the user ever receives.
         const roomMsg = activeRoom !== null;
+        // "Signed but we can't check it yet" and "not signed at all" used to
+        // render identically, which mattered: the first resolves on its own once
+        // the sender's keys arrive, a hostile server can induce it by declining
+        // to serve those keys, and the second is a settled fact about an older
+        // client. Collapsing them made a withheld key look like a routine
+        // artifact.
         const lock = m.forged
           ? `<span class="chat__lock chat__lock--forged benco-caption" title="This message did not come from the person it claims to be from — it is either unsigned by them or was sent in the clear into an encrypted room">⚠</span>`
           : m.encrypted && (m.senderVerified || !roomMsg)
             ? `<span class="chat__lock benco-caption" title="End-to-end encrypted">🔒</span>`
-            : m.encrypted
-              ? `<span class="chat__lock chat__lock--unsigned benco-caption" title="Encrypted, but not signed — authorship can't be confirmed">🔒<span class="chat__lock-warn">⚠</span></span>`
-              : "";
+            : m.encrypted && m.signed
+              ? `<span class="chat__lock chat__lock--unsigned benco-caption" title="Signed, but this sender's keys haven't arrived yet, so the signature can't be checked. This usually clears by itself; if it doesn't, the server may not be answering key lookups.">🔒<span class="chat__lock-warn">?</span></span>`
+              : m.encrypted
+                ? `<span class="chat__lock chat__lock--unsigned benco-caption" title="Encrypted, but carries no signature at all — sent by an older client, or a device with no signing key. Authorship can't be confirmed.">🔒<span class="chat__lock-warn">⚠</span></span>`
+                : "";
         const forgedCls = m.forged ? " chat__msg--forged" : "";
         // A message the server never accepted still sits in local history, so it
         // has to be marked or it reads as delivered. Most often this is the rate

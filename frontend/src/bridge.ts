@@ -66,6 +66,7 @@ export interface Message {
   encrypted?: boolean;
   /** Room message whose signature verified as the claimed sender's. */
   senderVerified?: boolean;
+  signed?: boolean;
   /** Room message whose signature did NOT verify — someone in the room is
    *  putting words in another member's mouth. */
   forged?: boolean;

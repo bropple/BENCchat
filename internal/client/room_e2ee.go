@@ -342,18 +342,58 @@ func (c *Client) roomName(cookie string) string {
 	return roomNameFromCookie(cookie)
 }
 
-// reverifyRoomMessages is a placeholder for re-checking messages received
-// before we knew a sender's signing keys. They currently display as
-// unverified until the room is reopened; re-running verification in place
-// would need the original envelopes retained.
-func (c *Client) reverifyRoomMessages(string) {}
+// reverifyRoomMessages re-checks room messages that arrived before we held the
+// sender's signing keys.
+//
+// Without this, "we have not fetched their keys yet" was indistinguishable from
+// "this will never be attributable" — the badge went up on arrival and stayed
+// there for the life of the session even after the keys landed a second later.
+// The envelopes are retained for exactly this (state.Message.Envelope), so the
+// original bytes are re-checked rather than anything being taken on trust.
+func (c *Client) reverifyRoomMessages(screenName string) {
+	c.store.ReverifyRoomMessages(screenName, func(cookie, envelope string) (verified, forged, ok bool) {
+		return c.verifyRoomEnvelope(cookie, screenName, envelope)
+	})
+}
+
+// verifyRoomEnvelope re-opens a stored envelope purely to re-check its
+// signature.
+//
+// Deliberately NOT decodeRoomMessageFrom: that path drops anything whose message
+// ID it has already seen, and every message here is by definition one we have
+// already seen. Re-verification would drop the lot.
+func (c *Client) verifyRoomEnvelope(cookie, sender, envelope string) (verified, forged, ok bool) {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return false, false, false
+	}
+	c.roomCrypto.mu.Lock()
+	keys := make(map[string]e2ee.RoomKey, len(rk.all))
+	for id, k := range rk.all {
+		keys[id] = k
+	}
+	c.roomCrypto.mu.Unlock()
+
+	msg, err := e2ee.OpenRoomSigned(c.roomName(cookie), envelope, keys, c.PeerSigningKeys(sender))
+	switch {
+	case errors.Is(err, e2ee.ErrForgedSignature):
+		return false, true, true
+	case err != nil:
+		return false, false, false
+	}
+	return msg.Verified, false, true
+}
 
 // roomDecode is the outcome of opening an inbound room message.
 type roomDecode struct {
 	Text      string
 	Encrypted bool
 	Verified  bool
-	Forged    bool
+	// Signed reports that a signature was present, whether or not we could check
+	// it. Distinct from Verified: "not checked yet" and "nothing to check" are
+	// different answers and only one of them improves on its own.
+	Signed bool
+	Forged bool
 	// SentAt is when the sender says they sent it, covered by their signature.
 	// Zero for anything that carried no stamp, in which case the caller has
 	// nothing better than its own clock.
@@ -428,7 +468,18 @@ func (c *Client) decodeRoomMessageFrom(cookie, sender, text string) roomDecode {
 		c.log.Warn("dropping a duplicate room message", "room", c.roomName(cookie), "from", sender)
 		return roomDecode{Duplicate: true}
 	}
-	return roomDecode{Text: msg.Text, Encrypted: true, Verified: msg.Verified, SentAt: msg.SentAt}
+	if msg.Signed && !msg.Verified {
+		// A signature we cannot check because we hold none of this sender's
+		// signing keys. Go and get them: leaving it is how a server that simply
+		// declines key-directory queries keeps every message from somebody
+		// permanently unattributable, which looks like an ordinary timing gap.
+		// learnPeerSigningKeys re-runs verification on what already arrived.
+		go c.RefreshPeerKeys(sender)
+	}
+	return roomDecode{
+		Text: msg.Text, Encrypted: true,
+		Verified: msg.Verified, Signed: msg.Signed, SentAt: msg.SentAt,
+	}
 }
 
 // onRoomInvite is notified when someone shares a room key with us.
