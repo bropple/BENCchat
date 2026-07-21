@@ -327,6 +327,36 @@ in the log with its original author, tier and duration, because "timed out for a
 hour last March" is history somebody may need, and records that silently vanish
 make a moderation log worth less than no log at all.
 
+### The cap is a budget, not a per-action limit
+
+A one-hour ceiling on a single timeout is not a one-hour ceiling on anything, if
+the mod can issue another the moment it lapses. Four in a row is a mod imposing
+half a day with a power that was supposed to stop at an hour, and a cap that a
+loop defeats is decoration.
+
+So the tier limit is **total exclusion over a rolling window, not the length of
+one action**: a mod may not leave somebody timed out for more than **one hour in
+any rolling twenty-four**. A request that would cross the line is refused, and
+refused with the next step named — *this needs a senior mod* — rather than a bare
+"not allowed", because a mod who has genuinely run out of rope needs to know
+where the rope continues.
+
+**The budget belongs to the person on the receiving end, not to the moderator.**
+Scoped per-moderator, two mods take turns and the ceiling means nothing; what is
+being bounded is how long somebody can be shut out by mod-tier authority, and
+that is a fact about them rather than about who typed it.
+
+It binds mods and no one else, and that is deliberate rather than an oversight.
+The limit exists because a mod has **no escalation of their own** — they cannot
+ban, so without a budget the only way to express "longer" is to stack. Senior
+mods and the owner already hold the tool designed for a longer exclusion, so
+budgeting their timeouts would just push them toward a ban, which is the heavier
+instrument, for a case that wanted the lighter one.
+
+**Escalation is the intended path, and stacking is the thing being prevented.**
+The two should not be confusable in the interface: a refusal that reads as a bug
+gets worked around, and a refusal that names a senior mod gets acted on.
+
 ### What a timed-out room looks like
 
 The question a design like this lives or dies on, because "you are excluded" and
@@ -372,6 +402,17 @@ empty by construction.
 The unguessable name and the inherited ban list are belt and braces on purpose.
 The name stops the person following the conversation; the ban stops them arriving
 if they learn it anyway.
+
+**A timeout follows the room across a reform, clock included.** A timed-out
+member is a member sitting out, not somebody being escaped, so they come along
+like everyone else: they receive the new room's key and name because they never
+stopped being on the member list, and the server declines their join until the
+clock runs out.
+
+Inherit the **absolute expiry**, never a remaining duration recomputed at reform
+time. Recomputing means a reform silently extends or shortens a sanction nobody
+intended to change, and a moderation action that quietly moves when an unrelated
+operation happens is one nobody can reason about.
 
 Carrying bans over is the **default, not the rule**. A group reforming to draw a
 line under an argument may genuinely want to start clean, so dropping the
@@ -696,10 +737,15 @@ to advance or replace a room's key is exactly what that touches.
 - **Is the kick reason shown to the ROOM, or only to the person kicked?** A reason
   written for one recipient is not automatically fit for an audience. Probably the
   moderator's choice at the time, defaulting to private.
-- **What happens to a timeout when the room is reformed?** A reform re-keys and
-  re-invites, which is exactly what a timeout avoids doing — so a timed-out member
-  either gets carried across (and the timeout must survive) or quietly gains
-  access early. The reformed room needs to inherit the clock, not just the entry.
-- **Can somebody be timed out repeatedly to fake a ban?** Four consecutive
-  one-hour timeouts is a mod imposing half a day, which the tier cap exists to
-  prevent. The log makes it visible; whether anything should stop it is open.
+- ~~**What happens to a timeout when the room is reformed?**~~ Answered in §7: it
+  follows, carrying its absolute expiry rather than a recomputed remainder.
+- ~~**Can somebody be timed out repeatedly to fake a ban?**~~ Answered in §7: no.
+  The mod cap is a budget over a rolling window, scoped to the person rather than
+  the moderator, so taking turns does not defeat it.
+- **Does a lifted timeout refund the budget?** A mod who times somebody out and
+  immediately undoes a misfire has spent an hour of a daily allowance on nothing.
+  Refunding invites lift-and-retime as a fresh loophole; not refunding punishes
+  the correction. Probably refund only what was not served.
+- **Is the budget per room or per account?** Per room is the obvious reading and
+  the one that matches everything else here, but it means a mod in five rooms can
+  time the same person out in all of them at once.
