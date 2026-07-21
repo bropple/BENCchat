@@ -1,9 +1,26 @@
 # Trust model: where it is, and where it should go
 
-**Status: proposal, not built.** Nothing here is implemented. It exists to be
-argued with before any code is written.
+**Status: the argument, not the state of the code. Its conclusion was built.**
 
-## The problem
+The fix this document argues for — an account identity key that cross-signs
+device keys — **exists**. See [`keydir-v2-proposal.md`](keydir-v2-proposal.md)
+for the wire design that was actually implemented and
+[`how-it-works-today.md`](how-it-works-today.md) for current behaviour.
+
+Read this document for the *reasoning*: the table of approaches already ruled
+out, and why enforcement has to live in the things holding keys rather than in a
+server policy check. That reasoning is still correct and still worth reading
+before designing anything here.
+
+What is now **wrong** is "The problem" immediately below. The password is no
+longer the sole root of trust: a password-holder cannot sign a manifest under
+the existing identity, cannot insert a device unnoticed, and cannot read
+anything sent before it arrived. It *can* still authenticate a session and send
+as the account, and it can publish a **new** identity — which is loud, because
+every peer's safety number moves, but which also destroys the old identity
+permanently. Read the section below as the starting position, not the end one.
+
+## The problem (historical — see status above)
 
 **The password is the root of trust, and everything else is built on sand.**
 

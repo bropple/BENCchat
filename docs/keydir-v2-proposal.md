@@ -1,11 +1,20 @@
 # Key directory v2: cross-signing on the wire
 
-**Status: proposal, fully specified.** Nothing here is built, but every question
-it opened has been answered — see §9 for the decisions and the reasoning behind
-each. It exists to be argued with before it becomes a server change you have to
-live with, because `0xBE00` is BENCchat's own foodgroup and BENCoscar is the only
-implementation — which makes it easy to change now and annoying to change once
-accounts depend on it.
+**Status: substantially built.** This began as a proposal and is now the design
+the code implements — read it as a spec, and check the code before assuming any
+individual part of it landed.
+
+Verified present as of 2026-07-21: signed device manifests with screen-name
+binding and monotonic counter high-water marks (`app_keydir.go`,
+`internal/trust/`), the Ed25519 account identity key with transient custody
+(`internal/e2ee/identity.go`), the argon2id-wrapped server-side identity backup
+and ten-word generated recovery key (`internal/e2ee/identitybackup.go`,
+`internal/e2ee/recoverykey.go`), and the server side in BENCoscar
+(`foodgroup/benco_keydir.go`, migration `0036_key_directory`).
+
+§9 records the decisions and the reasoning behind each. The note about `0xBE00`
+being BENCchat's own foodgroup still applies in reverse: accounts now depend on
+this wire format, so changing it is the annoying case, not the easy one.
 
 Read [`how-it-works-today.md`](how-it-works-today.md) for what exists.
 [`trust-model.md`](trust-model.md) is the argument that led here; this document

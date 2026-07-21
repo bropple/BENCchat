@@ -33,11 +33,13 @@ The backend is **[open-oscar-server](https://github.com/mk6i/open-oscar-server)*
 address is a deployment detail and publishing it just invites traffic. Read that
 file for specifics. What matters for the code here:
 
-- **TLS only.** A single stunnel-fronted TLS listener; the plaintext OSCAR port
-  is closed. Anything connecting to this deployment must speak TLS, which
-  includes test harnesses — a plaintext dial connects and then hangs waiting for
-  a FLAP hello that never comes. Period AIM clients cannot connect at all; that
-  compatibility was given up deliberately.
+- **TLS only, terminated natively.** BENCoscar terminates TLS in-process
+  (`server/oscar/tls.go`) — there is no stunnel sidecar and no plaintext OSCAR
+  port. Anything connecting to this deployment must speak TLS, which includes
+  test harnesses: a plaintext dial connects and then hangs waiting for a FLAP
+  hello that never comes, so the symptom of getting this wrong is an i/o
+  timeout, not a refused connection. Period AIM clients cannot connect at all;
+  that compatibility was given up deliberately.
 - `DISABLE_AUTH=false` — accounts must be provisioned via the Management API
   before they can sign in.
 - The Management API is bound to loopback on the VPS and is **not** publicly
@@ -66,8 +68,8 @@ Relevant paths in that repo (clone it locally as a reference, don't vendor it):
   — supporting structures
 - `foodgroup/` — one file per foodgroup, showing exactly which SNAC
   subtypes are implemented server-side and how they behave:
-  `oservice.go` (core session mgmt), `auth.go` (BUCP login flow — this is
-  the flow BENCchat needs, not the Kerberos/SSL one in `server/kerberos/`),
+  `oservice.go` (core session mgmt), `auth.go` (the login flow BENCchat needs
+  — see the sign-on note below, not the Kerberos/SSL one in `server/kerberos/`),
   `buddy.go`, `feedbag.go` (buddy list storage), `icbm.go` (instant
   messages), `locate.go` (profile/away), `permit_deny.go`, `chat.go` /
   `chat_nav.go`, `icq.go`, `odir.go`, `stats.go`, `admin.go`
@@ -89,8 +91,14 @@ Keep protocol logic and UI cleanly separated. A likely shape:
 2. **SNAC layer** — encode/decode SNAC headers + TLV payloads per foodgroup;
    ideally generated or table-driven rather than hand-written per command,
    given how many subtypes exist
-3. **Session/auth layer** — BUCP login flow (screen name/password →
-   auth cookie → connect to BOS) against `foodgroup/auth.go`'s expectations
+3. **Session/auth layer** — sign-on (screen name/password → auth cookie →
+   connect to BOS) against `foodgroup/auth.go`'s expectations. **Note:** this
+   is no longer BUCP. BENCchat sends the password in TLV `0x1339`
+   (`LoginTLVTagsPlaintextPassword`) inside TLS, and BENCoscar *refuses* BUCP
+   outright — `ValidateHash` always returns false. The server stores argon2id
+   (migration `0034`), so there is no password-equivalent at rest, but the
+   cleartext password does cross the trust boundary at every login. Authentication
+   is deliberately **not** zero-knowledge; see the trust model below.
 4. **State layer** — buddy list (feedbag), presence, away status, open
    conversations — protocol-agnostic data model that a UI can bind to
 5. **UI layer** — talks only to the state layer, never touches FLAP/SNAC
@@ -143,29 +151,44 @@ code disagree, the code wins and the doc is stale.
 
 ## Trust model
 
-The current model roots everything in the account password, which means anyone
-holding it owns the account outright — approval dialogs, device removal and any
-server-side policy are advisory on top of that, because publishing a device key
-is self-service and a session authenticates with a password, not a device key.
+**Cross-signing is built.** The account is rooted in an Ed25519 identity key
+that signs a device *manifest*. Peers verify that manifest over the bytes as
+received, bound to the screen name, with a monotonic counter that rejects a
+stale or rolled-back list. The identity private key is held only transiently —
+unwrapped from a server-side argon2id-encrypted backup using a ten-word
+*generated* recovery key, used, then zeroed. Safety numbers derive from the
+identity key, so they no longer churn every time a device is added.
 
-[`docs/trust-model.md`](docs/trust-model.md) explains why, and proposes a fix (an
-account identity key that cross-signs device keys). **That document is a
-proposal. None of it is built**, and it describes a system that does not exist —
-do not read it as a description of the program. Read it before *designing*
-anything in this area, because most obvious ideas have already been ruled out
-for reasons worth knowing.
-
-Note that its central argument — constraining what a malicious operator can do —
-is weighted for a threat model this deployment may not have, since the operator
-is the person running the server. The argument that survives regardless is the
-secondary one: safety numbers churn on every device addition, which trains
-people to click through the warning meant to catch an attacker.
-
-**Decided:** cross-signing, chosen over one-key-per-account for blast radius.
 [`docs/keydir-v2-proposal.md`](docs/keydir-v2-proposal.md) is the wire-level
-design that follows from it, and supersedes `trust-model.md`'s sketch — it signs
-the device *manifest* rather than each device, which additionally blocks a server
-omitting a device or serving a stale list. Also a proposal, not built.
+design, and it is **substantially implemented** — see `app_keydir.go`,
+`internal/trust/`, `internal/e2ee/identity.go`, `internal/e2ee/identitybackup.go`.
+Read it as a spec, and check the code before assuming any individual part of it
+landed. [`docs/trust-model.md`](docs/trust-model.md) is the argument that led
+there; its premise — "the password owns the account outright" — is **no longer
+true**. Read it for the reasoning and for the approaches already ruled out, not
+as a description of the program.
+
+What cross-signing changed, and what it did not:
+
+- A password-only attacker **cannot** sign a manifest under the existing
+  identity, so it cannot quietly insert a device, and it cannot decrypt anything
+  sent earlier.
+- It **can** still sign in and send and receive as the account. The server
+  authenticates a password and cannot tell which *device* is talking —
+  `BENCoscar/foodgroup/benco_keydir.go` says so outright, and notes that every
+  check in that file is therefore advisory. Device removal is enforced at the
+  key-directory layer, never at the session layer.
+- So a takeover is **loud** — publishing a fresh identity moves every peer's
+  safety number — but it is not prevented, and it destroys the previous identity
+  irrecoverably.
+
+Still unbuilt: forward secrecy of any kind (1:1 is static-static NaCl box, see
+`internal/e2ee/e2ee.go`; room keys are symmetric and retained forever), and
+everything in [`docs/room-consent-model.md`](docs/room-consent-model.md).
+
+Note that `trust-model.md`'s central argument — constraining what a malicious
+operator can do — is weighted for a threat model this deployment may not have,
+since the operator is the person running the server.
 
 ## Open questions to resolve early
 
