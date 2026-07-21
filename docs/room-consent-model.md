@@ -159,6 +159,22 @@ the room key that already exists.
 **Decided 2026-07-21.** This section answers most of §8's questions; what remains
 open is flagged there.
 
+**The principle underneath all of it: autonomy first, bounded rather than
+supervised.** Moderation is time-sensitive and senior people are not always
+awake. A structure where every action waits on approval is not moderation, it is
+a ticket queue, and a room in the middle of an argument at 3am needs somebody who
+can act now. So a mod acts alone, without asking.
+
+What makes that safe is not oversight but **the size of the mistake**. Every
+power a mod holds is recoverable and short — an hour of exclusion, a kick they
+can be brought back from — so a mod acting badly, or simply being wrong, costs
+somebody an afternoon rather than a place in the room. The irreversible tools sit
+one tier up, where they belong, and the log makes every use of either visible
+after the fact.
+
+That is why the caps are what they are. They are not distrust of mods; they are
+what lets a mod be trusted to act unsupervised.
+
 ### Three roles: owner, senior mod, mod
 
 | | Promote / demote | Timeout | Kick | Ban | Lift | Removable by |
@@ -356,6 +372,24 @@ instrument, for a case that wanted the lighter one.
 **Escalation is the intended path, and stacking is the thing being prevented.**
 The two should not be confusable in the interface: a refusal that reads as a bug
 gets worked around, and a refusal that names a senior mod gets acted on.
+
+**Measure time served, not time issued.** A mod who times somebody out for an
+hour and undoes it after five minutes has spent five minutes of the budget, not
+an hour — the person was not excluded for time they were not excluded for. The
+tempting implementation is to deduct on issue and refund on lift, which needs
+refund logic and immediately raises whether lift-and-retime is a fresh loophole.
+Asking instead *how long has this person actually been shut out at mod tier in
+the last twenty-four hours* removes the question: it is a sum over served
+intervals, the refund falls out of the arithmetic, and there is no separate rule
+to get wrong.
+
+**The budget is per room.** Being timed out in one room does not spend anything
+in another, because these are room-level problems and a dispute in one room says
+nothing about somebody's conduct in a different group of people. The cost is that
+a mod who happens to hold the role in five rooms can time the same person out in
+all five at once, which the per-room log makes visible in each room but nowhere
+shows as a pattern. That is a bad-moderator problem rather than a budget problem,
+and the answer to it is the owner removing them.
 
 ### What a timed-out room looks like
 
@@ -742,10 +776,9 @@ to advance or replace a room's key is exactly what that touches.
 - ~~**Can somebody be timed out repeatedly to fake a ban?**~~ Answered in §7: no.
   The mod cap is a budget over a rolling window, scoped to the person rather than
   the moderator, so taking turns does not defeat it.
-- **Does a lifted timeout refund the budget?** A mod who times somebody out and
-  immediately undoes a misfire has spent an hour of a daily allowance on nothing.
-  Refunding invites lift-and-retime as a fresh loophole; not refunding punishes
-  the correction. Probably refund only what was not served.
-- **Is the budget per room or per account?** Per room is the obvious reading and
-  the one that matches everything else here, but it means a mod in five rooms can
-  time the same person out in all of them at once.
+- ~~**Does a lifted timeout refund the budget?**~~ Answered in §7: only what was
+  not served, and the cleanest way to get that is to measure served time rather
+  than deduct-and-refund — the refund then falls out of the arithmetic.
+- ~~**Is the budget per room or per account?**~~ Answered in §7: per room. These
+  are room-level problems, and a dispute in one room says nothing about somebody's
+  conduct among a different group of people.
