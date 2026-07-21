@@ -724,7 +724,7 @@ func TestLiveICBMSizeCeiling(t *testing.T) {
 		}
 	drained:
 		body := strings.Repeat("A", n)
-		if _, err := s.SendMessage(sn, body, false); err != nil {
+		if _, _, err := s.SendMessage(sn, body, false); err != nil {
 			t.Logf("  %6d bytes: send failed locally: %v", n, err)
 			return false
 		}

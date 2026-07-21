@@ -612,13 +612,21 @@ export function renderRoster(
               ? `<span class="chat__lock chat__lock--unsigned benco-caption" title="Encrypted, but not signed — authorship can't be confirmed">🔒<span class="chat__lock-warn">⚠</span></span>`
               : "";
         const forgedCls = m.forged ? " chat__msg--forged" : "";
+        // A message the server never accepted still sits in local history, so it
+        // has to be marked or it reads as delivered. Most often this is the rate
+        // limiter: the server silently discards sends that come too fast.
+        const notSent = m.notSent
+          ? `<span class="chat__notsent" title="The server never confirmed this message — it wasn't delivered. Sending too fast is the usual cause; wait a moment and send it again.">not sent</span>`
+          : "";
+        const notSentCls = m.notSent ? " chat__msg--notsent" : "";
         return `
-          <div class="chat__msg ${cls}${forgedCls}">
+          <div class="chat__msg ${cls}${forgedCls}${notSentCls}">
             <div class="chat__msg-meta">
               <span class="chat__msg-from">${escapeHTML(m.from)}</span>
               <span class="benco-caption">${formatTime(m.at)}</span>
               ${lock}
               ${auto}
+              ${notSent}
             </div>
             <div class="chat__msg-text">${renderMessageBody(m.text)}</div>
           </div>`;

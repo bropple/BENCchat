@@ -94,6 +94,16 @@ type Message struct {
 	At   time.Time `json:"at"`
 	// Outgoing marks messages we sent, for UI alignment.
 	Outgoing bool `json:"outgoing"`
+	// Cookie is the ICBM cookie of an outbound message, used to match the
+	// server's acknowledgement back to this row. Session-only: it means nothing
+	// once the app restarts, so it isn't persisted.
+	Cookie uint64 `json:"-"`
+	// NotSent marks an outbound message the server never accepted — either it
+	// returned an error, or it acknowledged nothing at all. The latter is what
+	// rate limiting looks like from here: the server silently discards SNACs over
+	// the limit, so a missing acknowledgement is the only evidence. Persisted, so
+	// a message that failed still reads as failed after a restart.
+	NotSent bool `json:"notSent,omitempty"`
 	// AutoResponse marks an away-message auto-reply rather than a typed message.
 	AutoResponse bool `json:"autoResponse,omitempty"`
 	// Encrypted marks a message that was sent or received end-to-end encrypted.
@@ -735,6 +745,35 @@ func (s *Store) AddMessage(m Message) string {
 
 	s.emit(Event{Kind: EventMessage, Message: &m, Conversation: key})
 	return key
+}
+
+// SetMessageNotSent flags the outbound message with the given ICBM cookie as not
+// delivered (or clears the flag). Reports whether a matching message was found.
+// Emits a message event for the thread so an open conversation re-renders; the
+// event carries no Message, so it reads as "this thread changed" rather than as
+// new mail.
+func (s *Store) SetMessageNotSent(screenName string, cookie uint64, notSent bool) bool {
+	key := NormalizeScreenName(screenName)
+
+	s.mu.Lock()
+	c, ok := s.conversations[key]
+	found := false
+	if ok {
+		// Newest first: a send being resolved is almost always the last one.
+		for i := len(c.Messages) - 1; i >= 0; i-- {
+			if c.Messages[i].Outgoing && c.Messages[i].Cookie == cookie {
+				c.Messages[i].NotSent = notSent
+				found = true
+				break
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	if found {
+		s.emit(Event{Kind: EventMessage, Conversation: key})
+	}
+	return found
 }
 
 // Conversation returns a snapshot of one thread.

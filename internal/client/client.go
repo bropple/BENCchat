@@ -79,6 +79,14 @@ type Client struct {
 	// "pending". Both paths consult this set so the acceptance always wins.
 	acceptedMu sync.Mutex
 	accepted   map[string]bool
+	// sends tracks outbound messages awaiting the server's acknowledgement, so one
+	// the server rejected — or silently dropped, which is exactly what exceeding a
+	// rate limit looks like from here — gets marked "not sent" instead of sitting
+	// in the log looking delivered. Keyed by request ID (how an error correlates)
+	// and by cookie (how an ack does). Guarded by sendMu.
+	sendMu        sync.Mutex
+	sendsByReq    map[uint32]*pendingSend
+	sendsByCookie map[uint64]*pendingSend
 	// pendingMu serializes the two paths that publish a buddy's pending state —
 	// the re-add-as-pending goroutine and the acceptance handler — so neither can
 	// publish a stale snapshot over the other. Held only around the decide+publish,
@@ -252,7 +260,8 @@ func (c *Client) SendMessage(to, text string) error {
 		return err
 	}
 
-	if _, err := session.SendMessage(to, wireText, false); err != nil {
+	cookie, reqID, err := session.SendMessage(to, wireText, false)
+	if err != nil {
 		return err
 	}
 	c.store.AddMessage(state.Message{
@@ -262,8 +271,83 @@ func (c *Client) SendMessage(to, text string) error {
 		At:        time.Now(),
 		Outgoing:  true,
 		Encrypted: encrypted,
+		Cookie:    cookie,
 	})
+	c.trackSend(to, cookie, reqID)
 	return nil
+}
+
+// ackTimeout is how long a sent message waits for the server's acknowledgement
+// before it's treated as lost. Generous, because a false "not sent" on a message
+// that did arrive is worse than a slow one: the send itself has already cleared
+// the client's rate pacing by the time this starts.
+const ackTimeout = 15 * time.Second
+
+// pendingSend is one outbound message waiting to be confirmed by the server.
+type pendingSend struct {
+	to     string
+	cookie uint64
+	reqID  uint32
+	timer  *time.Timer
+}
+
+// trackSend registers an outbound message and starts the clock on its
+// acknowledgement. If none arrives before ackTimeout, the message is marked not
+// sent — the server discards rate-limited SNACs without a word, so silence is
+// the only evidence we get.
+func (c *Client) trackSend(to string, cookie uint64, reqID uint32) {
+	p := &pendingSend{to: to, cookie: cookie, reqID: reqID}
+
+	c.sendMu.Lock()
+	if c.sendsByReq == nil {
+		c.sendsByReq = map[uint32]*pendingSend{}
+		c.sendsByCookie = map[uint64]*pendingSend{}
+	}
+	c.sendsByReq[reqID] = p
+	c.sendsByCookie[cookie] = p
+	c.sendMu.Unlock()
+
+	p.timer = time.AfterFunc(ackTimeout, func() {
+		if _, ok := c.takeSendByCookie(cookie); ok {
+			c.store.SetMessageNotSent(to, cookie, true)
+			c.log.Warn("message never acknowledged — marking not sent",
+				"to", to, "hint", "server drops SNACs that exceed a rate limit")
+		}
+	})
+}
+
+// takeSendByReq removes a pending send by request ID (how an ICBM error is
+// correlated), reporting whether it was still pending — so only the first of
+// ack, error or timeout acts on it.
+func (c *Client) takeSendByReq(reqID uint32) (*pendingSend, bool) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	p, ok := c.sendsByReq[reqID]
+	if !ok {
+		return nil, false
+	}
+	c.dropSendLocked(p)
+	return p, true
+}
+
+// takeSendByCookie is takeSendByReq keyed by cookie (how an ack is correlated).
+func (c *Client) takeSendByCookie(cookie uint64) (*pendingSend, bool) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	p, ok := c.sendsByCookie[cookie]
+	if !ok {
+		return nil, false
+	}
+	c.dropSendLocked(p)
+	return p, true
+}
+
+func (c *Client) dropSendLocked(p *pendingSend) {
+	delete(c.sendsByReq, p.reqID)
+	delete(c.sendsByCookie, p.cookie)
+	if p.timer != nil {
+		p.timer.Stop()
+	}
 }
 
 // sealOutbound decides what actually goes on the wire for a 1:1 message, and
@@ -999,20 +1083,30 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		}
 		c.store.Notify(state.NoticeInfo, fmt.Sprintf("Warning sent — their level is now %s.", pct(res.NewLevel)))
 
+	case wire.ICBMHostAck:
+		// The server accepted a message we sent. Clearing the pending entry stops
+		// its timer, so it won't later be marked "not sent".
+		var ack wire.SNAC_0x04_0x0C_ICBMHostAck
+		if err := wire.UnmarshalBE(&ack, bytes.NewReader(body)); err != nil {
+			return
+		}
+		c.takeSendByCookie(ack.Cookie)
+
 	case wire.ICBMErr:
-		// The body is a bare error code. It does not say which action was
-		// rejected, but the CODE narrows it: the consensual-connection gate (and
-		// a block) reject a message with "not logged on" or "in local permit/deny"
-		// — which literally read as "they're offline", so a naive message would
-		// mislead. An unauthorized/blocked recipient is the far likelier cause of
-		// those codes on a send (a genuinely offline user's message is stored, not
-		// rejected), so say what actually happened.
+		// The body is a bare error code, and it doesn't name the message it refers
+		// to — but the request ID does, so the rejected message can be flagged.
+		if p, ok := c.takeSendByReq(frame.RequestID); ok {
+			c.store.SetMessageNotSent(p.to, p.cookie, true)
+		}
+		// ErrorCodeNotLoggedOn is heavily overloaded server-side: the consensual-
+		// connection gate, a block, and "offline and won't take offline messages"
+		// all return it. So describe the possibilities rather than asserting one.
 		msg := "The server rejected that action."
 		if len(body) >= 2 {
 			switch binary.BigEndian.Uint16(body[:2]) {
 			case wire.ErrorCodeNotLoggedOn, wire.ErrorCodeInLocalPermitDeny:
-				msg = "Couldn't send — you're not connected to this person (or they've blocked you). " +
-					"Send them a connection request to reconnect."
+				msg = "Couldn't send that message — you may not be connected to this person, " +
+					"they may have blocked you, or they're offline and not accepting messages."
 			}
 		}
 		c.store.Notify(state.NoticeError, msg)

@@ -1150,6 +1150,23 @@
   opacity: 1;
 }
 
+/* A message the server never accepted. Dimmed and outlined in red so it can't be
+   mistaken for a delivered one sitting in the log. */
+.chat__msg--notsent {
+  border-color: var(--benco-red);
+  background: color-mix(in srgb, var(--benco-red) 8%, transparent);
+}
+.chat__msg--notsent .chat__msg-text {
+  opacity: 0.7;
+}
+.chat__notsent {
+  color: var(--benco-red);
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  cursor: help;
+}
+
 /* Encrypted but unattributable — an older client, or a sender whose signing
    key we haven't fetched yet. Quieter than a failure. */
 .chat__lock--unsigned {

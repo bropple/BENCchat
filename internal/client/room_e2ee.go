@@ -471,7 +471,7 @@ func (c *Client) sendProtocolMessage(to, body string) error {
 	if err != nil {
 		return err
 	}
-	_, err = session.SendMessage(to, env, false)
+	_, _, err = session.SendMessage(to, env, false)
 	return err
 }
 

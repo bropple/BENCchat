@@ -55,7 +55,7 @@ func TestLiveMsgGateProbe(t *testing.T) {
 	go func() { _ = session.Run(runCtx) }()
 	time.Sleep(500 * time.Millisecond)
 
-	if _, err := session.SendMessage(target, "gate probe — you should never see this", false); err != nil {
+	if _, _, err := session.SendMessage(target, "gate probe — you should never see this", false); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	time.Sleep(2 * time.Second)

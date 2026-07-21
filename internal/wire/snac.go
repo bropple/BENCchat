@@ -110,6 +110,11 @@ const (
 	ICBMChannelMsgToClient uint16 = 0x0007
 	ICBMEvilRequest        uint16 = 0x0008
 	ICBMEvilReply          uint16 = 0x0009
+	// ICBMHostAck confirms the server accepted a message we sent (only when the
+	// send asked for it with ICBMTLVRequestHostAck). Its absence is the ONLY
+	// signal that a message was dropped: the server silently discards SNACs that
+	// exceed a rate limit, sending neither an ack nor an error.
+	ICBMHostAck uint16 = 0x000C
 	// ICBMOfflineRetrieve asks the server to deliver messages stored while we
 	// were offline. Empty body; the server replays each as a ChannelMsgToClient.
 	ICBMOfflineRetrieve uint16 = 0x0010

@@ -51,10 +51,13 @@ func newICBMCookie() uint64 {
 // autoResponse marks the message as an away auto-reply. The server never reads
 // that flag — it rides through untouched — so it is meaningful only between
 // clients that honor it.
-func (s *Session) SendMessage(screenName, text string, autoResponse bool) (uint64, error) {
+// SendMessage sends an instant message. It returns the ICBM cookie (which the
+// server echoes in its acknowledgement) and the SNAC request ID (which it echoes
+// in an error), so the caller can track whether the message actually landed.
+func (s *Session) SendMessage(screenName, text string, autoResponse bool) (uint64, uint32, error) {
 	body, err := wire.MarshalICBMMessageText(text)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	cookie := newICBMCookie()
@@ -74,10 +77,14 @@ func (s *Session) SendMessage(screenName, text string, autoResponse bool) (uint6
 		msg.Append(wire.NewTLVBE(wire.ICBMTLVAutoResponse, []byte{}))
 	}
 
-	if err := s.Send(wire.ICBM, wire.ICBMChannelMsgToHost, msg); err != nil {
-		return 0, fmt.Errorf("oscar: send message: %w", err)
+	// sendPaced (not Send) so the request ID comes back: the server correlates an
+	// ICBM error to it, while an ack correlates by cookie. Tracking both is what
+	// lets a caller tell "accepted", "rejected" and "silently dropped" apart.
+	reqID, err := s.sendPaced(wire.ICBM, wire.ICBMChannelMsgToHost, msg)
+	if err != nil {
+		return 0, 0, fmt.Errorf("oscar: send message: %w", err)
 	}
-	return cookie, nil
+	return cookie, reqID, nil
 }
 
 // SendTyping sends a typing notification. event is one of

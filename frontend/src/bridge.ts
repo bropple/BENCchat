@@ -69,6 +69,10 @@ export interface Message {
   /** Room message whose signature did NOT verify — someone in the room is
    *  putting words in another member's mouth. */
   forged?: boolean;
+  /** Outgoing message the server never accepted — rejected, or silently dropped
+   *  (which is what hitting a rate limit looks like). It's still in your local
+   *  history, so it has to be visibly marked or it reads as delivered. */
+  notSent?: boolean;
 }
 
 export interface Room {
