@@ -25,7 +25,7 @@ import {
 import { alertDialog, confirmDialog, promptDialog, choiceDialog } from "./dialog";
 import { renderMessageBody } from "./message";
 import { EMOJI_CATEGORIES } from "./emoji";
-import { EMOJI_NAMES } from "./emoji_names";
+import { EMOJI_NAMES, EMOJI_KEYWORDS } from "./emoji_names";
 
 /** How long after the last keystroke we tell the other end we stopped typing. */
 const TYPING_IDLE_MS = 3000;
@@ -1294,7 +1294,9 @@ export function renderRoster(
         tabsEl.hidden = false;
         return;
       }
-      const hits = allEmoji.filter((e) => (EMOJI_NAMES[e] ?? "").includes(q));
+      const hits = allEmoji.filter(
+        (e) => (EMOJI_NAMES[e] ?? "").includes(q) || (EMOJI_KEYWORDS[e] ?? "").includes(q),
+      );
       results.innerHTML = hits.length
         ? `<div class="chat__emoji-row">${hits
             .map((e) => `<button type="button" class="chat__emoji" tabindex="-1">${e}</button>`)
