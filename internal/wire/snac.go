@@ -34,6 +34,16 @@ const (
 	ReqIDFromServer uint32 = 1 << 31
 )
 
+// SNAC error codes carried as a bare uint16 in an error SNAC's body. Only the
+// few the client needs to interpret are here; the server defines the full set.
+const (
+	// ErrorCodeNotLoggedOn — literally "recipient not logged on", but also what
+	// the consensual-connection gate and a block return when refusing a message.
+	ErrorCodeNotLoggedOn uint16 = 0x04
+	// ErrorCodeInLocalPermitDeny — the recipient's permit/deny refused you.
+	ErrorCodeInLocalPermitDeny uint16 = 0x10
+)
+
 // Foodgroups (SNAC families) BENCchat cares about for core messaging. The full
 // set the server implements is larger; these are the ones exercised by the
 // login → buddy list → IM path.

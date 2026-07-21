@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -746,9 +747,22 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		c.store.Notify(state.NoticeInfo, fmt.Sprintf("Warning sent — their level is now %s.", pct(res.NewLevel)))
 
 	case wire.ICBMErr:
-		// An ICBM error can be a rejected message or a rejected warning; the SNAC
-		// doesn't say which. Surface it as a notice rather than guessing.
-		c.store.Notify(state.NoticeError, "The server rejected that action (you can only warn someone who has messaged you recently).")
+		// The body is a bare error code. It does not say which action was
+		// rejected, but the CODE narrows it: the consensual-connection gate (and
+		// a block) reject a message with "not logged on" or "in local permit/deny"
+		// — which literally read as "they're offline", so a naive message would
+		// mislead. An unauthorized/blocked recipient is the far likelier cause of
+		// those codes on a send (a genuinely offline user's message is stored, not
+		// rejected), so say what actually happened.
+		msg := "The server rejected that action."
+		if len(body) >= 2 {
+			switch binary.BigEndian.Uint16(body[:2]) {
+			case wire.ErrorCodeNotLoggedOn, wire.ErrorCodeInLocalPermitDeny:
+				msg = "Couldn't send — you're not connected to this person (or they've blocked you). " +
+					"Send them a connection request to reconnect."
+			}
+		}
+		c.store.Notify(state.NoticeError, msg)
 	}
 }
 

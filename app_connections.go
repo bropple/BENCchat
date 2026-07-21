@@ -42,10 +42,16 @@ func (a *App) handleConnectionRequest(req oscar.ConnectionRequest) {
 // list has already been reconciled in the client (pending marker cleared on
 // accept); this just tells the user and nudges the UI to refresh.
 func (a *App) handleConnectionResponse(res oscar.ConnectionResponse) {
-	if res.Accepted {
+	switch {
+	case res.Accepted:
 		a.store.Notify(state.NoticeInfo, res.ScreenName+" accepted your connection request.")
-	} else {
+	case res.WasPending:
+		// A reply to a request we made — the user asked, so tell them the answer.
 		a.store.Notify(state.NoticeInfo, res.ScreenName+" declined your connection request.")
+	default:
+		// They removed us from an established connection. Silent by design: an
+		// unsolicited "X removed you" is a small cruelty with no upside, so the
+		// buddy just quietly drops off the list (Signal/WhatsApp do the same).
 	}
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "connection:update", map[string]any{

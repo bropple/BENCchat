@@ -52,6 +52,12 @@ type ConnectionResponse struct {
 	Accepted bool
 	// Reason is the optional note on a decline.
 	Reason string
+	// WasPending reports whether this arrived against a request WE had
+	// outstanding (they declined) versus an established connection they severed
+	// (they removed us). The wire is identical for both — Accepted=0 either way —
+	// so the caller fills this from the buddy's pending state at receipt, and the
+	// app uses it to notify on a decline but stay silent on a removal.
+	WasPending bool
 }
 
 // DecodeConnectionResponse decodes an inbound SNAC(0x13,0x1B).
