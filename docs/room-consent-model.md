@@ -163,13 +163,13 @@ open is flagged there.
 
 | | Promote / demote | Ban | Lift a ban | Kick | Removable by |
 |---|---|---|---|---|---|
-| **Owner** | yes | yes | any, including a senior mod's | yes | nobody |
-| **Senior mod** | no | yes | any except one the owner set | yes | owner only |
-| **Mod** | no | no | no | yes | owner only |
+| **Owner** | yes | any duration | any, including a senior mod's | yes | nobody |
+| **Senior mod** | no | any duration | any except one the owner set | yes | owner only |
+| **Mod** | no | temp only, ≤ 1 hour | only ones set at mod tier | yes | owner only |
 | **Member** | no | no | no | no | owner, senior mod, mod |
 
-Mods do not touch bans at all — neither setting nor lifting. Kick is the whole of
-a mod's power over a member, and it is the reversible one.
+Duration is where the mod boundary sits rather than kind — see the temp ban
+section below for why, and for the ceilings.
 
 Two invariants do all the work here, and they are worth stating separately from
 the table because everything else follows from them:
@@ -267,7 +267,7 @@ afterwards, so it belongs in a log of things that occurred. A ban is a standing
 condition the server consults on every join attempt, so it belongs in a list of
 things that are currently true.
 
-### Timed exclusion is a ban with an expiry, not a third thing
+### Temp bans: a ban with an expiry, not a third mechanism
 
 Wanting somebody gone for an hour rather than forever is a real need, and the
 temptation is to build a "timed kick" alongside the other two. Don't: a kick is
@@ -276,27 +276,38 @@ actually describes is **a ban that expires**, and the ban record already carries
 who set it, at what tier, and when. Adding *until when* is one nullable column
 and a time comparison in the join check that already exists.
 
-So the spectrum is one axis with one mechanism behind it:
+So there is one axis, one mechanism, and the tier gates **how long**:
 
-| | Duration | Who may set it |
-|---|---|---|
-| Kick | none — evicted, may return at once | mod, senior mod, owner |
-| Timed ban | bounded, expires on its own | senior mod, owner |
-| Ban | until lifted | senior mod, owner |
+| | Duration | Mod | Senior mod | Owner |
+|---|---|---|---|---|
+| **Kick** | none — evicted, may return at once | yes | yes | yes |
+| **Temp ban** | up to 1 hour | yes | yes | yes |
+| **Temp ban** | up to 3 days | no | yes | yes |
+| **Perma ban** | until lifted | no | yes | yes |
 
-Mods still do not touch bans, exactly as before: a mod evicts, and the person may
-come straight back. Everything with a duration is a ban and needs ban authority,
-which keeps the tier rule unchanged rather than introducing a second axis of "how
-long may each tier exclude somebody for".
+**Three days is the ceiling for any temp ban.** Past that the honest description
+is "banned", and dressing a month-long exclusion up as temporary helps nobody —
+least of all the person on the receiving end, who is better served by being told
+plainly that they are out until somebody lifts it.
 
-If mods ever need more teeth than that, the smaller change is to let them set a
-*capped* duration rather than to give them the ban power outright — but that adds
-a cap to configure and argue about, and it is not needed yet.
+**One hour is the ceiling for a mod.** Long enough to cool a room down mid-
+argument, which is what the power is for; short enough that a mod acting badly or
+mistakenly costs somebody an afternoon rather than a week. Anything more
+consequential wants a tier that can also undo it.
+
+This revises the earlier "mods do not touch bans at all". The rule that replaces
+it is the same one as everywhere else — **the more irreversible the act, the
+higher the tier** — applied to duration rather than to kind.
+
+**Lifting follows the rule already in place** with no special case: a ban may be
+overridden by an equal or higher tier than set it, so a mod-tier temp ban may be
+lifted at mod tier, including by the mod who set it after a misfire. Senior mods
+and the owner reach everything below them, and nothing reaches the owner.
 
 An expired ban is not a lifted one. It stops blocking joins and stays in the log
-with its original author and tier, because "banned for a day last March" is
-history somebody may need, and silently vanishing records make a moderation log
-worth less than no log at all.
+with its original author, tier and duration, because "banned for a day last
+March" is history somebody may need, and silently vanishing records make a
+moderation log worth less than no log at all.
 
 Two operations, and the UI must not blur them: "removed" and "cannot come back"
 are different promises, and only one of them is enforceable without the server.
@@ -406,6 +417,51 @@ record of what was actually said. A mod who typed something regrettable has said
 it; letting them quietly rewrite the log afterwards would leave the person who
 received it holding a message the room's own history denies. An audit trail that
 can be edited by the people it audits is not one.
+
+### The room is told too
+
+Only the person on the receiving end learned anything, which sits badly against
+§3: the open room is built on membership changes being **visible**, and somebody
+vanishing mid-conversation with no explanation is the opposite. So the room sees
+it as well:
+
+> **X was kicked**
+> **X was banned for 2 hours**
+> **X was banned permanently**
+
+Whether the reason is shown to the room as well as to the person is a separate
+call — a reason written for one recipient is not automatically fit for an
+audience — and it should probably be the moderator's choice at the time.
+
+**This must not be a server-injected message, and that is not a style
+preference.** Injecting plaintext into an encrypted room was a real bug, fixed
+2026-07-21: a non-envelope body in an encrypted room used to render with the
+claimed sender's name, normal styling and no marker at all, and the server picks
+the sender name attached to every chat message. Clients now flag exactly that as
+`⚠ UNENCRYPTED`, so a server-authored system message would be marked as an
+impersonation attempt — correctly, because it is indistinguishable from one.
+
+Building a "legitimate" version of it would be worse than the bug. A blessed
+channel for the server to place text in an encrypted room, in nobody's name, is
+the capability the fix removed; the operator could then say anything to anyone
+and have it render as trustworthy chrome.
+
+**The acting moderator's client posts it**, as an ordinary room message —
+encrypted with the room key, signed with their device key, flagged as a
+moderation event so the UI can render it as a notice rather than as something
+they typed. No new trust, no injection channel, and it verifies exactly like
+every other message in the room.
+
+The cost is that the announcement rides on the moderator's client rather than the
+server: if it dies between the ban taking effect and the message going out, the
+room is not told about an exclusion the server is already enforcing. That gap is
+worth accepting. The alternative buys consistency by handing the operator a
+megaphone.
+
+For events the server observes but no moderator caused — somebody's connection
+dropping, a ban expiring on its own — render a **timeline event** rather than a
+message: unattributed, visibly not chat, and never passing through the
+message-decryption path where it could be mistaken for something a person said.
 
 ### A ban manager, per room
 
@@ -583,10 +639,17 @@ to advance or replace a room's key is exactly what that touches.
 - ~~**Can a kick reason be edited or withdrawn**~~ Answered in §7: no. The notice
   is delivered and the log keeps what was sent, because an audit trail editable
   by the people it audits is not one.
-- **How long may a timed ban run** before it should just be a permanent one? No
-  technical limit is needed, but an interface offering "1 hour / 1 day / 1 week /
-  forever" makes better decisions likely than a free-form duration box.
-- **Is the room told when somebody is kicked or banned?** The person on the
-  receiving end is. The other members currently learn nothing, which is either
-  discretion or opacity depending on the room — and §3's open room is built on
-  membership changes being visible.
+- ~~**How long may a timed ban run**~~ Answered in §7: temp bans cap at 3 days,
+  and at 1 hour for a mod. Past 3 days the honest word is "banned".
+- ~~**Is the room told when somebody is kicked or banned?**~~ Answered in §7: yes,
+  posted by the acting moderator's client as an encrypted, signed room message —
+  never injected by the server, which is the capability the plaintext-injection
+  fix removed.
+- **Is the kick reason shown to the ROOM, or only to the person kicked?** A reason
+  written for one recipient is not automatically fit for an audience. Probably the
+  moderator's choice at the time, defaulting to private.
+- **What happens to a temp ban when the room is reformed?** Bans carry over, but a
+  1-hour ban set before a reform that takes a minute is a different thing from a
+  perma ban carried deliberately. Possibly they should simply expire on schedule
+  regardless, which needs the reformed room to inherit the clock and not just the
+  entry.
