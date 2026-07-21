@@ -161,12 +161,15 @@ open is flagged there.
 
 ### Three roles: owner, senior mod, mod
 
-| | Promote / demote | Ban a member | Kick a member | Removable by |
-|---|---|---|---|---|
-| **Owner** | yes | yes | yes | nobody |
-| **Senior mod** | no | yes | yes | owner only |
-| **Mod** | no | no | yes | owner only |
-| **Member** | no | no | no | owner, senior mod, mod |
+| | Promote / demote | Ban | Lift a ban | Kick | Removable by |
+|---|---|---|---|---|---|
+| **Owner** | yes | yes | any, including a senior mod's | yes | nobody |
+| **Senior mod** | no | yes | any except one the owner set | yes | owner only |
+| **Mod** | no | no | no | yes | owner only |
+| **Member** | no | no | no | no | owner, senior mod, mod |
+
+Mods do not touch bans at all — neither setting nor lifting. Kick is the whole of
+a mod's power over a member, and it is the reversible one.
 
 Two invariants do all the work here, and they are worth stating separately from
 the table because everything else follows from them:
@@ -274,6 +277,50 @@ empty by construction.
 The unguessable name and the inherited ban list are belt and braces on purpose.
 The name stops the person following the conversation; the ban stops them arriving
 if they learn it anyway.
+
+Carrying bans over is the **default, not the rule**. A group reforming to draw a
+line under an argument may genuinely want to start clean, so dropping the
+inherited bans is offered as a choice at reform time — deliberately chosen, never
+assumed, and only to whoever could have lifted those bans individually.
+
+### The owner has the last word on bans
+
+Ban state is contested state — two people with the power to set it can undo each
+other indefinitely — so it needs a resolution rule rather than last-writer-wins.
+
+**A ban may only be overridden by an equal or higher tier than the one that set
+it.** A senior mod may lift another senior mod's ban, or their own. They may not
+lift the owner's. The owner may lift anything, and nothing outranks the owner, so
+the owner's decision is final by construction rather than by special case.
+
+This is the same shape as the rule that only the owner touches role-holders:
+authority flows down and never up. It also means the friction is intentional and
+should not be reported as a bug — a senior mod who bans someone the owner then
+unbans **cannot simply re-ban them**. They have to take it up with the owner.
+That is the point of a final say.
+
+**The tier is recorded when the statement is written, not looked up when it is
+read.** If a senior mod is later demoted, the bans they set stay at the level
+they had authority to set them at. Resolving the tier live would mean a demotion
+retroactively weakened past decisions, which is a strange thing to happen to
+records nobody touched.
+
+Like role changes, ban state is a signed statement the server stores and enforces
+rather than a row it authors — for the same reason. A server that can invent a
+ban can exclude anyone from any room, and having it check a signature instead
+costs almost nothing given the machinery already exists.
+
+### A ban manager, per room
+
+Bans accumulate silently and are otherwise invisible: nobody can audit a list
+they cannot see, and "why can't X join?" is unanswerable without one. The room's
+security dialog gets a ban list showing who is banned, when, by whom, and at what
+tier — visible and actionable to the owner and senior mods, since those are the
+tiers that can act on it.
+
+Showing the authoring tier is what makes the override rule legible. A senior mod
+looking at a ban they cannot lift should be able to see that the owner set it,
+rather than discovering it by trying.
 
 ### Owner succession, in preference order
 
@@ -421,11 +468,17 @@ to advance or replace a room's key is exactly what that touches.
 - ~~**What happens to a completely stale room?**~~ Answered in §7: nothing, by
   design. The ladder is evaluated at claim time, and it is closed over the signed
   member list so a walk-in can never inherit.
-- **Is a senior mod's ban reversible by a mod?** Unbanning is not in the table
-  yet. Symmetry says the tier that can ban can unban, which would let one senior
-  mod undo another's decision — the same race the role rules avoid elsewhere.
-  Leaning: whoever banned, plus the owner.
-- **Should a reform be able to DROP inherited bans deliberately?** Inheriting by
-  default is right, but a group reforming to make a fresh start after an argument
-  may want the opposite. Cheap to offer as a choice at reform time; wrong to make
-  it the default.
+- ~~**Is a senior mod's ban reversible by a mod?**~~ Answered in §7: mods do not
+  touch bans at all. Senior mods and the owner lift them, and a ban may only be
+  overridden by an equal or higher tier than set it — so the owner has the final
+  word by construction.
+- ~~**Should a reform be able to DROP inherited bans deliberately?**~~ Answered in
+  §7: yes, as an explicit choice at reform time. Carrying them over stays the
+  default.
+- **Does a ban survive the banned person being re-invited?** A ban blocks the
+  join; an invite hands over a key. Nothing currently stops a mod inviting
+  somebody a senior mod has banned, producing a member who holds the key and
+  cannot get in. The invite should probably refuse, and say why.
+- **Is a kick recorded anywhere?** Bans get a manager and an audit trail; kicks
+  are transient by design and leave no trace. That is defensible, but it means
+  "who keeps kicking me out?" has no answer.
