@@ -29,6 +29,22 @@ type roomKeys struct {
 	hasCurrent bool
 	// all maps key ID to key, current and retired.
 	all map[string]e2ee.RoomKey
+
+	// out is our own outbound chain for this room, once one has been started.
+	// Every sender has their own; ours is the only one we can advance.
+	out *e2ee.Chain
+	// staleChain marks that our chain must be replaced before we send again.
+	//
+	// Set when somebody is removed. Rotation is LAZY on purpose: a chain nobody
+	// advances gives the removed member nothing, so replacing it before the next
+	// send is the earliest point at which it matters, and rooms where nobody
+	// speaks cost nothing. Doing it eagerly for every member would be one
+	// distribution per member per removal.
+	staleChain bool
+	// views are the sender chains we can read, by chain ID. A message naming one
+	// we do not hold is readable by nobody here — which is the normal state for
+	// anything sent before we joined.
+	views map[string]e2ee.ChainView
 }
 
 type roomCrypto struct {
@@ -61,7 +77,10 @@ func (rc *roomCrypto) ensure(cookie string) *roomKeys {
 	}
 	k := rc.rooms[cookie]
 	if k == nil {
-		k = &roomKeys{all: map[string]e2ee.RoomKey{}}
+		k = &roomKeys{
+			all:   map[string]e2ee.RoomKey{},
+			views: map[string]e2ee.ChainView{},
+		}
 		rc.rooms[cookie] = k
 	}
 	return k
@@ -259,6 +278,36 @@ func (c *Client) RoomNonReaders(cookie string) []string {
 
 // sealRoomMessage encrypts outbound room text when we hold a key.
 func (c *Client) sealRoomMessage(cookie, text string) (string, bool, error) {
+	roomName := c.roomName(cookie)
+
+	// Our own chain first, and BEFORE the shared-key check below: holding a
+	// chain is a complete answer to "can we seal for this room", and a room that
+	// has moved to chains has no shared key to find. Checking for one first
+	// would refuse to send into exactly the rooms that work best.
+	//
+	// The signer is taken before roomCrypto.mu so the two locks are never
+	// nested, and the lock is held ACROSS the seal because Next() advances the
+	// chain: two concurrent sends outside it would take the same position and
+	// seal two different messages at one index.
+	if signer, ok := c.signingKey(); ok {
+		if rk := c.roomCrypto.get(cookie); rk != nil {
+			c.roomCrypto.mu.Lock()
+			usable := rk.out != nil && !rk.staleChain
+			var chainEnv string
+			var chainErr error
+			if usable {
+				chainEnv, chainErr = e2ee.SealRoomChain(roomName, text, rk.out, signer)
+			}
+			c.roomCrypto.mu.Unlock()
+			if usable {
+				if chainErr != nil {
+					return "", false, errors.New("client: could not encrypt the room message; nothing was sent")
+				}
+				return chainEnv, true, nil
+			}
+		}
+	}
+
 	key, ok := c.RoomKey(cookie)
 	if !ok {
 		// No key. If this is a known encrypted room, REFUSE — sending plaintext
@@ -272,7 +321,7 @@ func (c *Client) sealRoomMessage(cookie, text string) (string, bool, error) {
 		}
 		return text, false, nil
 	}
-	roomName := c.roomName(cookie)
+
 	var env string
 	var err error
 	if signer, ok := c.signingKey(); ok {
@@ -436,6 +485,9 @@ func (c *Client) decodeRoomMessageFrom(cookie, sender, text string) roomDecode {
 	rk := c.roomCrypto.get(cookie)
 	if rk == nil {
 		return roomDecode{Text: "🔒 [encrypted room message — you don't have this room's key]"}
+	}
+	if e2ee.IsRoomChainEnvelope(text) {
+		return c.decodeRoomChainMessage(cookie, sender, text, rk)
 	}
 	c.roomCrypto.mu.Lock()
 	keys := make(map[string]e2ee.RoomKey, len(rk.all))
@@ -695,4 +747,157 @@ func (c *Client) MergeCatchup(cookie string, res e2ee.CatchupResponse) int {
 		msgs = append(msgs, msg)
 	}
 	return c.store.MergeRoomMessages(cookie, msgs)
+}
+
+// --- Per-sender chains ------------------------------------------------------
+
+// EnsureOutboundChain returns the chain view to hand this room's members, and
+// whether it is a fresh chain they have not been given yet.
+//
+// fresh=true means the caller MUST distribute the view before the next message
+// is sent, or nobody will be able to read it. That ordering is the caller's
+// because distribution is the app layer's job — it knows the member list, and
+// this layer deliberately does not.
+func (c *Client) EnsureOutboundChain(cookie string) (view e2ee.ChainView, fresh bool, err error) {
+	rk := c.roomCrypto.ensure(cookie)
+
+	c.roomCrypto.mu.Lock()
+	needNew := rk.out == nil || rk.staleChain
+	c.roomCrypto.mu.Unlock()
+
+	if !needNew {
+		c.roomCrypto.mu.Lock()
+		defer c.roomCrypto.mu.Unlock()
+		return rk.out.View(), false, nil
+	}
+
+	// Minted outside the lock: NewChain reads the system random source, and
+	// holding a mutex across that is how an unrelated stall becomes a deadlock.
+	chain, err := e2ee.NewChain()
+	if err != nil {
+		return e2ee.ChainView{}, false, err
+	}
+
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	// Re-check: another send may have started one while we were minting.
+	if rk.out != nil && !rk.staleChain {
+		return rk.out.View(), false, nil
+	}
+	rk.out = &chain
+	rk.staleChain = false
+	rk.encrypted = true
+	// We can read our own chain, so scrollback of our own messages works the
+	// same way everyone else's does rather than through a special case.
+	rk.views[chain.ID] = chain.View()
+	return chain.View(), true, nil
+}
+
+// MarkChainStale records that our outbound chain must be replaced before we send
+// again, because somebody who held it is no longer welcome to.
+func (c *Client) MarkChainStale(cookie string) {
+	rk := c.roomCrypto.ensure(cookie)
+	c.roomCrypto.mu.Lock()
+	rk.staleChain = true
+	c.roomCrypto.mu.Unlock()
+}
+
+// LearnChainView installs a sender's chain so their messages can be read.
+//
+// A view for a chain we already hold is kept only when it reaches FURTHER BACK
+// than what we have. Chains only ever move forward, so a view at a lower index
+// grants strictly more; taking the higher one would silently lose history we
+// were entitled to.
+func (c *Client) LearnChainView(cookie string, view e2ee.ChainView) {
+	rk := c.roomCrypto.ensure(cookie)
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	rk.encrypted = true
+	if have, ok := rk.views[view.ID]; ok && have.Index <= view.Index {
+		return
+	}
+	rk.views[view.ID] = view
+}
+
+// ChainViews returns every sender chain we hold for a room.
+func (c *Client) ChainViews(cookie string) map[string]e2ee.ChainView {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return nil
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	out := make(map[string]e2ee.ChainView, len(rk.views))
+	for id, v := range rk.views {
+		out[id] = v
+	}
+	return out
+}
+
+// OutboundChainID reports which chain we are currently sealing with, for tests
+// and diagnostics. Empty when we have not started one.
+func (c *Client) OutboundChainID(cookie string) string {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return ""
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	if rk.out == nil {
+		return ""
+	}
+	return rk.out.ID
+}
+
+// decodeRoomChainMessage opens a message sealed under a sender's chain.
+//
+// Split from the shared-key path rather than folded into it because the failure
+// modes are genuinely different and the user-facing wording has to say which:
+// "sent before you joined" is the ratchet working exactly as intended, while
+// "we were never given this chain" is somebody's key distribution having gone
+// astray and is worth retrying.
+func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKeys) roomDecode {
+	c.roomCrypto.mu.Lock()
+	views := make(map[string]e2ee.ChainView, len(rk.views))
+	for id, v := range rk.views {
+		views[id] = v
+	}
+	c.roomCrypto.mu.Unlock()
+
+	msg, err := e2ee.OpenRoomChain(c.roomName(cookie), text, views, c.PeerSigningKeys(sender))
+	switch {
+	case errors.Is(err, e2ee.ErrChainRewind):
+		// Sent before we were given this chain. Not an error and not worth
+		// chasing: no amount of asking produces a key that was never derivable.
+		return roomDecode{Text: "🔒 [sent before you joined this room]"}
+
+	case errors.Is(err, e2ee.ErrUnknownChain):
+		// A chain nobody has handed us. Usually a sender who started a new one
+		// while we were away, which a request can fix.
+		go c.RefreshPeerKeys(sender)
+		return roomDecode{Text: "🔒 [encrypted room message — waiting for the sender's key…]"}
+
+	case errors.Is(err, e2ee.ErrForgedSignature):
+		return roomDecode{
+			Text:      "⚠ [UNVERIFIED — this message is not signed by " + sender + "] " + msg.Text,
+			Encrypted: true,
+			Signed:    true,
+			Forged:    true,
+		}
+
+	case err != nil:
+		return roomDecode{Text: "🔒 [encrypted room message — couldn't decrypt]"}
+	}
+
+	if c.seenBefore(cookie+":"+sender, msg.ID) {
+		c.log.Warn("dropping a duplicate room message", "room", c.roomName(cookie), "from", sender)
+		return roomDecode{Duplicate: true}
+	}
+	if msg.Signed && !msg.Verified {
+		go c.RefreshPeerKeys(sender)
+	}
+	return roomDecode{
+		Text: msg.Text, Encrypted: true,
+		Verified: msg.Verified, Signed: msg.Signed, SentAt: msg.SentAt,
+	}
 }

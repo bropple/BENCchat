@@ -100,7 +100,9 @@ func DecodeRoomKey(s string) (RoomKey, error) {
 // v1 is the original unsigned form, still readable so an older BENCchat in the
 // room keeps working.
 func IsRoomEnvelope(body string) bool {
-	return strings.HasPrefix(body, roomEnvelopePrefix) || strings.HasPrefix(body, roomEnvelopePrefixV2)
+	return strings.HasPrefix(body, roomEnvelopePrefix) ||
+		strings.HasPrefix(body, roomEnvelopePrefixV2) ||
+		strings.HasPrefix(body, roomEnvelopePrefixV3)
 }
 
 func roomEnvelopeParts(body string) (prefix, rest string, ok bool) {

@@ -966,3 +966,121 @@ func TestReverifyLeavesAForgeryFlagged(t *testing.T) {
 		t.Error("a message signed by somebody else was not flagged on re-verification")
 	}
 }
+
+// TestChainSendAndReceive: the client-level path, chain minted, distributed,
+// and read by somebody holding the view.
+func TestChainSendAndReceive(t *testing.T) {
+	sender, _ := newTestClient(t)
+	recipient, _ := newTestClient(t)
+	signer, _ := e2ee.GenerateSigningKey()
+	sender.SetSigningKey(signer, true)
+	sender.store.UpsertRoom("4-0-r", "project")
+	recipient.store.UpsertRoom("4-0-r", "project")
+	recipient.learnPeerSigningKeys("alice", []ed25519.PublicKey{signer.Public})
+
+	view, fresh, err := sender.EnsureOutboundChain("4-0-r")
+	if err != nil {
+		t.Fatalf("EnsureOutboundChain: %v", err)
+	}
+	if !fresh {
+		t.Fatal("the first chain for a room should be reported as fresh")
+	}
+	recipient.LearnChainView("4-0-r", view)
+
+	env, encrypted, err := sender.sealRoomMessage("4-0-r", "ship it")
+	if err != nil || !encrypted {
+		t.Fatalf("seal: encrypted=%v err=%v", encrypted, err)
+	}
+	if !e2ee.IsRoomChainEnvelope(env) {
+		t.Fatal("a client with a chain still sealed under the shared-key path")
+	}
+	d := recipient.decodeRoomMessageFrom("4-0-r", "alice", env)
+	if d.Text != "ship it" || !d.Verified || !d.Encrypted {
+		t.Fatalf("decode = %+v", d)
+	}
+}
+
+// TestChainHidesPreJoinHistoryAtClientLevel is R5 through the client.
+func TestChainHidesPreJoinHistoryAtClientLevel(t *testing.T) {
+	sender, _ := newTestClient(t)
+	joiner, _ := newTestClient(t)
+	signer, _ := e2ee.GenerateSigningKey()
+	sender.SetSigningKey(signer, true)
+	sender.store.UpsertRoom("4-0-r", "project")
+	joiner.store.UpsertRoom("4-0-r", "project")
+	joiner.learnPeerSigningKeys("alice", []ed25519.PublicKey{signer.Public})
+
+	sender.EnsureOutboundChain("4-0-r")
+	before, _, _ := sender.sealRoomMessage("4-0-r", "said before they joined")
+
+	// They join here and are handed the chain where it currently stands.
+	view, _, _ := sender.EnsureOutboundChain("4-0-r")
+	joiner.LearnChainView("4-0-r", view)
+
+	if d := joiner.decodeRoomMessageFrom("4-0-r", "alice", before); d.Encrypted {
+		t.Errorf("a joiner read a message sent before they arrived: %+v", d)
+	} else if !strings.Contains(d.Text, "before you joined") {
+		t.Errorf("unhelpful wording for pre-join history: %q", d.Text)
+	}
+
+	after, _, _ := sender.sealRoomMessage("4-0-r", "said after they joined")
+	if d := joiner.decodeRoomMessageFrom("4-0-r", "alice", after); d.Text != "said after they joined" {
+		t.Errorf("a joiner could not read a post-join message: %+v", d)
+	}
+}
+
+// TestStaleChainIsReplacedBeforeTheNextSend: lazy rotation. A removal marks the
+// chain stale rather than re-keying immediately, and the replacement happens at
+// the next send — the earliest point at which it matters.
+func TestStaleChainIsReplacedBeforeTheNextSend(t *testing.T) {
+	c, _ := newTestClient(t)
+	signer, _ := e2ee.GenerateSigningKey()
+	c.SetSigningKey(signer, true)
+	c.store.UpsertRoom("4-0-r", "project")
+
+	first, fresh, _ := c.EnsureOutboundChain("4-0-r")
+	if !fresh {
+		t.Fatal("first chain not reported fresh")
+	}
+	if again, fresh, _ := c.EnsureOutboundChain("4-0-r"); fresh || again.ID != first.ID {
+		t.Error("an unchanged chain was replaced or reported fresh")
+	}
+
+	c.MarkChainStale("4-0-r")
+
+	second, fresh, _ := c.EnsureOutboundChain("4-0-r")
+	if !fresh {
+		t.Error("a stale chain was not reported as needing distribution")
+	}
+	if second.ID == first.ID {
+		t.Error("a stale chain was reused, so a removed member could still read")
+	}
+	if second.Index != 0 {
+		t.Errorf("a fresh chain started at index %d, want 0", second.Index)
+	}
+}
+
+// TestLearnChainViewKeepsTheFurthestBack: chains only move forward, so a view at
+// a LOWER index grants strictly more. Taking the higher one would silently
+// discard history we were entitled to.
+func TestLearnChainViewKeepsTheFurthestBack(t *testing.T) {
+	c, _ := newTestClient(t)
+	chain, _ := e2ee.NewChain()
+
+	early := chain.View() // index 0
+	for i := 0; i < 5; i++ {
+		chain.Next()
+	}
+	late := chain.View() // index 5
+
+	c.LearnChainView("4-0-r", late)
+	c.LearnChainView("4-0-r", early)
+	if got := c.ChainViews("4-0-r")[chain.ID]; got.Index != 0 {
+		t.Errorf("kept index %d after learning an earlier view, want 0", got.Index)
+	}
+
+	c.LearnChainView("4-0-r", late)
+	if got := c.ChainViews("4-0-r")[chain.ID]; got.Index != 0 {
+		t.Errorf("a later view overwrote an earlier one, losing history (index %d)", got.Index)
+	}
+}
