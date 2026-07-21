@@ -534,6 +534,13 @@ export function renderRoster(
   async function addBuddy(screenName?: string): Promise<void> {
     const sn = (screenName ?? (await promptDialog("Add buddy — screen name:", "", { title: "Add buddy" })) ?? "").trim();
     if (!sn) return;
+    // Reject adding yourself up front — before the group prompt — since you can't
+    // message yourself anyway. (The backend also refuses, but there's no point
+    // asking for a group first.)
+    if (selfName && normalizeScreenName(sn) === normalizeScreenName(selfName)) {
+      void alertDialog("You can't add yourself as a buddy.", { title: "Add buddy" });
+      return;
+    }
     // Off-list adds go to the default group; a fresh prompt lets the user choose.
     const group = screenName
       ? ""
@@ -1250,9 +1257,14 @@ export function renderRoster(
   const allEmoji = [...new Set(EMOJI_CATEGORIES.flatMap((c) => c.list))];
 
   // The tone palette shown on a long-press. One at a time, tracked here so an
-  // outside click or the next long-press can dismiss it.
+  // outside click, the next long-press, or the button release can dismiss it.
   let tonePaletteEl: HTMLDivElement | null = null;
+  let tonePaletteUp: ((e: MouseEvent) => void) | null = null;
   function closeTonePalette(): void {
+    if (tonePaletteUp) {
+      document.removeEventListener("mouseup", tonePaletteUp, true);
+      tonePaletteUp = null;
+    }
     tonePaletteEl?.remove();
     tonePaletteEl = null;
   }
@@ -1263,35 +1275,45 @@ export function renderRoster(
     pal.innerHTML = toneVariants(base)
       .map((v) => `<button type="button" class="chat__emoji" tabindex="-1">${v}</button>`)
       .join("");
-    // Inside the panel (not the body) so clicking a swatch counts as "inside the
-    // picker" and doesn't close it; position:fixed still places it by the anchor.
+    // Inside the panel (not the body) so a swatch counts as "inside the picker"
+    // and doesn't close it; position:fixed still places it by the anchor.
     emojiPanel.appendChild(pal);
+    // Keep the textarea's focus/caret through any press inside the palette.
+    pal.addEventListener("mousedown", (e) => e.preventDefault());
+
     const r = anchor.getBoundingClientRect();
-    // Sit above the emoji, clamped to the viewport.
     const w = pal.offsetWidth || 6 * 30;
     const left = Math.max(6, Math.min(r.left - w / 2 + r.width / 2, window.innerWidth - w - 6));
     let top = r.top - pal.offsetHeight - 6;
     if (top < 6) top = r.bottom + 6;
     pal.style.left = `${left}px`;
     pal.style.top = `${top}px`;
-    for (const b of pal.querySelectorAll<HTMLButtonElement>(".chat__emoji")) {
-      b.addEventListener("mousedown", (e) => {
-        e.preventDefault();
-        insertAtCursor(chatInputEl, b.textContent ?? "");
-        closeTonePalette();
-      });
-    }
     tonePaletteEl = pal;
+
+    // Slide-to-pick: the palette opens while the mouse button is still held (from
+    // the long-press). Whatever the pointer is over when you RELEASE decides it —
+    // a swatch inserts that tone, anywhere else just dismisses. A plain click on a
+    // swatch works too (that's also a release over it). Capture phase so this
+    // beats the button's own mouseup and the outside-click handler.
+    tonePaletteUp = (e: MouseEvent): void => {
+      const swatch = (e.target as HTMLElement).closest<HTMLElement>(".chat__tone-palette .chat__emoji");
+      if (swatch) {
+        e.preventDefault();
+        e.stopPropagation();
+        insertAtCursor(chatInputEl, swatch.textContent ?? "");
+      }
+      closeTonePalette();
+    };
+    document.addEventListener("mouseup", tonePaletteUp, true);
   }
 
   // Wire an emoji button. A short press inserts the emoji in the current default
-  // tone; holding a tone-capable one opens the six-swatch palette to pick a tone
-  // for that emoji. mousedown preventDefault keeps the textarea's focus and caret,
-  // and the panel stays open so you can pick several in a row.
+  // tone; holding a tone-capable one pops the six-swatch palette, which you then
+  // slide onto and release to pick a tone. mousedown preventDefault keeps the
+  // textarea's focus and caret, and the panel stays open so you can pick several.
   function wireEmojiButton(btn: HTMLButtonElement): void {
     const base = btn.dataset.base ?? btn.textContent ?? "";
     let timer = 0;
-    let longPressed = false;
     const clearTimer = (): void => {
       if (timer) {
         window.clearTimeout(timer);
@@ -1300,21 +1322,20 @@ export function renderRoster(
     };
     btn.addEventListener("mousedown", (e) => {
       e.preventDefault();
-      longPressed = false;
       closeTonePalette();
+      // No mouseleave cancel: once held, the palette should still appear so you
+      // can slide onto it (phone-keyboard accent style), even if the cursor drifts.
       if (toneable(base)) {
-        timer = window.setTimeout(() => {
-          longPressed = true;
-          openTonePalette(btn, base);
-        }, 450);
+        timer = window.setTimeout(() => openTonePalette(btn, base), 350);
       }
     });
     btn.addEventListener("mouseup", () => {
       clearTimer();
-      // The long-press already opened the palette; don't also insert.
-      if (!longPressed) insertAtCursor(chatInputEl, applyTone(base));
+      // Released back on the emoji itself: insert the default tone. (If the palette
+      // was open, its capture-phase mouseup runs first and dismisses it; a release
+      // over a SWATCH never reaches here, since it isn't over this button.)
+      if (!tonePaletteEl) insertAtCursor(chatInputEl, applyTone(base));
     });
-    btn.addEventListener("mouseleave", clearTimer);
   }
 
   function buildEmojiPanel(): void {
@@ -1503,7 +1524,11 @@ export function renderRoster(
     if (
       !emojiPanel.hidden &&
       e.target !== emojiBtn &&
-      !emojiPanel.contains(e.target as Node)
+      !emojiPanel.contains(e.target as Node) &&
+      // Ignore a click whose target was already removed from the DOM — e.g. a tone
+      // swatch that the release just consumed — so picking a tone doesn't also
+      // close the whole picker.
+      document.contains(e.target as Node)
     ) {
       emojiPanel.hidden = true;
       closeTonePalette();
