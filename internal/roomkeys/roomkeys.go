@@ -38,9 +38,23 @@ import (
 type Room struct {
 	// Name is the room's OSCAR name, needed to rejoin it.
 	Name string `json:"name"`
-	// Out is our own outbound chain, encoded. Empty before we have sent
-	// anything, which is a normal state for a room we have only listened to.
+	// Out is our own outbound chain, encoded, ALREADY ADVANCED to ReservedThrough.
+	//
+	// Storing the reserved position rather than the used one is what makes a
+	// crash safe: a restore resumes at a position never used, so no index can
+	// ever seal twice. Empty before we have sent anything.
 	Out string `json:"out,omitempty"`
+	// ReservedThrough is the position the stored chain has been advanced to, and
+	// therefore the first position a restored client may use.
+	ReservedThrough uint32 `json:"reservedThrough,omitempty"`
+	// Shared records that our chain actually reached the room.
+	//
+	// Persisted rather than inferred. Restore used to assume it — "a chain that
+	// reached disk had already reached the room, since it is only persisted
+	// after a send" — and both halves of that were false: nothing persisted on
+	// send, and the export path writes the chain whether or not it was shared.
+	// A reformed room hit exactly that and could never be sent to again.
+	Shared bool `json:"shared,omitempty"`
 	// Views are the sender chains we can read, by chain ID. Each is stored at
 	// the EARLIEST position we are entitled to, which is what makes scrollback
 	// work; winding one forward is a deliberate act, not something a save does.
@@ -184,11 +198,38 @@ func Save(account string, s Store, key *[32]byte) error {
 	out := append([]byte(sealedMagic), nonce[:]...)
 	out = secretbox.Seal(out, raw, &nonce, key)
 
+	// fsync before rename, and the directory after. This is not hygiene, it is
+	// the whole point: this file carries a reservation promising that no chain
+	// position below it has ever been used, and a promise that is still in the
+	// page cache when the machine dies is not a promise. Rename alone orders the
+	// replacement, not the durability of what is being renamed.
 	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	if _, err := f.Write(out); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		return err
+	}
+	if dir, derr := os.Open(filepath.Dir(p)); derr == nil {
+		// Best effort: without this the rename itself can be lost, though the
+		// file it points at is safe. Not fatal — a lost rename leaves the old
+		// reservation, which is conservative in the right direction.
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 // parseSealed returns the nonce+ciphertext body if raw is a sealed file.

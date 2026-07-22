@@ -134,6 +134,22 @@ func (c *Chain) Next() (key [32]byte, index uint32) {
 	return key, index
 }
 
+// AdvanceChain winds our own chain forward, for reserving positions before they
+// are used. ok reports whether it moved.
+func (c Chain) AdvanceChain(to uint32) (Chain, bool) {
+	if to <= c.Index {
+		return c, false
+	}
+	if to-c.Index > maxChainSkip {
+		return c, false
+	}
+	state := c.state
+	for i := c.Index; i < to; i++ {
+		state = step(state)
+	}
+	return Chain{ID: c.ID, state: state, Index: to}, true
+}
+
 // View is the chain as it should be handed to somebody else: the state where it
 // currently stands, which grants everything from here on and nothing before.
 func (c Chain) View() ChainView {

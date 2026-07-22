@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"github.com/benco-holdings/benchat/internal/secret"
 	"log/slog"
@@ -187,14 +188,16 @@ func (a *App) saveRoomKeys(cookie string) {
 	if moved := a.client.PruneChainViews(cookie); moved > 0 {
 		slog.Default().Debug("wound room chain views forward", "room", cookie, "chains", moved)
 	}
-	out, views, seen := a.client.RoomChainState(cookie)
+	out, views, seen, reserved, shared := a.client.RoomChainState(cookie)
 	store[cookie] = roomkeys.Room{
-		Name:    room.Name,
-		Out:     out,
-		Views:   views,
-		Seen:    seen,
-		Members: a.members.list(cookie),
-		Updated: time.Now(),
+		Name:            room.Name,
+		Out:             out,
+		ReservedThrough: reserved,
+		Shared:          shared,
+		Views:           views,
+		Seen:            seen,
+		Members:         a.members.list(cookie),
+		Updated:         time.Now(),
 	}
 	if joined, ok := a.roomJoinedAtTime(cookie); ok {
 		entry := store[cookie]
@@ -203,6 +206,62 @@ func (a *App) saveRoomKeys(cookie string) {
 	}
 	if err := roomkeys.Save(acct, store, key); err != nil {
 		slog.Default().Warn("could not save room keys", "err", err)
+	}
+}
+
+// persistRoomChain durably records a room's chain state, and reports whether it
+// actually reached disk.
+//
+// saveRoomKeys is best-effort and logs its failures; a reservation cannot be,
+// because a promise nobody made must not be acted on. Same work, an answer
+// instead of a log line.
+func (a *App) persistRoomChain(cookie string) error {
+	acct := a.currentAccount()
+	if acct == "" {
+		return errors.New("no signed-on account")
+	}
+	key := a.roomsKey()
+	if key == nil {
+		return errors.New("no usable room-file encryption key")
+	}
+	room, ok := a.store.Room(cookie)
+	if !ok {
+		return errors.New("not in that room")
+	}
+	store, err := roomkeys.Load(acct, key)
+	if err != nil {
+		return err
+	}
+	out, views, seen, reserved, shared := a.client.RoomChainState(cookie)
+	entry := roomkeys.Room{
+		Name:            room.Name,
+		Out:             out,
+		ReservedThrough: reserved,
+		Shared:          shared,
+		Views:           views,
+		Seen:            seen,
+		Members:         a.members.list(cookie),
+		Updated:         time.Now(),
+	}
+	if joined, ok := a.roomJoinedAtTime(cookie); ok {
+		entry.JoinedAt = joined
+	}
+	store[cookie] = entry
+	return roomkeys.Save(acct, store, key)
+}
+
+// flushRoomKeys persists every joined encrypted room. Called on shutdown, which
+// used to flush history and leave chain state entirely — so a CLEAN QUIT lost
+// every position advanced since the last invite, and the next start resumed at
+// an index already used.
+func (a *App) flushRoomKeys() {
+	for _, r := range a.store.Rooms() {
+		if !r.Joined || !a.client.RoomEncrypted(r.Cookie) {
+			continue
+		}
+		if err := a.persistRoomChain(r.Cookie); err != nil {
+			slog.Default().Warn("could not flush room chain state", "room", r.Name, "err", err)
+		}
 	}
 }
 
@@ -227,7 +286,7 @@ func (a *App) restoreRoomKeys() {
 		return
 	}
 	for cookie, r := range store {
-		a.client.RestoreChainState(cookie, r.Out, r.Views, r.Seen)
+		a.client.RestoreChainState(cookie, r.Out, r.Views, r.Seen, r.ReservedThrough, r.Shared)
 		for _, m := range r.Members {
 			a.members.add(cookie, m)
 		}

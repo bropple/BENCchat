@@ -107,6 +107,10 @@ func (a *App) setupE2EE(screenName string) {
 	a.client.SetPeerKeyHandler(a.notePeerKey)
 	a.client.SetRoomInviteHandler(a.handleRoomInvite)
 	a.client.SetRoomMembersFunc(a.members.list)
+	// The durable-write hook the chain reservation needs. Without it the client
+	// still reserves in memory, which is correct within a process and useless
+	// across a restart.
+	a.client.SetPersistChainFunc(a.persistRoomChain)
 	a.client.SetCatchupHandler(a.handleCatchup)
 	a.client.SetConnectionRequestHandler(a.handleConnectionRequest)
 	a.client.SetConnectionResponseHandler(a.handleConnectionResponse)

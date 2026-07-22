@@ -85,6 +85,9 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// persistChainFn durably writes a room's chain state before positions on it
+	// are used; see reserveChainPositions. Guarded by e2eeMu.
+	persistChainFn func(cookie string) error
 	// selfNormalized is the account name we signed on AS, normalized, kept apart
 	// from the server's echo in the store. Guarded by e2eeMu.
 	selfNormalized string

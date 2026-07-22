@@ -39,6 +39,9 @@ type roomKeys struct {
 	// kind of ordering that survives until somebody reorders two lines. Sealing
 	// refuses while this is false, so the mistake cannot compile away.
 	chainShared bool
+	// reservedThrough is the first position our chain has NOT been promised to
+	// disk for. Sealing at or past it must reserve more first.
+	reservedThrough uint32
 	// staleChain marks that our chain must be replaced before we send again.
 	//
 	// Set when somebody is removed. Rotation is LAZY on purpose: a chain nobody
@@ -301,10 +304,28 @@ func (c *Client) sealRoomMessage(cookie, text string) (string, bool, error) {
 	// seal two different messages at one index.
 	if signer, ok := c.signingKey(); ok {
 		if rk := c.roomCrypto.get(cookie); rk != nil {
+			// Before anything is sealed, not after: the promise has to be on
+			// disk before the ciphertext exists, or a crash between the two
+			// leaves a position used with nothing recording that it was.
+			if err := c.reserveChainPositions(cookie); err != nil {
+				return "", false, errors.New(
+					"client: couldn't record this room's chain position, so nothing was sent")
+			}
+
 			c.roomCrypto.mu.Lock()
 			usable := rk.out != nil && !rk.staleChain && rk.chainShared
 			var chainEnv string
 			var chainErr error
+			if usable && rk.out.Index >= rk.reservedThrough {
+				// Should be impossible after reserveChainPositions. If it ever
+				// is not, refuse rather than seal at a position no record
+				// promises — that is the bug this whole scheme exists to make
+				// unreachable, and it must fail loudly rather than silently.
+				c.roomCrypto.mu.Unlock()
+				c.log.Error("refusing to seal past the reserved chain position",
+					"room", roomName, "index", rk.out.Index, "reserved", rk.reservedThrough)
+				return "", false, errors.New("client: chain position is not reserved; nothing was sent")
+			}
 			if usable {
 				chainEnv, chainErr = e2ee.SealRoomChain(roomName, text, rk.out, signer)
 				if chainErr == nil {
@@ -810,6 +831,7 @@ func (c *Client) EnsureOutboundChain(cookie string) (view e2ee.ChainView, fresh 
 	rk.out = &chain
 	rk.staleChain = false
 	rk.chainShared = false // nobody has it yet; sealing stays refused until they do
+	rk.reservedThrough = 0 // a new chain has promised nothing yet
 	rk.encrypted = true
 	// We can read our own chain, so scrollback of our own messages works the
 	// same way everyone else's does rather than through a special case.
@@ -964,18 +986,32 @@ func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKey
 	}
 }
 
-// RoomChainState exports a room's chain state for persistence: our outbound
-// chain, the views we can read, and how far each chain has got.
-func (c *Client) RoomChainState(cookie string) (out string, views map[string]string, seen map[string]uint32) {
+// RoomChainState exports a room's chain state for persistence.
+//
+// The outbound chain is exported ADVANCED TO ITS RESERVATION, not to the
+// position actually reached. A restore then resumes at a position that has never
+// sealed anything, which is what makes a crash — or a clean quit, which used to
+// lose just as much — unable to reuse an index. Up to a block of positions is
+// burned; recipients simply ratchet past them.
+func (c *Client) RoomChainState(cookie string) (out string, views map[string]string, seen map[string]uint32, reserved uint32, shared bool) {
 	rk := c.roomCrypto.get(cookie)
 	if rk == nil {
-		return "", nil, nil
+		return "", nil, nil, 0, false
 	}
 	c.roomCrypto.mu.Lock()
 	defer c.roomCrypto.mu.Unlock()
 
 	if rk.out != nil {
-		out = e2ee.EncodeChain(*rk.out)
+		reserved = rk.reservedThrough
+		if reserved < rk.out.Index {
+			reserved = rk.out.Index
+		}
+		stored := *rk.out
+		if wound, ok := stored.AdvanceChain(reserved); ok {
+			stored = wound
+		}
+		out = e2ee.EncodeChain(stored)
+		shared = rk.chainShared
 	}
 	views = make(map[string]string, len(rk.views))
 	for id, v := range rk.views {
@@ -985,7 +1021,7 @@ func (c *Client) RoomChainState(cookie string) (out string, views map[string]str
 	for id, n := range rk.seen {
 		seen[id] = n
 	}
-	return out, views, seen
+	return out, views, seen, reserved, shared
 }
 
 // RestoreChainState reinstalls persisted chain state after sign-on.
@@ -994,7 +1030,7 @@ func (c *Client) RoomChainState(cookie string) (out string, views map[string]str
 // is the important half: losing the state must mean "refuse to send" rather than
 // "this is an ordinary room", or the client broadcasts in the clear into a
 // conversation everybody believes is private.
-func (c *Client) RestoreChainState(cookie, out string, views map[string]string, seen map[string]uint32) {
+func (c *Client) RestoreChainState(cookie, out string, views map[string]string, seen map[string]uint32, reserved uint32, shared bool) {
 	rk := c.roomCrypto.ensure(cookie)
 	c.roomCrypto.mu.Lock()
 	defer c.roomCrypto.mu.Unlock()
@@ -1003,9 +1039,20 @@ func (c *Client) RestoreChainState(cookie, out string, views map[string]string, 
 	if out != "" {
 		if chain, err := e2ee.DecodeChain(out); err == nil {
 			rk.out = &chain
-			// A chain that reached disk had already reached the room: it is only
-			// persisted after a send, and sending requires it to be shared.
-			rk.chainShared = true
+			// Whether it reached the room is a stored FACT now, not an inference
+			// from the file existing. The old assumption — persisted implies
+			// sent implies shared — was false at both steps, and a reformed room
+			// persisted an unshared chain and then refused to send forever.
+			rk.chainShared = shared
+			rk.reservedThrough = reserved
+			if rk.reservedThrough < chain.Index {
+				rk.reservedThrough = chain.Index
+			}
+			// Our own view goes in at the restored position first; the loop below
+			// then reinstalls the persisted view, which reaches further back and
+			// is what keeps our own scrollback readable. That ordering is
+			// load-bearing, and the continuity check makes it safe rather than
+			// merely lucky.
 			rk.views[chain.ID] = chain.View()
 		} else {
 			// A chain we cannot decode must not be replaced silently here: a
@@ -1275,6 +1322,97 @@ func (c *Client) ourKeyPairs() ([]e2ee.KeyPair, bool) {
 		return nil, false
 	}
 	return []e2ee.KeyPair{c.e2eeKP}, true
+}
+
+// chainReservationBlock is how many chain positions are promised to disk at
+// once.
+//
+// A block rather than a write per message, but NOT for the reason it looks like:
+// a file write per message would be about a millisecond at human typing speed
+// and perfectly affordable. The reason is that a per-send write puts the
+// invariant in call-site discipline, and call-site discipline is exactly what
+// already failed here — the previous design assumed a save that no code path
+// performed, and shutdown flushed history while never touching room keys.
+//
+// Burning up to a block of positions on an unclean exit costs nothing:
+// recipients ratchet forward and the skip cap is three orders of magnitude
+// larger.
+const chainReservationBlock = 64
+
+// reserveChainPositions makes the durable promise that must exist before any
+// ciphertext sealed at the current position leaves this process:
+//
+//	a record on disk whose reservation is strictly greater than the index used.
+//
+// Called from the seal itself rather than from a caller, so that no future
+// reordering of the send path can leave it out.
+func (c *Client) reserveChainPositions(cookie string) error {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return nil
+	}
+	c.roomCrypto.mu.Lock()
+	need := rk.out != nil && rk.out.Index >= rk.reservedThrough
+	var want uint32
+	if need {
+		want = rk.out.Index + chainReservationBlock
+	}
+	c.roomCrypto.mu.Unlock()
+	if !need {
+		return nil
+	}
+
+	// The persist callback reaches back into the app layer, which reads this
+	// client — so it must not run under roomCrypto.mu.
+	c.e2eeMu.Lock()
+	persist := c.persistChainFn
+	c.e2eeMu.Unlock()
+	if persist == nil {
+		// Nothing to persist through (tests, or a client with no app layer).
+		// Record the reservation so behaviour is otherwise identical.
+		c.roomCrypto.mu.Lock()
+		if want > rk.reservedThrough {
+			rk.reservedThrough = want
+		}
+		c.roomCrypto.mu.Unlock()
+		return nil
+	}
+
+	c.roomCrypto.mu.Lock()
+	if want > rk.reservedThrough {
+		rk.reservedThrough = want
+	}
+	c.roomCrypto.mu.Unlock()
+
+	if err := persist(cookie); err != nil {
+		// Roll the promise back: we did not make it, so we must not act as
+		// though we had.
+		c.roomCrypto.mu.Lock()
+		if rk.reservedThrough == want {
+			rk.reservedThrough = rk.out.Index
+		}
+		c.roomCrypto.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// persistChain invokes the durable-write hook, if one is installed.
+func (c *Client) persistChain(cookie string) error {
+	c.e2eeMu.Lock()
+	fn := c.persistChainFn
+	c.e2eeMu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(cookie)
+}
+
+// SetPersistChainFunc installs the durable-write hook the reservation needs.
+func (c *Client) SetPersistChainFunc(fn func(cookie string) error) {
+	c.e2eeMu.Lock()
+	c.persistChainFn = fn
+	c.e2eeMu.Unlock()
 }
 
 // chainRetention is how many positions back a chain view is kept readable.

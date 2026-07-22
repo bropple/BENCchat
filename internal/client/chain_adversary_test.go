@@ -146,44 +146,65 @@ func TestAudit_ChainIDHijack(t *testing.T) {
 // A4: the send path never persists, so a restart resumes at a stale index —
 // reusing message-key positions AND handing a newcomer pre-join history.
 func TestAudit_RestoreAtStaleIndexReusesPositions(t *testing.T) {
-	t.Skip("known open: Group B (persistence): the send path does not reserve chain positions before the wire write, so a restart resumes at a stale index")
-
 	alice, _ := newTestClient(t)
 	alice.store.UpsertRoom("4-0-r", "project")
 	signer, _ := e2ee.GenerateSigningKey()
 	alice.SetSigningKey(signer, true)
 
+	// A stand-in for the room file. The reservation is only worth anything if it
+	// reaches durable storage BEFORE the position it covers is used, so the test
+	// has to model a disk rather than a snapshot taken by hand.
+	var disk struct {
+		out      string
+		views    map[string]string
+		seen     map[string]uint32
+		reserved uint32
+		shared   bool
+		writes   int
+	}
+	alice.SetPersistChainFunc(func(cookie string) error {
+		disk.out, disk.views, disk.seen, disk.reserved, disk.shared = alice.RoomChainState(cookie)
+		disk.writes++
+		return nil
+	})
+
 	alice.EnsureOutboundChain("4-0-r")
 	alice.MarkChainShared("4-0-r")
 
-	// The state as it would reach disk at, say, invite time (index 0).
-	out, views, seen := alice.RoomChainState("4-0-r")
-
-	// Then messages are sent; nothing on this path saves again.
 	var sentIdx []uint32
 	for i := 0; i < 3; i++ {
-		env, _, _ := alice.sealRoomMessage("4-0-r", "message "+strconv.Itoa(i))
+		env, _, err := alice.sealRoomMessage("4-0-r", "message "+strconv.Itoa(i))
+		if err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
 		_, idx, _ := e2ee.RoomEnvelopeChain(env)
 		sentIdx = append(sentIdx, idx)
 	}
+	if disk.writes == 0 {
+		t.Fatal("nothing was persisted during sending, so no position was ever reserved")
+	}
 
-	// Restart.
+	// Crash: everything after the last durable write is gone. Restore from the
+	// file bytes, which is the only state that survives.
 	restarted, _ := newTestClient(t)
 	restarted.store.UpsertRoom("4-0-r", "project")
 	restarted.SetSigningKey(signer, true)
-	restarted.RestoreChainState("4-0-r", out, views, seen)
+	restarted.RestoreChainState("4-0-r", disk.out, disk.views, disk.seen, disk.reserved, disk.shared)
 
 	env, encrypted, err := restarted.sealRoomMessage("4-0-r", "after restart")
 	if err != nil || !encrypted {
 		t.Fatalf("restored client refused to send: %v", err)
 	}
 	_, idx, _ := e2ee.RoomEnvelopeChain(env)
-	for _, s := range sentIdx {
-		if idx == s {
-			t.Errorf("VULNERABLE: position %d sealed a second message after restart", idx)
+
+	for _, used := range sentIdx {
+		if idx == used {
+			t.Errorf("position %d sealed a second message after restart", idx)
 		}
 	}
-	t.Logf("pre-restart indices %v, post-restart index %d", sentIdx, idx)
+	if t.Failed() {
+		t.Logf("pre-restart indices %v, post-restart index %d", sentIdx, idx)
+	}
 }
 
 // A5: RestoreChainState marks a restored chain shared without evidence it ever
@@ -259,5 +280,107 @@ func TestAudit_DecoySlotShadowsTheRealOne(t *testing.T) {
 
 	if _, err := e2ee.DecodeChainBroadcast(crafted, []e2ee.KeyPair{ours}, [][32]byte{sender.Public}); err != nil {
 		t.Errorf("BUG: a decoy slot shadowed the genuine one: %v", err)
+	}
+}
+
+// TestChainSurvivesACrashAtEveryStep is the invariant as a loop rather than a
+// scenario.
+//
+// The rule: before any ciphertext sealed at index i leaves the process, a
+// durable record with reservedThrough > i must exist. A single hand-written
+// crash point proves that for one moment; the failure this exists for is a crash
+// at the moment nobody thought about. So crash at every step and assert the
+// property globally.
+func TestChainSurvivesACrashAtEveryStep(t *testing.T) {
+	signer, _ := e2ee.GenerateSigningKey()
+
+	for crashAfter := 0; crashAfter < 12; crashAfter++ {
+		alice, _ := newTestClient(t)
+		alice.store.UpsertRoom("4-0-r", "project")
+		alice.SetSigningKey(signer, true)
+
+		var disk struct {
+			out      string
+			views    map[string]string
+			seen     map[string]uint32
+			reserved uint32
+			shared   bool
+		}
+		alice.SetPersistChainFunc(func(cookie string) error {
+			disk.out, disk.views, disk.seen, disk.reserved, disk.shared = alice.RoomChainState(cookie)
+			return nil
+		})
+		alice.EnsureOutboundChain("4-0-r")
+		alice.MarkChainShared("4-0-r")
+		// The create/invite path saves as soon as a chain is minted and shared,
+		// so there is always a file before the first send.
+		if err := alice.persistChain("4-0-r"); err != nil {
+			t.Fatalf("initial persist: %v", err)
+		}
+
+		used := map[uint32]bool{}
+		for i := 0; i < crashAfter; i++ {
+			env, _, err := alice.sealRoomMessage("4-0-r", "before")
+			if err != nil {
+				t.Fatalf("crashAfter=%d send %d: %v", crashAfter, i, err)
+			}
+			_, idx, _ := e2ee.RoomEnvelopeChain(env)
+			used[idx] = true
+		}
+
+		// Everything not on disk is lost.
+		restarted, _ := newTestClient(t)
+		restarted.store.UpsertRoom("4-0-r", "project")
+		restarted.SetSigningKey(signer, true)
+		restarted.RestoreChainState("4-0-r", disk.out, disk.views, disk.seen, disk.reserved, disk.shared)
+
+		for i := 0; i < 4; i++ {
+			env, _, err := restarted.sealRoomMessage("4-0-r", "after")
+			if err != nil {
+				t.Fatalf("crashAfter=%d post-restart send %d: %v", crashAfter, i, err)
+			}
+			_, idx, _ := e2ee.RoomEnvelopeChain(env)
+			if used[idx] {
+				t.Fatalf("crashAfter=%d: position %d sealed twice across a crash", crashAfter, idx)
+			}
+			used[idx] = true
+		}
+	}
+}
+
+// TestRestoredChainIsNotAssumedShared: a chain that never reached the room must
+// not come back from disk believing it did.
+//
+// Restore used to infer sharedness from the file existing — "persisted implies
+// sent implies shared" — and both steps were false. A reformed room persisted an
+// unshared chain and then refused to send forever, with a message telling the
+// user to get themselves re-invited to their own room.
+func TestRestoredChainIsNotAssumedShared(t *testing.T) {
+	alice, _ := newTestClient(t)
+	alice.store.UpsertRoom("4-0-r", "project")
+	signer, _ := e2ee.GenerateSigningKey()
+	alice.SetSigningKey(signer, true)
+
+	// A chain minted and persisted but never broadcast.
+	alice.EnsureOutboundChain("4-0-r")
+	out, views, seen, reserved, shared := alice.RoomChainState("4-0-r")
+	if shared {
+		t.Fatal("a chain that was never broadcast reported itself shared")
+	}
+
+	restarted, _ := newTestClient(t)
+	restarted.store.UpsertRoom("4-0-r", "project")
+	restarted.SetSigningKey(signer, true)
+	restarted.RestoreChainState("4-0-r", out, views, seen, reserved, shared)
+
+	if _, _, err := restarted.sealRoomMessage("4-0-r", "hello"); err == nil {
+		t.Error("sealed under a restored chain the room was never given")
+	}
+
+	// And once it is genuinely shared, it round-trips as such.
+	restarted.MarkChainShared("4-0-r")
+	_, _, _, _, nowShared := restarted.RoomChainState("4-0-r")
+	if !nowShared {
+		t.Error("a shared chain did not persist as shared")
 	}
 }

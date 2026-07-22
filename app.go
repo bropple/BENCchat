@@ -208,6 +208,9 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	// Chain state before anything else: it carries the reservation that stops a
+	// restart reusing a position, and a clean quit used to lose it entirely.
+	a.flushRoomKeys()
 	// Remove the tray icon so it doesn't linger after the process exits.
 	a.stopTray()
 	// Persist history before we tear down — SignOff resets the store, so this
