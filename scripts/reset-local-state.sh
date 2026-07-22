@@ -171,30 +171,52 @@ elif ! timeout 5 secret-tool search service "$KEYRING_SERVICE" >/dev/null 2>&1; 
       echo "         secret-tool clear service $KEYRING_SERVICE username $a"
     done
   fi
-elif [ "$KEEP_IDENTITY" -eq 0 ]; then
+elif [ "$KEEP_IDENTITY" -eq 0 ] && [ "$KEEP_HISTORY" -eq 0 ]; then
   # Clear by SERVICE, not per account. Anything BENCchat stored goes, including
   # entries for accounts whose files were already removed — enumerating names
   # would leave those orphans behind, and a blank slate should be blank.
+  #
+  # Only when keeping NOTHING, though. The wholesale sweep takes every kind of
+  # entry there is, and two of them are keys to files this script may have been
+  # asked to preserve.
   KEYRING_OK=1
-  n=0
   while timeout 5 secret-tool clear service "$KEYRING_SERVICE" 2>/dev/null; do
-    n=$((n+1))
     # secret-tool clear removes matching items; loop until nothing matches, so a
     # single call that only removes one entry still ends up clearing them all.
     timeout 5 secret-tool search service "$KEYRING_SERVICE" >/dev/null 2>&1 || break
   done
   echo "    cleared every $KEYRING_SERVICE entry"
 else
-  # Selective: the password goes, the identity stays.
+  # Selective, per account and per kind. BENCchat stores five:
+  #
+  #   <account>          the saved password
+  #   e2ee:<account>     this device's encryption private key
+  #   sign:<account>     its room-message signing seed
+  #   hist:<account>     the key the message history file is sealed under
+  #   rooms:<account>    the key the room-state file is sealed under
+  #
+  # hist: is why this branch exists. --keep-history preserved the file while the
+  # sweep above took its key, and history fails closed on a key it cannot use —
+  # so "keep" produced scrollback that could never be read again, silently, and
+  # the next launch reported it as unreadable rather than absent.
+  #
+  # The cost of being selective is orphans: entries for accounts whose files are
+  # already gone are not enumerated and so survive. That is the honest trade for
+  # preserving anything at all, and it only applies when something was kept.
   KEYRING_OK=1
-  for a in $ACCOUNTS; do
-    if secret-tool clear service "$KEYRING_SERVICE" username "$a" 2>/dev/null; then
-      echo "    cleared saved password for $a"
-    else
-      echo "    (no saved password for $a)"
+  clear_entry() {
+    if timeout 5 secret-tool clear service "$KEYRING_SERVICE" username "$1" 2>/dev/null; then
+      echo "    cleared $1"
     fi
+  }
+  for a in $ACCOUNTS; do
+    clear_entry "$a"
+    clear_entry "rooms:$a"
+    [ "$KEEP_IDENTITY" -eq 0 ] && { clear_entry "e2ee:$a"; clear_entry "sign:$a"; }
+    [ "$KEEP_HISTORY" -eq 0 ] && clear_entry "hist:$a"
   done
-  echo "    kept e2ee: and sign: entries"
+  [ "$KEEP_IDENTITY" -eq 1 ] && echo "    kept e2ee: and sign: entries"
+  [ "$KEEP_HISTORY" -eq 1 ] && echo "    kept hist: entries, so the preserved history stays readable"
 fi
 
 say "Done."

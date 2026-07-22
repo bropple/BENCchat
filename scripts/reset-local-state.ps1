@@ -42,6 +42,8 @@ $ConfDir = if ($env:BENCCHAT_CONFIG_DIR) { $env:BENCCHAT_CONFIG_DIR } else { Joi
 #   BENCchat:<account>        the saved password
 #   BENCchat:e2ee:<account>   the encryption private key
 #   BENCchat:sign:<account>   the room-message signing seed
+#   BENCchat:hist:<account>   the key the message history file is sealed under
+#   BENCchat:rooms:<account>  the key the room-state file is sealed under
 $CredPrefix = 'BENCchat:'
 
 function Say  { param($m) Write-Host "`n==> $m" -ForegroundColor Green }
@@ -175,6 +177,13 @@ if (-not $targets) {
 
         if ($KeepIdentity -and ($name -like "$CredPrefix" + 'e2ee:*' -or $name -like "$CredPrefix" + 'sign:*')) {
             Write-Host "    kept    $name"
+            continue
+        }
+        # -KeepHistory preserved the file while this loop took the key it is
+        # sealed under, and history fails closed on a key it cannot use — so
+        # "keep" produced scrollback that could never be read again.
+        if ($KeepHistory -and $name -like "$CredPrefix" + 'hist:*') {
+            Write-Host "    kept    $name  (the preserved history stays readable)"
             continue
         }
         $null = cmdkey /delete:$name 2>&1
