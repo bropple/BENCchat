@@ -189,7 +189,7 @@ func TestChatRosterDoesNotProveIncapability(t *testing.T) {
 func TestRoomInviteNeedsAnEncryptedChannel(t *testing.T) {
 	c, _ := newTestClient(t)
 	// No 1:1 key for this peer, so no encrypted channel exists.
-	if err := c.InviteToRoom("stranger", "room", nil, nil); err == nil {
+	if err := c.InviteToRoom("stranger", "room", nil, ""); err == nil {
 		t.Fatal("a room key was sent over an unencrypted channel")
 	}
 }
@@ -772,7 +772,7 @@ func TestProtocolTrafficIsNotStoredAsAMessage(t *testing.T) {
 
 	// No session, so the send fails at the wire — but the point is that nothing
 	// is recorded in the conversation either way.
-	_ = c.InviteToRoom("bob", "secret-room", nil, nil)
+	_ = c.InviteToRoom("bob", "secret-room", nil, "")
 	_ = c.RequestCatchup("bob", "secret-room", time.Now())
 	_ = c.SendCatchup("bob", e2ee.CatchupResponse{Room: "secret-room"})
 
@@ -1216,5 +1216,50 @@ func TestPruneChainViewsSparesOurOwnChain(t *testing.T) {
 
 	if moved := c.PruneChainViews("4-0-r"); moved != 0 {
 		t.Errorf("pruned our own chain (%d moved)", moved)
+	}
+}
+
+// TestARosterMustBeSignedByWhoeverSentIt.
+//
+// Room authority turns on WHO signed a roster — only the owner may remove — so
+// the binding between the author named inside and the person the message
+// actually came from has to hold. Without it a server could take the owner's
+// genuine roster from one room and relay it as though somebody else had sent it,
+// or replay it into a context where a different author changes the outcome.
+func TestARosterMustBeSignedByWhoeverSentIt(t *testing.T) {
+	alice, _ := newTestClient(t)
+	kp, err := e2ee.GenerateSigningKey()
+	if err != nil {
+		t.Fatalf("GenerateSigningKey: %v", err)
+	}
+	alice.SetSigningKey(kp, true)
+
+	body, err := alice.SignRosterBody(e2ee.Roster{
+		Room: "project", Epoch: 1, Members: []string{"alice", "bob"},
+		Owner: "alice", Author: "alice",
+	})
+	if err != nil {
+		t.Fatalf("SignRosterBody: %v", err)
+	}
+
+	bob, _ := newTestClient(t)
+	bob.learnPeerSigningKeys("alice", []ed25519.PublicKey{kp.Public})
+
+	if _, ok := bob.VerifiedRoster("alice", body); !ok {
+		t.Fatal("a roster signed by its author did not verify")
+	}
+	// The same bytes, relayed as though Mallory had sent them.
+	if r, ok := bob.VerifiedRoster("mallory", body); ok {
+		t.Errorf("a relayed roster verified as the relayer's: %+v", r)
+	}
+	// And an author we hold no keys for is "cannot check", which must not be
+	// mistaken for "checked out".
+	if _, ok := bob.VerifiedRoster("carol", body); ok {
+		t.Error("a roster from someone whose keys we don't have was accepted")
+	}
+	// A screen name is a display form; the binding must survive its normalized
+	// spelling, or every capitalized account would silently fail this check.
+	if _, ok := bob.VerifiedRoster("A L I C E", body); !ok {
+		t.Error("the sender/author check does not normalize screen names")
 	}
 }

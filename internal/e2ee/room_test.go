@@ -297,22 +297,32 @@ func TestCatchupMalformedRejected(t *testing.T) {
 	}
 }
 
-// TestRoomInviteRosterRoundTrips: the roster travels with the key because it
-// describes exactly that — who the key was given to.
+// TestRoomInviteRosterRoundTrips: the invite carries a signed roster verbatim,
+// because that is what a newcomer needs before they are in the room to receive
+// one directly.
 func TestRoomInviteRosterRoundTrips(t *testing.T) {
 	chain, err := NewChain()
 	if err != nil {
 		t.Fatalf("NewChain: %v", err)
 	}
+	// A roster body contains colons of its own, and the invite is parsed by
+	// position — so this is the case that would break a naive encoding.
+	roster, err := EncodeRoster(Roster{
+		Room: "a room: with punctuation", Epoch: 4,
+		Members: []string{"alice", "bob, jr", "carol"},
+		Owner:   "alice", Author: "alice",
+	})
+	if err != nil {
+		t.Fatalf("EncodeRoster: %v", err)
+	}
 	in := RoomInvite{
 		Room:   "a room: with punctuation",
 		Chains: []ChainView{chain.View()},
-		// A name with a comma would split a naive roster encoding.
-		Members: []string{"alice", "bob, jr", "carol"},
+		Roster: roster,
 	}
 	out, ok := DecodeRoomInvite(EncodeRoomInvite(in))
 	if !ok {
-		t.Fatal("a v2 invite did not decode")
+		t.Fatal("a v3 invite did not decode")
 	}
 	if out.Room != in.Room {
 		t.Errorf("room = %q, want %q", out.Room, in.Room)
@@ -320,12 +330,21 @@ func TestRoomInviteRosterRoundTrips(t *testing.T) {
 	if len(out.Chains) != 1 || out.Chains[0].ID != in.Chains[0].ID {
 		t.Errorf("chains = %+v, want the one that went in", out.Chains)
 	}
-	if strings.Join(out.Members, "|") != strings.Join(in.Members, "|") {
-		t.Errorf("members = %v, want %v", out.Members, in.Members)
+	if out.Roster != in.Roster {
+		t.Fatalf("roster body did not survive:\n got %q\nwant %q", out.Roster, in.Roster)
+	}
+	// And it must still verify after the trip, or carrying it signed bought
+	// nothing.
+	got, err := DecodeRoster(out.Roster)
+	if err != nil {
+		t.Fatalf("DecodeRoster after an invite round trip: %v", err)
+	}
+	if strings.Join(got.Members, "|") != "alice|bob, jr|carol" || got.Owner != "alice" || got.Epoch != 4 {
+		t.Errorf("roster contents changed in transit: %+v", got)
 	}
 }
 
-// TestRoomInviteWithEmptyRosterRoundTrips: a room of one has no other members,
+// TestRoomInviteWithEmptyRosterRoundTrips: a room of one has no roster to send,
 // which must not be confused with a malformed invite.
 func TestRoomInviteWithEmptyRosterRoundTrips(t *testing.T) {
 	chain, _ := NewChain()
@@ -333,8 +352,8 @@ func TestRoomInviteWithEmptyRosterRoundTrips(t *testing.T) {
 	if !ok {
 		t.Fatal("an invite with no roster did not decode")
 	}
-	if len(out.Members) != 0 {
-		t.Errorf("members = %v, want none", out.Members)
+	if out.Roster != "" {
+		t.Errorf("roster = %q, want none", out.Roster)
 	}
 }
 
@@ -356,7 +375,7 @@ func TestRoomInviteV1StillDecodes(t *testing.T) {
 	if out.Room != "old room" || out.Key.ID() != key.ID() {
 		t.Errorf("v1 decoded wrong: %+v", out)
 	}
-	if len(out.Members) != 0 {
-		t.Errorf("v1 produced members from nowhere: %v", out.Members)
+	if out.Roster != "" {
+		t.Errorf("v1 produced a roster from nowhere: %q", out.Roster)
 	}
 }

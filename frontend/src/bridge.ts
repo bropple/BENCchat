@@ -170,6 +170,10 @@ export interface RoomSecurity {
   nonReaders: string[] | null;
   /** People we deliberately gave the key to. */
   members: string[] | null;
+  /** Who may remove people. Only the owner's removals are honoured, so the
+   *  control belongs to them alone — offering it to anyone else produces a
+   *  refusal, not a removal. */
+  owner: string;
 }
 
 /** One machine signed in to this account with its own encryption key. */

@@ -3,6 +3,8 @@ package client
 import (
 	"crypto/ed25519"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -640,14 +642,14 @@ func (c *Client) sendRoomMessageReflected(cookie, text string) error {
 // It refuses to send unless that channel is actually encrypted: handing out a
 // group key in the clear would publish the room to anyone watching the wire,
 // which defeats the whole arrangement.
-func (c *Client) InviteToRoom(screenName, roomName string, chains []e2ee.ChainView, members []string) error {
+func (c *Client) InviteToRoom(screenName, roomName string, chains []e2ee.ChainView, roster string) error {
 	if !c.CanEncryptTo(screenName) {
 		return errors.New("client: can't invite them privately — no encryption key for that person yet")
 	}
 	return c.sendProtocolMessage(screenName, e2ee.EncodeRoomInvite(e2ee.RoomInvite{
-		Room:    roomName,
-		Chains:  chains,
-		Members: members,
+		Room:   roomName,
+		Chains: chains,
+		Roster: roster,
 	}))
 }
 
@@ -1496,4 +1498,151 @@ func (c *Client) PruneChainViews(cookie string) int {
 		moved++
 	}
 	return moved
+}
+
+// --- Signed rosters ---------------------------------------------------------
+
+// rosterHandler is notified when a roster arrives and its signature checks out.
+// Whether to ACT on it is the app layer's decision — the epoch and the owner
+// rule live where membership does.
+type rosterHandler func(cookie string, r e2ee.Roster)
+
+// SetRosterHandler registers the callback for verified inbound rosters.
+func (c *Client) SetRosterHandler(fn rosterHandler) {
+	c.e2eeMu.Lock()
+	c.onRoster = fn
+	c.e2eeMu.Unlock()
+}
+
+// SignRosterBody signs a roster and renders it for the wire, for the paths that
+// carry one inside something else — an invite, where the recipient is not in the
+// room yet and so cannot be sent one directly.
+func (c *Client) SignRosterBody(r e2ee.Roster) (string, error) {
+	signer, ok := c.signingKey()
+	if !ok {
+		return "", errors.New("client: no signing key, so a roster can't be authenticated")
+	}
+	signed, err := e2ee.SignRoster(r, signer)
+	if err != nil {
+		return "", err
+	}
+	return e2ee.EncodeRoster(signed)
+}
+
+// VerifiedRoster parses a roster carried inside an invite and checks it against
+// the sender.
+//
+// Returns false for anything it cannot stand behind — malformed, unsigned, or
+// signed by somebody other than the person who sent it. A caller must not fall
+// back to trusting the contents anyway; an unverifiable membership claim is
+// worth exactly nothing.
+func (c *Client) VerifiedRoster(sender, body string) (e2ee.Roster, bool) {
+	if body == "" {
+		return e2ee.Roster{}, false
+	}
+	r, err := e2ee.DecodeRoster(body)
+	if err != nil {
+		return e2ee.Roster{}, false
+	}
+	if state.NormalizeScreenName(r.Author) != state.NormalizeScreenName(sender) {
+		return e2ee.Roster{}, false
+	}
+	if err := e2ee.VerifyRoster(r, c.PeerSigningKeys(r.Author)); err != nil {
+		return e2ee.Roster{}, false
+	}
+	return r, true
+}
+
+// SendRoster signs a roster and delivers it to each member over the 1:1
+// encrypted channel.
+//
+// One message per member, and NOT an in-room broadcast, which is the opposite of
+// how chain distribution works. Two reasons, both about what the server sees. A
+// roster names people who are not in the room — members who are offline, and
+// the person just removed — so broadcasting it in the clear would hand the
+// server a membership list it does not otherwise have, on top of the occupancy
+// it can already observe. And a roster is rare: it moves on an invite or a
+// removal, not on the send path, so the per-member cost that made broadcasting
+// worth it for chains does not apply here.
+//
+// Delivering to somebody twice would be harmless — a roster is a complete list
+// at an epoch, not a delta, so applying one is idempotent.
+func (c *Client) SendRoster(r e2ee.Roster, to []string) error {
+	body, err := c.SignRosterBody(r)
+	if err != nil {
+		return err
+	}
+	self := state.NormalizeScreenName(c.store.Self().ScreenName)
+	var failed []string
+	for _, sn := range to {
+		if state.NormalizeScreenName(sn) == self {
+			continue
+		}
+		if err := c.sendProtocolMessage(sn, body); err != nil {
+			c.log.Debug("could not deliver a roster", "peer", sn, "err", err)
+			failed = append(failed, sn)
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("client: could not reach %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// handleRoster verifies an inbound roster and hands it up.
+//
+// The 1:1 channel is the ONLY way one arrives. That matters: it means the sender
+// is already authenticated to their encryption key before the roster's own
+// signature is checked, and it means a roster body pasted into a room is inert.
+func (c *Client) handleRoster(sender, body string) {
+	r, err := e2ee.DecodeRoster(body)
+	if err != nil {
+		c.log.Warn("bad roster", "from", sender, "err", err)
+		return
+	}
+	// The author is what the signature binds; the OSCAR sender name is chosen by
+	// the server and proves nothing on its own. They must agree, or a server
+	// could relay somebody's genuine roster as though a different person had
+	// sent it — and authority here turns on WHO signed.
+	if state.NormalizeScreenName(r.Author) != state.NormalizeScreenName(sender) {
+		c.log.Warn("discarding a roster whose author is not its sender",
+			"sender", sender, "author", r.Author)
+		return
+	}
+	keys := c.PeerSigningKeys(r.Author)
+	if len(keys) == 0 {
+		// Not a verdict — we simply cannot check it yet. Fetch, and let the next
+		// copy land rather than acting on a membership claim we could not verify.
+		go c.RefreshPeerKeys(r.Author)
+		return
+	}
+	if err := e2ee.VerifyRoster(r, keys); err != nil {
+		c.log.Warn("discarding a roster that does not verify", "author", r.Author, "err", err)
+		return
+	}
+
+	cookie, ok := c.roomCookieByName(r.Room)
+	if !ok {
+		// A roster for a room we are not in. Nothing to apply it to, and nothing
+		// worth remembering: joining later hands us a current one with the invite.
+		return
+	}
+
+	c.e2eeMu.Lock()
+	fn := c.onRoster
+	c.e2eeMu.Unlock()
+	if fn != nil {
+		fn(cookie, r)
+	}
+}
+
+// roomCookieByName finds a joined room by name.
+func (c *Client) roomCookieByName(name string) (string, bool) {
+	want := state.NormalizeScreenName(name)
+	for _, r := range c.store.Rooms() {
+		if state.NormalizeScreenName(r.Name) == want && r.Joined {
+			return r.Cookie, true
+		}
+	}
+	return "", false
 }

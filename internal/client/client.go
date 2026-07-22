@@ -85,6 +85,8 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// onRoster is notified when a verified roster arrives. Guarded by e2eeMu.
+	onRoster rosterHandler
 	// peerHistoryFn reports whether a peer has ever been seen to publish keys,
 	// so a server claiming otherwise can be disbelieved. Guarded by e2eeMu.
 	peerHistoryFn func(screenName string) bool
@@ -1142,6 +1144,11 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		// something a person typed, so it must never land in a conversation.
 		if encrypted && e2ee.IsRoomInvite(text) {
 			c.handleRoomInvite(msg.From, text)
+			return
+		}
+		// A membership statement, not something a person said.
+		if encrypted && e2ee.IsRoster(text) {
+			c.handleRoster(msg.From, text)
 			return
 		}
 		// Catch-up traffic is likewise machine-to-machine.

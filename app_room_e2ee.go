@@ -34,6 +34,34 @@ import (
 type roomMembers struct {
 	mu      sync.Mutex
 	invited map[string]map[string]bool // room cookie -> normalized screen name
+	// owner is the room's owner, pinned the first time we see the room and never
+	// silently changed. Only the owner may SHRINK a roster.
+	owner map[string]string
+	// epoch is the highest roster epoch we have SEEN for a room, from anybody. It
+	// exists to stamp outgoing rosters ahead of everyone else's, and it is not
+	// the authority check.
+	epoch map[string]uint64
+	// ownerEpoch is the highest epoch from an accepted OWNER roster. Only the
+	// owner's rosters are ordered, because only they can remove — and ordering
+	// is exactly what a removal needs, so that replaying the roster from before
+	// one cannot roll it back.
+	ownerEpoch map[string]uint64
+	// removed is who the owner has taken out of a room, and it is the reason
+	// members' rosters need no ordering at all.
+	//
+	// Ordering members' rosters against the owner's looks like the obvious
+	// defence and quietly breaks convergence: two people adding at the same
+	// moment stamp the same epoch, neither having seen the other, and whichever
+	// arrives second is discarded — one of the two newcomers silently missing
+	// from everybody's list, which is the exact three-way bug this mechanism
+	// exists to prevent, reintroduced by the replay defence.
+	//
+	// A tombstone is the honest shape instead. Removal is durable until the owner
+	// says otherwise, so record it as durable state rather than inferring it from
+	// message order. A member's roster then unions freely — replaying an old one
+	// can only re-assert claims that member really made — and the one thing it
+	// must never do, resurrect somebody the owner removed, is refused by name.
+	removed map[string]map[string]bool
 }
 
 func (m *roomMembers) add(cookie, screenName string) {
@@ -69,17 +97,23 @@ func (m *roomMembers) list(cookie string) []string {
 func (m *roomMembers) forget(cookie string) {
 	m.mu.Lock()
 	delete(m.invited, cookie)
+	delete(m.owner, cookie)
+	delete(m.epoch, cookie)
+	delete(m.ownerEpoch, cookie)
+	delete(m.removed, cookie)
 	m.mu.Unlock()
 }
 
-// addAll unions names into a room's set, skipping self.
+// addAll unions names into a room's set, skipping self and anyone the owner has
+// removed.
 //
-// Used when a roster arrives alongside a key we ALREADY hold: somebody added a
-// member, and the news is additive. Replacing on that would lose anyone we
-// invited concurrently, whose invite the sender had not seen yet.
+// This is how any member's roster is applied: additive, because a member
+// announcing "I invited Dave" is telling the truth about Dave and nothing at all
+// about anybody else. Replacing on one would let any member drop any other by
+// leaving them off, and would lose whoever somebody else invited concurrently.
 func (m *roomMembers) addAll(cookie string, names []string, self string) {
 	for _, n := range names {
-		if state.NormalizeScreenName(n) == self {
+		if state.NormalizeScreenName(n) == self || m.wasRemoved(cookie, n) {
 			continue
 		}
 		m.add(cookie, n)
@@ -88,9 +122,8 @@ func (m *roomMembers) addAll(cookie string, names []string, self string) {
 
 // setAll replaces a room's set with names, skipping self.
 //
-// Used when a roster arrives with a NEW key. A rotation is authoritative about
-// who holds the key it carries — that is the whole point of rotating — so this
-// is the path by which a removal actually propagates.
+// Only ever from the room's owner, who is the sole authority on who is NOT in a
+// room. Anybody else's roster goes through addAll.
 func (m *roomMembers) setAll(cookie string, names []string, self string) {
 	m.mu.Lock()
 	if m.invited == nil {
@@ -104,6 +137,170 @@ func (m *roomMembers) setAll(cookie string, names []string, self string) {
 	}
 	m.invited[cookie] = set
 	m.mu.Unlock()
+}
+
+// pinOwner records a room's owner if we have not already, and reports who the
+// owner is afterwards.
+//
+// Trust on first use, deliberately. There is nothing better available: the first
+// thing we ever learn about a room comes from whoever invited us, and if they
+// lied about the owner they could equally have invited us to a room of their own
+// making. What TOFU does buy is that the answer cannot change afterwards without
+// the pinned owner signing off, so a member cannot promote themselves later.
+func (m *roomMembers) pinOwner(cookie, owner string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensure()
+	if cur := m.owner[cookie]; cur != "" {
+		return cur
+	}
+	norm := state.NormalizeScreenName(owner)
+	if norm != "" {
+		m.owner[cookie] = norm
+	}
+	return norm
+}
+
+func (m *roomMembers) ownerOf(cookie string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.owner[cookie]
+}
+
+// aheadOfOwner reports whether an epoch is ahead of the last one the room's
+// owner set. Applies to the owner's own rosters; members' are not ordered.
+func (m *roomMembers) aheadOfOwner(cookie string, e uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return e > m.ownerEpoch[cookie]
+}
+
+// tombstone records the owner's removals and lifts them for anyone the owner
+// names as present — so re-inviting somebody works, and only the owner can do it.
+func (m *roomMembers) tombstone(cookie string, gone, present []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensure()
+	if m.removed[cookie] == nil {
+		m.removed[cookie] = map[string]bool{}
+	}
+	for _, n := range gone {
+		m.removed[cookie][state.NormalizeScreenName(n)] = true
+	}
+	for _, n := range present {
+		delete(m.removed[cookie], state.NormalizeScreenName(n))
+	}
+}
+
+// wasRemoved reports whether the owner has taken somebody out of a room.
+func (m *roomMembers) wasRemoved(cookie, screenName string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.removed[cookie][state.NormalizeScreenName(screenName)]
+}
+
+// removedList is the tombstone set, for persistence.
+func (m *roomMembers) removedList(cookie string) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, 0, len(m.removed[cookie]))
+	for sn := range m.removed[cookie] {
+		out = append(out, sn)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// acceptOwnerEpoch records an owner's roster as applied. Moves both counters:
+// the owner's, which is the baseline, and the high-water mark used for stamping.
+func (m *roomMembers) acceptOwnerEpoch(cookie string, e uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensure()
+	if e > m.ownerEpoch[cookie] {
+		m.ownerEpoch[cookie] = e
+	}
+	if e > m.epoch[cookie] {
+		m.epoch[cookie] = e
+	}
+}
+
+// noteEpoch records having seen an epoch without treating it as a baseline. A
+// member's roster gets this: it must not become the floor other members' adds
+// have to clear, or concurrent adds would knock each other out.
+func (m *roomMembers) noteEpoch(cookie string, e uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensure()
+	if e > m.epoch[cookie] {
+		m.epoch[cookie] = e
+	}
+}
+
+// nextEpoch is the epoch to stamp on a roster we are about to send. Ahead of
+// everything we have seen, so ours is never mistaken for a replay of somebody
+// else's, and claimed immediately so two of ours cannot collide.
+func (m *roomMembers) nextEpoch(cookie string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensure()
+	next := m.epoch[cookie] + 1
+	if o := m.ownerEpoch[cookie]; o >= next {
+		next = o + 1
+	}
+	m.epoch[cookie] = next
+	return next
+}
+
+func (m *roomMembers) epochOf(cookie string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.epoch[cookie]
+}
+
+func (m *roomMembers) ownerEpochOf(cookie string) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ownerEpoch[cookie]
+}
+
+// ensure initializes the maps. Callers hold mu.
+func (m *roomMembers) ensure() {
+	if m.owner == nil {
+		m.owner = map[string]string{}
+	}
+	if m.epoch == nil {
+		m.epoch = map[string]uint64{}
+	}
+	if m.ownerEpoch == nil {
+		m.ownerEpoch = map[string]uint64{}
+	}
+	if m.removed == nil {
+		m.removed = map[string]map[string]bool{}
+	}
+}
+
+func (m *roomMembers) restore(cookie, owner string, epoch, ownerEpoch uint64, removed []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensure()
+	if len(removed) > 0 {
+		if m.removed[cookie] == nil {
+			m.removed[cookie] = map[string]bool{}
+		}
+		for _, n := range removed {
+			m.removed[cookie][state.NormalizeScreenName(n)] = true
+		}
+	}
+	if owner != "" {
+		m.owner[cookie] = owner
+	}
+	if epoch > m.epoch[cookie] {
+		m.epoch[cookie] = epoch
+	}
+	if ownerEpoch > m.ownerEpoch[cookie] {
+		m.ownerEpoch[cookie] = ownerEpoch
+	}
 }
 
 // roomsKey returns this account's room-file encryption key, minting and storing
@@ -197,6 +394,10 @@ func (a *App) saveRoomKeys(cookie string) {
 		Views:           views,
 		Seen:            seen,
 		Members:         a.members.list(cookie),
+		Owner:           a.members.ownerOf(cookie),
+		RosterEpoch:     a.members.epochOf(cookie),
+		OwnerEpoch:      a.members.ownerEpochOf(cookie),
+		Removed:         a.members.removedList(cookie),
 		Updated:         time.Now(),
 	}
 	if joined, ok := a.roomJoinedAtTime(cookie); ok {
@@ -241,6 +442,10 @@ func (a *App) persistRoomChain(cookie string) error {
 		Views:           views,
 		Seen:            seen,
 		Members:         a.members.list(cookie),
+		Owner:           a.members.ownerOf(cookie),
+		RosterEpoch:     a.members.epochOf(cookie),
+		OwnerEpoch:      a.members.ownerEpochOf(cookie),
+		Removed:         a.members.removedList(cookie),
 		Updated:         time.Now(),
 	}
 	if joined, ok := a.roomJoinedAtTime(cookie); ok {
@@ -290,6 +495,7 @@ func (a *App) restoreRoomKeys() {
 		for _, m := range r.Members {
 			a.members.add(cookie, m)
 		}
+		a.members.restore(cookie, r.Owner, r.RosterEpoch, r.OwnerEpoch, r.Removed)
 		if !r.JoinedAt.IsZero() {
 			a.roomJoinMu.Lock()
 			if a.roomJoinedAt == nil {
@@ -314,6 +520,10 @@ type RoomSecurity struct {
 	NonReaders []string `json:"nonReaders"`
 	// Members are the people we deliberately gave the key to.
 	Members []string `json:"members"`
+	// Owner is who may remove people. Reported so the UI can withhold the
+	// control rather than offer one the backend will refuse — and so the room
+	// can say who to ask.
+	Owner string `json:"owner"`
 }
 
 // RoomSecurityInfo reports a room's encryption state.
@@ -323,6 +533,7 @@ func (a *App) RoomSecurityInfo(cookie string) RoomSecurity {
 		Readable:   a.client.RoomReadable(cookie),
 		NonReaders: a.client.RoomNonReaders(cookie),
 		Members:    a.members.list(cookie),
+		Owner:      a.members.ownerOf(cookie),
 	}
 }
 
@@ -342,6 +553,9 @@ func (a *App) CreateEncryptedRoom(name string) string {
 	// the first send, by the same path every other room uses — a shared key
 	// here would be a second key model to keep alive for one code path.
 	a.client.MarkRoomEncrypted(cookie)
+	// Ours, and pinned now rather than at the first invite: the creator is the
+	// owner, and the pin is what lets us sign removals later.
+	a.members.pinOwner(cookie, a.currentAccount())
 	a.noteRoomJoined(cookie)
 	a.saveRoomKeys(cookie)
 	a.store.Notify(state.NoticeInfo,
@@ -373,7 +587,7 @@ func (a *App) InviteToRoom(cookie, screenName string) string {
 	// conversation has got to — readable from here on, and not one message
 	// before. ChainBundleFor does the winding.
 	bundle := a.client.ChainBundleFor(cookie)
-	if err := a.client.InviteToRoom(screenName, room.Name, bundle, a.roomRoster(cookie)); err != nil {
+	if err := a.client.InviteToRoom(screenName, room.Name, bundle, a.encodedRoster(cookie, room.Name)); err != nil {
 		// Nothing happened, so do not leave a member recorded who got nothing.
 		a.members.remove(cookie, screenName)
 		a.saveRoomKeys(cookie)
@@ -408,52 +622,193 @@ func (a *App) roomRoster(cookie string) []string {
 	return roster
 }
 
-// distributeRoster tells every member who else is in the room, and returns those
-// it could not reach.
+// signedRoster builds and signs the current membership statement for a room.
 //
-// Only the ROSTER travels this way now. Key material goes out as a single
-// in-room broadcast on the send path (see Client.ensureRoomChainDistributed),
-// so the expensive part of what used to happen here — one sealed message per
-// member — is gone. What remains is small and still has to reach everybody,
-// because a member with a stale roster leaves people out of their own
-// broadcasts.
+// It claims the next epoch as it goes, so two of ours can never collide — the
+// second would be read as a replay of the first and dropped.
+func (a *App) signedRoster(cookie, roomName string) (e2ee.Roster, error) {
+	self := state.NormalizeScreenName(a.currentAccount())
+	if self == "" {
+		return e2ee.Roster{}, errors.New("not signed on")
+	}
+	return e2ee.Roster{
+		Room:    roomName,
+		Epoch:   a.members.nextEpoch(cookie),
+		Members: a.roomRoster(cookie),
+		Owner:   a.members.pinOwner(cookie, self),
+		Author:  self,
+	}, nil
+}
+
+// encodedRoster is signedRoster rendered for the wire, ready to ride inside an
+// invite. Empty on failure, which a recipient reads as "told us nothing".
+func (a *App) encodedRoster(cookie, roomName string) string {
+	r, err := a.signedRoster(cookie, roomName)
+	if err != nil {
+		return ""
+	}
+	body, err := a.client.SignRosterBody(r)
+	if err != nil {
+		slog.Default().Warn("could not sign a room roster", "room", roomName, "err", err)
+		return ""
+	}
+	return body
+}
+
+// distributeRoster tells every member who else is in the room.
+//
+// One signed statement, sent twice over: an in-room broadcast so everybody
+// present gets it in a single message, and 1:1 copies to anybody the broadcast
+// cannot reach — a member who is offline, and who would otherwise never learn
+// that somebody was removed. Applying one is idempotent, so arriving by both
+// routes costs nothing.
+//
+// Only the ROSTER travels this way. Key material goes out as a single in-room
+// broadcast on the send path (see Client.ensureRoomChainDistributed), so the
+// expensive part of what used to happen here — one sealed message per member —
+// is gone. What remains is small and still has to reach everybody, because a
+// member with a stale roster leaves people out of their own broadcasts.
 //
 // Shared by invite, removal and reform so all three compute the roster
 // identically; three call sites drifting into three ideas of who is in the room
 // is the bug this exists to prevent.
 func (a *App) distributeRoster(cookie, roomName string, dropped map[string]bool) []string {
-	roster := a.roomRoster(cookie)
-	var failed []string
+	r, err := a.signedRoster(cookie, roomName)
+	if err != nil {
+		return nil
+	}
+	// The removed are not told. They would learn nothing they cannot see anyway,
+	// but there is no reason to spend a message on it either — what actually
+	// stops them reading is the chain they never receive.
+	var tell []string
 	for _, sn := range a.members.list(cookie) {
-		if dropped[sn] {
-			continue
-		}
-		if err := a.client.InviteToRoom(sn, roomName, nil, roster); err != nil {
-			failed = append(failed, sn)
-			slog.Default().Warn("could not deliver a room roster", "peer", sn, "room", roomName, "err", err)
+		if !dropped[sn] {
+			tell = append(tell, sn)
 		}
 	}
-	return failed
+	if err := a.client.SendRoster(r, tell); err != nil {
+		slog.Default().Warn("could not distribute a room roster", "room", roomName, "err", err)
+		return tell
+	}
+	return nil
 }
 
-// learnRoomRoster folds an inbound roster into what we know.
+// applyRoster decides whether an inbound roster has the authority to change what
+// we believe about a room, and applies as much of it as it is entitled to.
 //
-// keyIsNew decides union versus replace, and the distinction matters: a
-// rotation is authoritative about who holds the key it carries, so it replaces
-// (this is how a removal propagates), while a roster arriving with a key we
-// already hold is somebody announcing an ADD, so it unions (replacing there
-// would drop anyone we invited concurrently, whose invite the sender had not
-// seen yet).
-func (a *App) learnRoomRoster(cookie string, roster []string, keyIsNew bool) {
-	if len(roster) == 0 {
-		return // a v1 invite told us nothing; that is not "the room is empty"
-	}
+// Four conditions, and each one closes something specific:
+//
+//  1. The signature verifies, and the author is who sent it. Checked upstream in
+//     the client, because a roster we cannot authenticate should never get here.
+//  2. The author is already a member. Reaching us over the encrypted 1:1 channel
+//     proves nothing about room membership — peer keys are fetched on demand for
+//     anybody — so without this a stranger who knows the room name signs a roster
+//     naming the real owner, adds themselves, and every member's next chain
+//     broadcast seals them a slot.
+//  3. The roster names the owner we pinned. Otherwise a member promotes
+//     themselves and starts removing people.
+//  4. If the author IS the owner, the epoch is ahead of the last one they set.
+//     Rolling a removal back is what an attacker would replay a roster to
+//     achieve, and only the owner's rosters can remove.
+//
+// Then authority splits, and the split IS the design:
+//
+//   - **The owner's roster is authoritative.** It replaces the list outright,
+//     which is the only way a removal can be expressed at all.
+//   - **Anybody else's roster may only ADD.** Names it omits are left alone. Not
+//     a refusal so much as a ceiling: a member announcing "I invited Dave" is
+//     telling the truth about Dave and nothing at all about anyone else.
+//
+// Adding stays flat because gating it would buy nothing — you can only add
+// somebody you can already reach, and they would learn the room name regardless.
+// Removal is the asymmetric one. A flat model where any member may evict any
+// other is not an access control, it is a griefing surface.
+//
+// **On concurrency.** Members' rosters are deliberately NOT ordered. Two people
+// adding at the same moment stamp the same epoch, neither having seen the other,
+// so any ordering rule discards one of them — a newcomer silently missing from
+// everybody's list, which is the three-way bug this whole mechanism exists to
+// prevent, reintroduced by the replay defence. What a member's roster must never
+// do is resurrect somebody the owner removed, and that is refused by name rather
+// than by ordering: see the tombstone set on roomMembers.
+//
+// And the part that makes removal bite: on an owner roster that SHRINKS, every
+// recipient marks its OWN chain stale. That is what was missing when chains
+// replaced the shared room key. Under a shared key the rotation message CARRIED
+// the new key, so "I hold new key material" doubled as proof of authority and a
+// removal propagated by accident; when the key went, the accident went with it,
+// and everybody except the person who clicked Remove carried on sending on
+// chains the removed member still held.
+func (a *App) applyRoster(cookie string, r e2ee.Roster) {
 	self := state.NormalizeScreenName(a.currentAccount())
-	if keyIsNew {
-		a.members.setAll(cookie, roster, self)
+	author := state.NormalizeScreenName(r.Author)
+
+	owner := a.members.pinOwner(cookie, r.Owner)
+	if state.NormalizeScreenName(r.Owner) != owner {
+		slog.Default().Warn("ignoring a roster that names a different room owner",
+			"room", r.Room, "pinned", owner, "claimed", r.Owner, "author", r.Author)
 		return
 	}
-	a.members.addAll(cookie, roster, self)
+	if author != owner && author != self && !a.isRoomMember(cookie, author) {
+		slog.Default().Warn("ignoring a roster from someone who is not in the room",
+			"room", r.Room, "author", r.Author)
+		return
+	}
+	staying := map[string]bool{}
+	for _, n := range r.Members {
+		staying[state.NormalizeScreenName(n)] = true
+	}
+	var shrinks bool
+	for _, m := range a.members.list(cookie) {
+		if !staying[m] {
+			shrinks = true
+			break
+		}
+	}
+
+	if author != owner {
+		// No epoch gate. A member's roster can only add, and it cannot resurrect
+		// anyone the owner removed — the tombstone refuses that by name — so
+		// there is nothing a replay of one can achieve, and ordering them would
+		// cost convergence for nothing. See the note on roomMembers.removed.
+		if shrinks {
+			// Applied as an add anyway — its omissions simply carry no weight —
+			// but said out loud, because somebody attempting it is worth knowing
+			// about whether it was malice or a stale client.
+			slog.Default().Warn("a non-owner's roster tried to remove people; adding only",
+				"room", r.Room, "author", r.Author, "owner", owner)
+			a.store.Notify(state.NoticeWarn, r.Author+" tried to remove people from “"+r.Room+
+				"” but doesn't own it. Ignored.")
+		}
+		a.members.addAll(cookie, r.Members, self)
+		a.members.noteEpoch(cookie, r.Epoch)
+		a.saveRoomKeys(cookie)
+		return
+	}
+
+	// The owner's, and the only kind that is ordered: rolling a removal back is
+	// what an attacker would replay a roster to achieve.
+	if !a.members.aheadOfOwner(cookie, r.Epoch) {
+		slog.Default().Debug("ignoring a stale roster from the room's owner",
+			"room", r.Room, "epoch", r.Epoch)
+		return
+	}
+	var gone []string
+	for _, m := range a.members.list(cookie) {
+		if !staying[m] {
+			gone = append(gone, m)
+		}
+	}
+	a.members.tombstone(cookie, gone, r.Members)
+	a.members.setAll(cookie, r.Members, self)
+	a.members.acceptOwnerEpoch(cookie, r.Epoch)
+	if shrinks {
+		// Replaced lazily, before our next send: a chain nobody advances gives
+		// the removed member nothing, so the earliest moment it matters is the
+		// next thing we say.
+		a.client.MarkChainStale(cookie)
+	}
+	a.saveRoomKeys(cookie)
 }
 
 // handleRoomInvite surfaces an inbound room key for the user to accept.
@@ -489,9 +844,16 @@ func (a *App) handleRoomInvite(from string, inv e2ee.RoomInvite) {
 		for _, v := range inv.Chains {
 			a.client.LearnChainView(cookie, v)
 		}
-		// Chains present means the sender re-keyed, which is authoritative about
-		// who holds the new state; a roster alone is somebody announcing an add.
-		a.learnRoomRoster(cookie, inv.Members, len(inv.Chains) > 0)
+		// Chains and nothing else. An invite's roster is a BOOTSTRAP, for
+		// somebody who is not in the room yet and has no other way to learn who
+		// is; membership changes for a room we are already in arrive as signed
+		// rosters in their own right.
+		//
+		// What used to be here was a guess — "chains present means the sender
+		// re-keyed, so their roster replaces ours; otherwise it adds" — and the
+		// guess was load-bearing for removal. It was also wrong in both
+		// directions: any member's rotation could rewrite anyone's roster, and
+		// an add could not remove even when it should.
 		a.saveRoomKeys(cookie)
 		return
 	}
@@ -561,11 +923,28 @@ func (a *App) AcceptRoomInvite(roomName string) string {
 	for _, v := range inv.Chains {
 		a.client.LearnChainView(cookie, v)
 	}
-	// The roster names everyone in the room, so take the lot — knowing only the
-	// person who invited us is what left three-way rooms unable to re-key.
-	// `from` is added regardless: they are the one member we can be certain of.
+	// `from` regardless: they are the one member we can be certain of, having
+	// just heard from them over a channel authenticated to their key.
 	a.members.add(cookie, from)
-	a.learnRoomRoster(cookie, inv.Members, false)
+	// Then the signed roster, which names everyone else — knowing only the
+	// person who invited us is what left three-way rooms unable to re-key. This
+	// is where the room's owner and epoch get pinned, and it is trust on first
+	// use: the first thing we ever learn about a room comes from whoever invited
+	// us, and if they lied about the owner they could equally have invited us to
+	// a room of their own making. What the pin buys is that it cannot change
+	// afterwards without the pinned owner signing off.
+	if r, ok := a.client.VerifiedRoster(from, inv.Roster); ok && r.Room == inv.Room {
+		a.members.pinOwner(cookie, r.Owner)
+		if state.NormalizeScreenName(r.Author) == state.NormalizeScreenName(r.Owner) {
+			a.members.acceptOwnerEpoch(cookie, r.Epoch)
+		} else {
+			a.members.noteEpoch(cookie, r.Epoch)
+		}
+		a.members.addAll(cookie, r.Members, state.NormalizeScreenName(a.currentAccount()))
+	} else if inv.Roster != "" {
+		slog.Default().Warn("joined a room whose invite carried an unverifiable roster",
+			"room", inv.Room, "from", from)
+	}
 	// From here, and not one message before it. The bundle grants exactly that,
 	// and asking for history would fetch messages sealed at positions we cannot
 	// derive — a screenful of "sent before you joined", which is the ratchet
@@ -626,15 +1005,37 @@ func (a *App) rekeyRoom(cookie string, drop []string) (failed []string, errMsg s
 	if !ok {
 		return nil, "You're not in that room."
 	}
+	// Refuse a removal we cannot make stick. Only the owner's shrink is honoured,
+	// so a member clicking Remove would otherwise get "Room key rotated" while
+	// every other client ignored the roster and carried on including the person
+	// they thought they had removed — our chain replaced, and nobody else's.
+	if len(drop) > 0 {
+		self := state.NormalizeScreenName(a.currentAccount())
+		if owner := a.members.pinOwner(cookie, self); owner != self {
+			return nil, "Only " + owner + " can remove people from this room."
+		}
+	}
+
 	dropped := map[string]bool{}
 	for _, d := range drop {
 		dropped[state.NormalizeScreenName(d)] = true
 		a.members.remove(cookie, d)
 	}
+	// Tombstoned, not merely dropped. Without this the next roster any member
+	// sends — built from a list that still names them — would put them straight
+	// back, and the removal would last until the next message arrived.
+	a.members.tombstone(cookie, drop, nil)
 
 	a.client.MarkChainStale(cookie)
 	a.saveRoomKeys(cookie)
 
+	if len(dropped) == 0 {
+		// Nobody left, so nobody's list is stale. This is the device-removal
+		// path, where the chain needed replacing but membership did not change —
+		// sending an identical roster to every member of every affected room
+		// would be noise, and it would burn an epoch each time.
+		return nil, ""
+	}
 	// The roster still has to reach everybody who remains: a member working from
 	// a stale list leaves people out of their own broadcasts.
 	return a.distributeRoster(cookie, room.Name, dropped), ""
@@ -753,7 +1154,7 @@ func (a *App) ReformRoom(cookie string, drop []string) string {
 	a.client.MarkChainShared(newCookie)
 	a.noteRoomJoined(newCookie)
 
-	roster := a.roomRoster(newCookie)
+	roster := a.encodedRoster(newCookie, newName)
 	for _, sn := range carry {
 		// The full bundle 1:1, because they are not in the new room yet and an
 		// in-room broadcast would not reach them.

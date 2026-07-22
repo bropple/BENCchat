@@ -70,6 +70,16 @@ type Room struct {
 	// Members are the people we deliberately gave keys to, so a rotation
 	// redistributes to exactly them and not to whoever wandered in.
 	Members []string `json:"members,omitempty"`
+	// Owner is the room's owner as we pinned it on joining, and RosterEpoch the
+	// highest roster epoch we have accepted. Both are anti-rollback state: an
+	// attacker's best move against a removal is to replay the roster from before
+	// it, and without a persisted high-water mark a restart would accept one.
+	Owner       string `json:"owner,omitempty"`
+	RosterEpoch uint64 `json:"rosterEpoch,omitempty"`
+	OwnerEpoch  uint64 `json:"ownerEpoch,omitempty"`
+	// Removed is who the owner has taken out. Durable, because removal is
+	// durable: it is what stops another member's roster putting them back.
+	Removed []string `json:"removed,omitempty"`
 	// JoinedAt is when we first entered this room.
 	//
 	// It bounds catch-up. Everything before it was sealed at chain positions we

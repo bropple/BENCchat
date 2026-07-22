@@ -290,6 +290,20 @@ func installLiveVerifier(t *testing.T, c *Client) {
 // ChatNav → Chat cookie-redirect dance), confirm the server put us in the room's
 // roster, send a message, and leave. Receiving from a *second* user is the only
 // part this can't cover alone.
+// liveRoster signs the roster that rides along with a live invite. The receiving
+// client verifies it, so an unsigned one would leave the newcomer with no idea
+// who else is in the room.
+func liveRoster(t *testing.T, c *Client, room string, members ...string) string {
+	t.Helper()
+	body, err := c.SignRosterBody(e2ee.Roster{
+		Room: room, Epoch: 1, Members: members, Owner: members[0], Author: members[0],
+	})
+	if err != nil {
+		t.Fatalf("signing a live roster: %v", err)
+	}
+	return body
+}
+
 func TestLiveChatRoom(t *testing.T) {
 	addr, sn, pw := liveCreds(t)
 
@@ -1567,7 +1581,7 @@ func TestLiveRoomHost(t *testing.T) {
 	hostCookie.Store(cookie)
 	t.Logf("created encrypted room %q (key id %s)", roomName, roomKey.ID())
 
-	if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie), []string{sn, target}); err != nil {
+	if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie), liveRoster(t, c, roomName, sn, target)); err != nil {
 		t.Fatalf("inviting %q: %v", target, err)
 	}
 	t.Logf("invited %q — they should be prompted to join", target)
@@ -1599,7 +1613,7 @@ func TestLiveRoomHost(t *testing.T) {
 		}
 		switch {
 		case !present && !invitedWhileAway && tick >= 3:
-			if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie), []string{sn, target}); err != nil {
+			if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie), liveRoster(t, c, roomName, sn, target)); err != nil {
 				t.Logf("re-invite failed: %v", err)
 			} else {
 				invitedWhileAway = true
@@ -1836,4 +1850,6 @@ func TestLiveCrossSigning(t *testing.T) {
 	}
 }
 
-func liveCredsObj(sn, pw string) oscar.Credentials { return oscar.Credentials{ScreenName: sn, Password: pw} }
+func liveCredsObj(sn, pw string) oscar.Credentials {
+	return oscar.Credentials{ScreenName: sn, Password: pw}
+}

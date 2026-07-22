@@ -172,87 +172,166 @@ func sortedMembers(a *App, cookie string) string {
 	return strings.Join(got, ",")
 }
 
-// TestRosterFromInviteReachesEveryMember is the three-way bug.
+// roster is a membership statement as it would arrive from the wire. Signature
+// checking happens in the client before applyRoster ever sees one, so these
+// exercise the AUTHORITY rules — epoch, ownership, and what a shrink does.
+func roster(room, owner, author string, epoch uint64, members ...string) e2ee.Roster {
+	return e2ee.Roster{Room: room, Epoch: epoch, Members: members, Owner: owner, Author: author}
+}
+
+// TestRosterReachesEveryMember is the three-way bug.
 //
 // Membership used to be recorded only for people WE invited, so in a room where
 // Alice invited both Bob and Carol, Carol knew only Alice. A rotation by Carol
-// then reached nobody but Alice, and Bob silently lost the room. The roster
-// travelling with the key is what closes that.
-func TestRosterFromInviteReachesEveryMember(t *testing.T) {
+// then reached nobody but Alice, and Bob silently lost the room.
+func TestRosterReachesEveryMember(t *testing.T) {
 	a := rosterTestApp(t, "carol")
-	key, err := e2ee.GenerateRoomKey()
-	if err != nil {
-		t.Fatalf("GenerateRoomKey: %v", err)
-	}
-	a.client.SetRoomKey("room-1", key)
+	a.client.MarkRoomEncrypted("room-1")
 	a.members.add("room-1", "alice") // all we learn from being invited
+	a.members.pinOwner("room-1", "alice")
 
-	if got := sortedMembers(a, "room-1"); got != "alice" {
-		t.Fatalf("precondition: members = %q", got)
-	}
-
-	// Alice adds Dave and tells the whole room. Same key, so this is a roster
-	// announcement rather than a rotation.
-	a.handleRoomInvite("alice", e2ee.RoomInvite{
-		Room:    "secret room",
-		Key:     key,
-		Members: []string{"alice", "bob", "carol", "dave"},
-	})
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 1, "alice", "bob", "carol", "dave"))
 
 	// Everyone but ourselves — a.members means "other people holding this key".
 	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave" {
 		t.Errorf("members = %q, want %q", got, "alice,bob,dave")
 	}
-	if cur, ok := a.client.RoomKey("room-1"); !ok || cur.ID() != key.ID() {
-		t.Error("a roster announcement changed the room key")
-	}
 }
 
-// TestRotationRosterPropagatesRemoval: a rotation is authoritative about who
-// holds the key it carries, so it REPLACES the roster. This is the mechanism by
-// which a removal actually reaches the rest of the room.
-func TestRotationRosterPropagatesRemoval(t *testing.T) {
+// TestOwnerRemovalPropagatesAndStalesOurChain is H1, and it is the whole point
+// of signing rosters.
+//
+// Under the old shared room key a rotation CARRIED the new key, so holding new
+// key material doubled as proof of authority and a removal propagated by
+// accident. Chains took the key away and nothing replaced the proof: every
+// member except the one who clicked Remove carried on sending on chains the
+// removed member still held.
+func TestOwnerRemovalPropagatesAndStalesOurChain(t *testing.T) {
 	a := rosterTestApp(t, "carol")
 	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
 	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+	before, _, err := a.client.EnsureOutboundChain("room-1")
+	if err != nil {
+		t.Fatalf("EnsureOutboundChain: %v", err)
+	}
 
-	fresh, _ := e2ee.NewChain()
-	a.handleRoomInvite("alice", e2ee.RoomInvite{
-		Room:    "secret room",
-		Chains:  []e2ee.ChainView{fresh.View()},
-		Members: []string{"alice", "bob", "carol"}, // dave is out
-	})
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 1, "alice", "bob", "carol")) // dave is out
 
 	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
 		t.Errorf("members = %q, want %q — a removal did not propagate", got, "alice,bob")
 	}
-	if _, ok := a.client.ChainViews("room-1")[fresh.ID]; !ok {
-		t.Error("the re-keyed chain was not installed")
+	if !chainWasReplaced(a, "room-1", before.ID) {
+		t.Error("a removal left OUR chain in place, so the removed member still reads what we send next")
 	}
 }
 
-// TestSameKeyRosterUnionsRatherThanReplaces: two people inviting at once must
-// not erase each other's newcomer. Only a rotation replaces.
-func TestSameKeyRosterUnionsRatherThanReplaces(t *testing.T) {
+// TestAnyMemberMayAdd: additions stay flat. Gating them would buy nothing —
+// you can only add somebody you can already reach, and they would learn the
+// room name regardless.
+func TestAnyMemberMayAdd(t *testing.T) {
 	a := rosterTestApp(t, "carol")
 	a.client.MarkRoomEncrypted("room-1")
-	// We invited Eve a moment ago; Alice has not heard about her yet.
-	a.members.setAll("room-1", []string{"alice", "eve"}, "carol")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
 
-	// A roster-only invite: no chains, so this is somebody announcing an ADD.
-	a.handleRoomInvite("alice", e2ee.RoomInvite{
-		Room:    "secret room",
-		Members: []string{"alice", "carol", "dave"},
-	})
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 1, "alice", "bob", "carol", "dave"))
 
-	if got := sortedMembers(a, "room-1"); got != "alice,dave,eve" {
-		t.Errorf("members = %q, want %q — a concurrent invite was lost", got, "alice,dave,eve")
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave" {
+		t.Errorf("members = %q, want %q — a member could not add", got, "alice,bob,dave")
 	}
 }
 
-// TestV1InviteDoesNotWipeRoster: an older client sends no roster. Absent means
-// "said nothing", not "the room is empty".
-func TestV1InviteDoesNotWipeRoster(t *testing.T) {
+// TestOnlyTheOwnerMayRemove: a flat model where any member can evict any other
+// is not an access control, it is a griefing surface — and worse, it makes the
+// roster an injection point for cutting people out of a room.
+func TestOnlyTheOwnerMayRemove(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+	before, _, _ := a.client.EnsureOutboundChain("room-1")
+
+	// Bob is a member in good standing. He is not the owner.
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 1, "alice", "bob", "carol"))
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave" {
+		t.Errorf("members = %q — a non-owner removed somebody", got)
+	}
+	if chainWasReplaced(a, "room-1", before.ID) {
+		t.Error("a refused removal still cycled our chain, which a stranger could use to churn the room")
+	}
+}
+
+// TestARosterCannotBeReplayed: the cheapest attack on a removal is to capture
+// the roster from before it and send that back afterwards.
+func TestARosterCannotBeReplayed(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+
+	full := roster("secret room", "alice", "alice", 4, "alice", "bob", "carol", "dave")
+	a.applyRoster("room-1", full)
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 5, "alice", "bob", "carol"))
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Fatalf("precondition: members = %q, want alice,bob", got)
+	}
+
+	a.applyRoster("room-1", full) // the capture, replayed
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q — a replayed roster undid a removal", got)
+	}
+	// Same epoch, different contents: an attacker who cannot rewind may still try
+	// to sit ON the current epoch.
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 5, "alice", "bob", "carol", "mallory"))
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q — a roster at an epoch already used was accepted", got)
+	}
+}
+
+// TestAMemberCannotPushTheEpochOutOfReach.
+//
+// Members' rosters must not move the owner's epoch. If they did, anybody could
+// stamp a huge one and lock the owner out of ever removing anyone again — a
+// denial of the only authority in the room, available to every member.
+func TestAMemberCannotPushTheEpochOutOfReach(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 9_000_000, "alice", "bob", "carol", "dave"))
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 2, "alice", "bob", "carol"))
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q — a member's epoch locked the owner out of removing anyone", got)
+	}
+}
+
+// TestTheOwnerCannotBeSwappedOut: the owner is pinned on the first roster we
+// see and every later one must agree, or a member could promote themselves and
+// then start removing people.
+func TestTheOwnerCannotBeSwappedOut(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+
+	a.applyRoster("room-1", roster("secret room", "bob", "bob", 2, "bob", "carol"))
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave" {
+		t.Errorf("members = %q — somebody named themselves owner and it stuck", got)
+	}
+	if a.members.ownerOf("room-1") != "alice" {
+		t.Errorf("owner = %q, want alice", a.members.ownerOf("room-1"))
+	}
+}
+
+// TestARosterlessInviteDoesNotWipeTheRoom: an invite for a room we are already
+// in carries chains and nothing else. Absent must read as "said nothing".
+func TestARosterlessInviteDoesNotWipeTheRoom(t *testing.T) {
 	a := rosterTestApp(t, "carol")
 	a.client.MarkRoomEncrypted("room-1")
 	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
@@ -265,21 +344,23 @@ func TestV1InviteDoesNotWipeRoster(t *testing.T) {
 	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
 		t.Errorf("members = %q, want %q — a rosterless invite emptied the room", got, "alice,bob")
 	}
+	if _, ok := a.client.ChainViews("room-1")[fresh.ID]; !ok {
+		t.Error("a member's chain was not installed")
+	}
 }
 
-// TestNonMemberCannotInjectRoster: the membership check that stops a stranger
-// replacing the room key must also stop them rewriting who is in the room —
-// otherwise they could add themselves and rotate next time.
-func TestNonMemberCannotInjectRoster(t *testing.T) {
+// TestNonMemberCannotInjectChains: reaching us over the encrypted 1:1 channel
+// proves nothing about room membership — peer keys are fetched on demand for
+// anyone.
+func TestNonMemberCannotInjectChains(t *testing.T) {
 	a := rosterTestApp(t, "carol")
 	a.client.MarkRoomEncrypted("room-1")
 	a.members.add("room-1", "alice")
 
 	attacker, _ := e2ee.NewChain()
 	a.handleRoomInvite("mallory", e2ee.RoomInvite{
-		Room:    "secret room",
-		Chains:  []e2ee.ChainView{attacker.View()},
-		Members: []string{"mallory", "carol"},
+		Room:   "secret room",
+		Chains: []e2ee.ChainView{attacker.View()},
 	})
 
 	if got := sortedMembers(a, "room-1"); got != "alice" {
@@ -475,5 +556,236 @@ func TestJoinTimeStillFloorsOlderHistory(t *testing.T) {
 	if since := a.roomLastSeen("room-1"); since.Before(joined) {
 		t.Errorf("a message from %v dragged the window back to %v, before we joined at %v",
 			old, since, joined)
+	}
+}
+
+// TestRemovingWithoutOwningRefusesLoudly.
+//
+// The failure this guards against is the quiet one. Only the owner's shrink is
+// honoured, so a member who clicks Remove and is told "Room key rotated" would
+// be looking at a room where their own chain had cycled, every other client had
+// ignored the roster, and the person they meant to remove was still reading.
+func TestRemovingWithoutOwningRefusesLoudly(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
+	before, _, _ := a.client.EnsureOutboundChain("room-1")
+
+	msg := a.RotateRoomKey("room-1", []string{"bob"})
+
+	if msg == "" {
+		t.Fatal("removing somebody from a room we don't own reported success")
+	}
+	if !strings.Contains(msg, "alice") {
+		t.Errorf("the refusal doesn't say who can do it: %q", msg)
+	}
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q — a refused removal was applied locally anyway", got)
+	}
+	if chainWasReplaced(a, "room-1", before.ID) {
+		t.Error("a refused removal still cycled our chain, costing the room a re-key for nothing")
+	}
+}
+
+// TestTheCreatorOwnsTheRoom: somebody has to be able to remove people, and the
+// person who made the room is the only candidate available at that moment.
+func TestTheCreatorOwnsTheRoom(t *testing.T) {
+	a := rosterTestApp(t, "me")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "me")
+
+	if msg := a.RotateRoomKey("room-1", []string{"bob"}); msg != "" {
+		t.Fatalf("the room's owner could not remove anyone: %q", msg)
+	}
+	if got := sortedMembers(a, "room-1"); got != "alice" {
+		t.Errorf("members = %q, want alice", got)
+	}
+	// And what we send from here on says the same thing, or the members who
+	// remain would put bob back on their next roster.
+	for _, r := range a.roomRoster("room-1") {
+		if r == "bob" {
+			t.Errorf("a removed member is still on the outgoing roster: %v", a.roomRoster("room-1"))
+		}
+	}
+}
+
+// TestANonMemberCannotAddThemselves.
+//
+// Reaching us over the encrypted 1:1 channel proves nothing about room
+// membership — peer keys are fetched on demand for anybody who asks. A stranger
+// who knows the room name can sign a perfectly valid roster naming the real
+// owner. If we took it, every member's next chain broadcast would seal them a
+// slot and they would simply be in the room.
+func TestANonMemberCannotAddThemselves(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
+
+	a.applyRoster("room-1", roster("secret room", "alice", "mallory", 5,
+		"alice", "bob", "carol", "mallory"))
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q — a stranger signed their way into the room", got)
+	}
+}
+
+// TestConcurrentAddsBothSurvive.
+//
+// Two members inviting at the same time both stamp the same epoch, neither
+// having seen the other's roster. If a member's roster had to clear the highest
+// epoch from anybody, the second to arrive would lose and one of the two
+// newcomers would be silently missing from everyone's list — which is precisely
+// the three-way bug this whole mechanism exists to prevent, reintroduced by the
+// replay defence.
+func TestConcurrentAddsBothSurvive(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
+
+	// The same epoch from two different members — neither had seen the other's
+	// roster, so neither could have stamped a higher one.
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 3, "alice", "bob", "carol", "dave"))
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 3, "alice", "bob", "carol", "eve"))
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave,eve" {
+		t.Errorf("members = %q, want alice,bob,dave,eve — a concurrent invite was lost", got)
+	}
+}
+
+// TestAMembersRosterCannotRemoveByOmission: a member announcing "I invited Dave"
+// is telling the truth about Dave and nothing at all about anybody else. Taking
+// their list as complete would let any member quietly drop any other.
+func TestAMembersRosterCannotRemoveByOmission(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+	before, _, _ := a.client.EnsureOutboundChain("room-1")
+
+	// Bob adds Eve and omits Dave in the same breath.
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 4, "alice", "bob", "carol", "eve"))
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave,eve" {
+		t.Errorf("members = %q — a member removed somebody by leaving them off", got)
+	}
+	if chainWasReplaced(a, "room-1", before.ID) {
+		t.Error("a non-owner's omission still cycled our chain, which is a free way to churn the room")
+	}
+}
+
+// TestARemovalSurvivesAReplayedAdd: the owner removes Dave, and somebody replays
+// a member's older roster that still names him. Rolling a removal back is the
+// whole reason the epoch exists.
+func TestARemovalSurvivesAReplayedAdd(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
+
+	memberAdd := roster("secret room", "alice", "bob", 4, "alice", "bob", "carol", "dave")
+	a.applyRoster("room-1", memberAdd)
+	if got := sortedMembers(a, "room-1"); got != "alice,bob,dave" {
+		t.Fatalf("precondition: members = %q", got)
+	}
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 5, "alice", "bob", "carol"))
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Fatalf("precondition: the removal did not apply: %q", got)
+	}
+
+	a.applyRoster("room-1", memberAdd) // the capture, replayed
+
+	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
+		t.Errorf("members = %q — replaying an old add undid a removal", got)
+	}
+}
+
+// TestOurOwnRosterOutranksEverythingWeHaveSeen: if we stamped an epoch that was
+// already used, our roster would be discarded as a replay of somebody else's and
+// the removal it carried would never land.
+func TestOurOwnRosterOutranksEverythingWeHaveSeen(t *testing.T) {
+	a := rosterTestApp(t, "me")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "me")
+	a.members.acceptOwnerEpoch("room-1", 40)
+	a.members.noteEpoch("room-1", 12)
+
+	r, err := a.signedRoster("room-1", "secret room")
+	if err != nil {
+		t.Fatalf("signedRoster: %v", err)
+	}
+	if r.Epoch <= 40 {
+		t.Errorf("epoch = %d, want past the highest we've seen (40)", r.Epoch)
+	}
+	// And twice running must not repeat, or the second is read as a replay of
+	// the first.
+	next, _ := a.signedRoster("room-1", "secret room")
+	if next.Epoch <= r.Epoch {
+		t.Errorf("two rosters of ours shared or reversed an epoch: %d then %d", r.Epoch, next.Epoch)
+	}
+}
+
+// TestARemovalSurvivesAConcurrentAdd is the case ordering alone cannot settle.
+//
+// The owner removes Dave at the same moment a member's roster goes out still
+// naming him. Neither has seen the other, so there is no epoch relationship to
+// appeal to — and the member's roster may well arrive last. Removal has to be
+// durable state, not a message that wins a race.
+func TestARemovalSurvivesAConcurrentAdd(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 6, "alice", "bob", "carol"))
+	// Bob's, sent before he heard, arriving after.
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 6, "alice", "bob", "carol", "dave", "eve"))
+
+	if a.isRoomMember("room-1", "dave") {
+		t.Error("a concurrent add resurrected somebody the owner had removed")
+	}
+	if !a.isRoomMember("room-1", "eve") {
+		t.Error("the same roster's legitimate add was lost")
+	}
+}
+
+// TestTheOwnerCanReinviteSomeoneRemoved: a tombstone is durable, not permanent.
+// Only the owner can lift it, which is the same authority that laid it.
+func TestTheOwnerCanReinviteSomeoneRemoved(t *testing.T) {
+	a := rosterTestApp(t, "carol")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.pinOwner("room-1", "alice")
+	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
+
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 7, "alice", "bob", "carol"))
+	// A member cannot undo it...
+	a.applyRoster("room-1", roster("secret room", "alice", "bob", 8, "alice", "bob", "carol", "dave"))
+	if a.isRoomMember("room-1", "dave") {
+		t.Fatal("a member lifted the owner's removal")
+	}
+	// ...but the owner can.
+	a.applyRoster("room-1", roster("secret room", "alice", "alice", 9, "alice", "bob", "carol", "dave"))
+	if !a.isRoomMember("room-1", "dave") {
+		t.Error("the owner could not re-invite somebody they had removed")
+	}
+}
+
+// TestOurOwnRemovalIsNotUndoneByTheNextRoster: we remove Bob, and Alice's next
+// roster — built from a list that still names him, because she has not heard
+// yet — arrives. Without a tombstone on our own removals it would put him back.
+func TestOurOwnRemovalIsNotUndoneByTheNextRoster(t *testing.T) {
+	a := rosterTestApp(t, "me")
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.setAll("room-1", []string{"alice", "bob"}, "me")
+
+	if msg := a.RotateRoomKey("room-1", []string{"bob"}); msg != "" {
+		t.Fatalf("removing bob: %q", msg)
+	}
+	a.applyRoster("room-1", roster("secret room", "me", "alice", 3, "me", "alice", "bob"))
+
+	if a.isRoomMember("room-1", "bob") {
+		t.Error("a member's stale roster undid our own removal")
 	}
 }

@@ -16,14 +16,15 @@ import (
 // exceed a rate limit — no error, no acknowledgement — so the only evidence is a
 // missing ack. This checks both halves of the fix:
 //
-//	1. messages the server accepted are NOT falsely flagged, and
-//	2. any that vanished end up marked NotSent rather than looking delivered.
+//  1. messages the server accepted are NOT falsely flagged, and
 //
-//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
-//	BENCCHAT_LIVE_A=cmaximus  BENCCHAT_LIVE_A_PW=... \
-//	BENCCHAT_LIVE_B=cmaximus2 BENCCHAT_LIVE_B_PW=... \
-//	BENCCHAT_LIVE_BURST=40 \
-//	go test ./internal/client/ -run TestLiveSendBurstMarksNotSent -v -timeout 300s
+//  2. any that vanished end up marked NotSent rather than looking delivered.
+//
+//     BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//     BENCCHAT_LIVE_A=cmaximus  BENCCHAT_LIVE_A_PW=... \
+//     BENCCHAT_LIVE_B=cmaximus2 BENCCHAT_LIVE_B_PW=... \
+//     BENCCHAT_LIVE_BURST=40 \
+//     go test ./internal/client/ -run TestLiveSendBurstMarksNotSent -v -timeout 300s
 func TestLiveSendBurstMarksNotSent(t *testing.T) {
 	addr := os.Getenv("BENCCHAT_LIVE_SERVER")
 	aName, aPw := os.Getenv("BENCCHAT_LIVE_A"), os.Getenv("BENCCHAT_LIVE_A_PW")

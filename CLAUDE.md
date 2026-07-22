@@ -182,9 +182,17 @@ What cross-signing changed, and what it did not:
   safety number — but it is not prevented, and it destroys the previous identity
   irrecoverably.
 
-Still unbuilt: forward secrecy of any kind (1:1 is static-static NaCl box, see
-`internal/e2ee/e2ee.go`; room keys are symmetric and retained forever), and
-everything in [`docs/room-consent-model.md`](docs/room-consent-model.md).
+**Rooms have forward secrecy; 1:1 does not.** Rooms moved to per-sender
+forward-only chains (`internal/e2ee/ratchet.go`), so joining grants a read from
+that point on and nothing earlier, and removal is enforced by every member
+retiring the chain they send on. Membership itself is a signed roster with an
+epoch and a pinned owner (`internal/e2ee/roster.go`); shrinking it requires the
+owner, adding it does not.
+
+Still unbuilt: forward secrecy for 1:1, which remains a static-static NaCl box
+(`internal/e2ee/e2ee.go`), and everything in
+[`docs/room-consent-model.md`](docs/room-consent-model.md) beyond §7's decided
+roles.
 
 Note that `trust-model.md`'s central argument — constraining what a malicious
 operator can do — is weighted for a threat model this deployment may not have,

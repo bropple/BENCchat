@@ -205,12 +205,21 @@ This is the part that is hardest to hold in your head, so it gets the most room.
 |---|---|---|---|
 | Device encryption key | X25519 | one per machine | OS keyring, `e2ee:<account>` |
 | Device signing key | Ed25519 | one per machine | OS keyring, `sign:<account>` (seed only) |
-| Room group key | symmetric | one per room | per-account JSON |
+| Account identity key | Ed25519 | one per account | never at rest locally — unwrapped from a server-side argon2id backup, used, zeroed (`identity.go:113`, `identitybackup.go`) |
+| Room chain (outbound) | HMAC chain | one per device per room | per-account encrypted room file |
+| Room chain views (inbound) | HMAC chain | one per peer device per room | per-account encrypted room file |
+| Room group key | symmetric | legacy, one per room | per-account encrypted room file |
 
-**There is no account-level or identity key.** Every key is per-device. This is
-the single fact from which most of the complexity below follows.
+The account identity key signs the **device manifest**, so a device is trusted
+because the account vouched for it rather than because the server listed it. It
+is the reason safety numbers no longer move when somebody adds a laptop. Every
+other key here is per-device, and private keys never leave the machine.
 
-Private keys never leave the machine. If the keyring read *fails*, encryption is
+The room file is encrypted at rest under a per-account key
+(`secret.go:124-127`) and fails closed: a keyring we cannot reach disables saving
+rather than writing chain state in the clear.
+
+If the keyring read *fails*, encryption is
 disabled for the session and a new key is **not** minted
 (`app_e2ee.go:38-65`) — the comment explains that minting on failure would give
 the device a new identity every time the keyring was slow, change the safety
@@ -464,41 +473,119 @@ echo is the only copy the sender ever sees (`chat.go:192-201`).
 
 ### Room encryption
 
-A **symmetric group key** per room, with a key ID (first 8 bytes of its SHA-256)
-carried in the clear on every message so rotation doesn't strand scrollback
-(`internal/e2ee/room.go:50,71-78`). Retired keys are kept forever and never
-evicted (`room_e2ee.go:63-70`).
+**Per-sender forward-only chains**, Megolm-shaped. Each device that speaks in a
+room mints a chain — a random 8-byte ID and 32 bytes of state — and ratchets it
+one step per message: `state = HMAC(state, 0x02)` for the step, `HMAC(state,
+0x01)` for the message key, domain-separated so neither can spell the other
+(`ratchet.go:93`, `ratchet.go:165`). Stepping forward is one-way, so a recipient
+handed the chain at position N can read from N onward and nothing before it.
+
+A recipient holds a **chain view**: `(ID, state, Index)`. `MessageKey(i)`
+ratchets a *copy* forward to reach position i; `Advance()` is irreversible and is
+what makes an old view stop opening old ciphertext (`ratchet.go:225` for the
+continuity check that stops a forged view replacing a real one).
+
+The envelope is `prefix + chainID + ":" + hex(index) + ":" +
+base64(nonce||secretbox)` (`roomchain.go:66,95`). The chain ID and index are in
+the clear, which is forced: the server strips custom TLVs from chat messages, so
+routing information has to be in-band.
+
+Chains reach the room as **one in-room broadcast** carrying a sealed 80-byte slot
+per recipient device (`chaindist.go:38`, capped at 580 slots), sent lazily before
+the first message on a new chain (`room_e2ee.go:1208`). A newcomer instead gets a
+**bundle** over the 1:1 channel: every chain the inviter can read, each already
+wound forward to where the conversation stands (`room_e2ee.go:1123`) — readable
+from here on, and not one message before.
+
+Positions are **reserved on disk before use** (`room_e2ee.go:1374`), so a crash
+or a clean quit can never resume at an index already spent. Views are wound
+forward before they are persisted (`room_e2ee.go:1469`), so a stolen room file
+does not open the room's whole life.
 
 Two server behaviours force this shape, both verified against open-oscar-server
 and recorded at `room.go:26-35`: custom TLVs are stripped from chat messages, so
-the key ID must be in-band; and the server HTML-tokenizes chat text and
+the chain ID must be in-band; and the server HTML-tokenizes chat text and
 regex-rewrites `^//roll`, hence the ESC prefix and base64-only body.
 
 **Rooms fail closed.** Whether a room is encrypted is tracked separately from
-whether we hold its key, precisely so a lost key refuses to send rather than
-silently reverting to plaintext (`room_e2ee.go:21-25`).
+whether we hold a usable chain, precisely so a lost key refuses to send rather
+than silently reverting to plaintext (`room_e2ee.go:21-25`).
 
-Keys are delivered as invites over the **1:1 E2EE channel** — refused unless we
-can already encrypt to that person (`room_e2ee.go:442-450`). An invite for a room
-you are already in is treated as a key rotation and applied silently
-(`app_room_e2ee.go:227-232`).
+A legacy symmetric room key still exists in the code and still opens old
+scrollback; nothing mints one any more.
 
-Rotation re-invites the **deliberately-invited member list**, not the current
-room roster (`app_room_e2ee.go:27-31`). `ReformRoom` exists because there is no
-kick: it creates a new room with a random suffix, new key, carries the members
-over, and leaves the old one last.
+### Room membership
+
+Membership is a **signed roster**: Ed25519 over a domain-tagged, length-prefixed
+encoding of (room, owner, author, epoch, members) (`internal/e2ee/roster.go:38`).
+It is a complete list at an epoch, never a delta — a delta of "remove X" is
+indistinguishable from a delta somebody dropped.
+
+Four conditions before one is acted on (`app_room_e2ee.go`, `applyRoster`):
+
+1. The signature verifies **and** the author matches the OSCAR sender. The sender
+   name is the server's to choose, so on its own it proves nothing; authority
+   here turns on who signed.
+2. The author is already a member. Reaching us over the 1:1 channel proves
+   nothing about room membership — peer keys are fetched on demand for anybody —
+   so without this a stranger who knows the room name signs a valid roster, names
+   the real owner, adds themselves, and every member's next chain broadcast seals
+   them a slot.
+3. The roster names the owner we pinned.
+4. If the author **is** the owner, the epoch is ahead of the last one they set.
+
+Then authority splits, and the split is the design:
+
+- **The owner's roster replaces the list.** That is the only way a removal can be
+  expressed at all.
+- **Anybody else's may only ADD.** Names it omits carry no weight. A member
+  announcing "I invited Dave" is telling the truth about Dave and nothing about
+  anyone else.
+
+The owner is pinned trust-on-first-use, at creation or from the signed roster
+inside the invite, and cannot change without the pinned owner signing off.
+
+**Removal is a tombstone, not a message ordering.** Members' rosters are
+deliberately not ordered by epoch. Two people adding at the same moment stamp the
+same epoch — neither has seen the other — so any ordering rule discards one of
+them, which is the three-way membership bug reintroduced by the replay defence.
+Instead the owner's removals are recorded as durable state (`roomkeys.Room.Removed`),
+and a member's roster can never re-add a name in that set. Only the owner lifts a
+tombstone, by naming the person present again. Replaying an old member roster is
+then harmless by construction: it can only re-assert claims that member really
+made, and the one thing it must not do is refused by name.
+
+On accepting an owner roster that **shrinks**, every recipient marks its own
+outbound chain stale (`room_e2ee.go:870`). That is what makes removal bite: the
+removed member is left holding chains nobody advances, without the remover having
+to reach everyone. Replacement is lazy — before the next message sent, because a
+chain nobody advances gives the removed member nothing.
+
+`RotateRoomKey` refuses a removal by a non-owner rather than reporting success
+(`app_room_e2ee.go:836`). Rosters travel **1:1 only**, never broadcast: a roster
+names people not in the room — offline members, and the person just removed — so
+broadcasting it in the clear would hand the server a membership list it does not
+otherwise have (`room_e2ee.go:1570`). One arriving in a room is inert.
+
+`ReformRoom` still exists because OSCAR has no kick: it creates a new room with a
+random suffix, carries the members over, and leaves the old one last.
 
 ### What the per-sender signature proves
 
-Each room message carries an Ed25519 signature over `room || 0x00 || message`,
-placed **inside** the sealed body so the server cannot build a per-device
-activity trace (`roomsign.go:29-31,111-135`).
+Each room message carries an Ed25519 signature over a domain-tagged,
+length-prefixed encoding of (room, timestamp, message) — `"BENCO-ROOMSIG-v1"`,
+then each variable field with a 4-byte length (`roomsign.go:136,161-169`). Both
+halves matter: a tag on one side of a pair is not separation, and a delimiter
+only delimits if it cannot occur in what it separates, which nothing enforces for
+a room name. The signature sits **inside** the sealed body, so the server cannot
+build a per-device activity trace.
 
-It proves **which device authored the plaintext**, bound to a room name. It
-proves **nothing about membership**: the group key is symmetric, so any holder
-can seal anything, and there is no signed membership list.
+It proves **which device authored the plaintext**, bound to a room name. What it
+does not prove is authority: signing is per-device, so any member's device can
+sign a message, and membership is asserted separately by the signed roster
+above.
 
-Three outcomes are carefully distinguished (`roomsign.go:170-194`): no known
+Three outcomes are carefully distinguished (`roomsign.go:254-281`): no known
 sender keys → *unknown, not forged*; ID matches and verifies → good; ID matches
 a published key but fails, or matches none → `ErrForgedSignature`, shown with a
 `⚠ [UNVERIFIED …]` prefix.

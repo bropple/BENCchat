@@ -239,15 +239,19 @@ type RoomInvite struct {
 	Chains []ChainView
 	// Key is the legacy shared room key, zero on a v3 invite.
 	Key RoomKey
-	// Members is everyone the sender believes holds this key, INCLUDING the
-	// sender. It travels with the key because that is precisely what it
-	// describes — the set of people this key was given to.
+	// Roster is a signed roster (see roster.go), carried verbatim.
 	//
-	// Without it each client only ever learned who IT had invited, so in a room
-	// of three the member sets never agreed: invited by Alice, Bob and Carol
-	// both knew only Alice, and a rotation by either reached nobody else. Empty
-	// for a v1 invite from an older client.
-	Members []string
+	// This is the newcomer's bootstrap: who is in the room, who owns it, and at
+	// which epoch — all of it signed, so what they pin on arrival is a statement
+	// somebody made rather than an assertion the invite happens to contain. Every
+	// LATER membership change travels as a roster in its own right; the invite is
+	// only the way to learn one before you are in the room to receive them.
+	//
+	// A bare name list used to live here, and the difference is the point: the
+	// old one was unsigned, so a member relaying a rotation could rewrite anyone's
+	// idea of who belonged, and had no epoch, so an old list could be replayed
+	// over a new one.
+	Roster string
 }
 
 // EncodeRoomInvite builds the invite body.
@@ -256,12 +260,8 @@ type RoomInvite struct {
 // parse v2 fails visibly (the invite does not arrive) rather than quietly, so a
 // flag day is the right trade for a deployment this size — see CLAUDE.md.
 func EncodeRoomInvite(inv RoomInvite) string {
-	// Each name is base64'd before joining, so a screen name can never contain
-	// the separator. base64 emits no commas.
-	encoded := make([]string, 0, len(inv.Members))
-	for _, m := range inv.Members {
-		encoded = append(encoded, base64.StdEncoding.EncodeToString([]byte(m)))
-	}
+	// base64 again, over the already-base64 roster body: it carries colons of
+	// its own, and this field is parsed by position.
 	bundle, err := EncodeChainBundle(inv.Chains)
 	if err != nil {
 		bundle = ""
@@ -269,7 +269,7 @@ func EncodeRoomInvite(inv RoomInvite) string {
 	return roomInvitePrefixV3 +
 		base64.StdEncoding.EncodeToString([]byte(inv.Room)) + ":" +
 		bundle + ":" +
-		strings.Join(encoded, ",")
+		base64.StdEncoding.EncodeToString([]byte(inv.Roster))
 }
 
 // IsRoomInvite reports whether a 1:1 message body is a room invite. These are
@@ -280,8 +280,8 @@ func IsRoomInvite(body string) bool {
 		strings.HasPrefix(body, roomInvitePrefixV3)
 }
 
-// DecodeRoomInvite parses either version. v1 yields no Members, which callers
-// must treat as "this client told us nothing about the roster" rather than as
+// DecodeRoomInvite parses either version. v1 yields no roster, which callers
+// must treat as "this client told us nothing about who is here" rather than as
 // "the room is empty".
 func DecodeRoomInvite(body string) (RoomInvite, bool) {
 	var rest string
@@ -308,24 +308,18 @@ func DecodeRoomInvite(body string) (RoomInvite, bool) {
 	}
 	keyPart := rest[i+1:]
 
-	var members []string
+	var roster string
 	if v2 {
 		j := strings.Index(keyPart, ":")
 		if j < 0 {
 			return RoomInvite{}, false
 		}
-		roster := keyPart[j+1:]
-		keyPart = keyPart[:j]
-		for _, enc := range strings.Split(roster, ",") {
-			if enc == "" {
-				continue
-			}
-			raw, derr := base64.StdEncoding.DecodeString(enc)
-			if derr != nil || len(raw) == 0 {
-				return RoomInvite{}, false
-			}
-			members = append(members, string(raw))
+		raw, derr := base64.StdEncoding.DecodeString(keyPart[j+1:])
+		if derr != nil {
+			return RoomInvite{}, false
 		}
+		roster = string(raw)
+		keyPart = keyPart[:j]
 	}
 
 	if v3 {
@@ -335,13 +329,13 @@ func DecodeRoomInvite(body string) (RoomInvite, bool) {
 		if cerr != nil {
 			return RoomInvite{}, false
 		}
-		return RoomInvite{Room: string(nameRaw), Chains: chains, Members: members}, true
+		return RoomInvite{Room: string(nameRaw), Chains: chains, Roster: roster}, true
 	}
 	key, err := DecodeRoomKey(keyPart)
 	if err != nil {
 		return RoomInvite{}, false
 	}
-	return RoomInvite{Room: string(nameRaw), Key: key, Members: members}, true
+	return RoomInvite{Room: string(nameRaw), Key: key, Roster: roster}, true
 }
 
 // --- Room catch-up ----------------------------------------------------------

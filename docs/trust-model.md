@@ -130,9 +130,13 @@ captured now is readable by anyone who later obtains a key. The fix is X3DH plus
 a Double Ratchet, which also brings **prekeys** — the proper mechanism for
 messaging an offline peer, which the key directory currently approximates.
 
-**Groups.** Rooms use a symmetric key with per-sender Ed25519 signatures.
-Membership changes are not handled cryptographically. MLS is the modern answer;
-sender keys are the simpler one.
+**Groups.** *(Superseded — this described the state when the document was
+written.)* Rooms used a symmetric key with per-sender Ed25519 signatures, and
+membership changes were not handled cryptographically. The simpler of the two
+options named here, **sender keys**, is what was built: per-sender forward-only
+chains, plus a signed roster carrying an epoch and a pinned owner. See
+[`how-it-works-today.md`](how-it-works-today.md). MLS remains the modern answer
+and remains unbuilt.
 
 ## What survives
 

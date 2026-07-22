@@ -253,6 +253,13 @@ func (c *Client) handleChatSNAC(cookie string, frame wire.SNACFrame, body []byte
 		if err != nil || text == "" {
 			return
 		}
+		if e2ee.IsRoster(text) {
+			// Rosters travel 1:1 and only 1:1 (see Client.SendRoster). One
+			// appearing in a room is either a stray or somebody trying it on;
+			// either way it is not chat text and must not be rendered as any.
+			c.log.Debug("ignoring a roster that arrived in a room", "from", sender)
+			return
+		}
 		if e2ee.IsChainBroadcast(text) {
 			// Machine-to-machine: this carries key material, not something a
 			// person said, and must never land in the conversation.
