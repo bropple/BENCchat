@@ -211,34 +211,35 @@ func TestAudit_RestoreAtStaleIndexReusesPositions(t *testing.T) {
 // went out; conversely a chain minted by ReformRoom is never marked shared, so
 // the reformed room cannot be sent to until the app restarts.
 func TestAudit_ReformedRoomCannotSend(t *testing.T) {
-	t.Skip("known open: ship-now M1: ReformRoom distributes a chain but never marks it shared")
-
 	a, _ := newTestClient(t)
 	a.store.UpsertRoom("4-0-new", "project-x")
 	signer, _ := e2ee.GenerateSigningKey()
 	a.SetSigningKey(signer, true)
 
-	// Exactly what ReformRoom does: mint + 1:1 invite, no MarkChainShared.
+	// Exactly what ReformRoom does: mark encrypted, mint a chain, hand it out
+	// 1:1 to the carried members — and then say it was handed out. That last
+	// step was missing, so the next send found an unshared chain and told the
+	// user to get re-invited to a room they had just created themselves.
+	a.MarkRoomEncrypted("4-0-new")
 	if _, fresh, err := a.EnsureOutboundChain("4-0-new"); err != nil || !fresh {
 		t.Fatalf("EnsureOutboundChain: fresh=%v err=%v", fresh, err)
 	}
-	// The send path's guard sees a non-fresh chain and does nothing.
+	a.MarkChainShared("4-0-new")
+
+	// The send path's guard sees a non-fresh chain and broadcasts nothing, which
+	// is right — it already went out 1:1.
 	if _, fresh, _ := a.EnsureOutboundChain("4-0-new"); fresh {
 		t.Fatal("second call reported fresh")
 	}
 	_, encrypted, err := a.sealRoomMessage("4-0-new", "hello new room")
-	if err == nil && encrypted {
-		t.Log("send worked")
-	} else {
-		t.Errorf("BUG: reformed room refuses to send: encrypted=%v err=%v", encrypted, err)
+	if err != nil || !encrypted {
+		t.Errorf("reformed room refuses to send: encrypted=%v err=%v", encrypted, err)
 	}
 }
 
 // A6: sending into an ordinary, never-encrypted room silently turns it into an
 // encrypted one and broadcasts key material into it.
 func TestAudit_PlainRoomBecomesEncryptedOnFirstSend(t *testing.T) {
-	t.Skip("known open: ship-now M3: ensureRoomChainDistributed is not gated on the room being encrypted")
-
 	a, _ := newTestClient(t)
 	a.store.UpsertRoom("4-0-lobby", "lobby")
 	signer, _ := e2ee.GenerateSigningKey()
@@ -256,8 +257,6 @@ func TestAudit_PlainRoomBecomesEncryptedOnFirstSend(t *testing.T) {
 // A7: DecodeChainBroadcast returns on the FIRST slot bearing our label, so a
 // decoy slot placed earlier denies us the real one.
 func TestAudit_DecoySlotShadowsTheRealOne(t *testing.T) {
-	t.Skip("known open: ship-now A7: DecodeChainBroadcast returns on the first slot bearing our label instead of continuing")
-
 	ours, _ := e2ee.GenerateKeyPair()
 	sender, _ := e2ee.GenerateKeyPair()
 	chain, _ := e2ee.NewChain()
@@ -279,7 +278,7 @@ func TestAudit_DecoySlotShadowsTheRealOne(t *testing.T) {
 	crafted := e2ee.ChainBroadcastPrefix + base64.StdEncoding.EncodeToString(body)
 
 	if _, err := e2ee.DecodeChainBroadcast(crafted, []e2ee.KeyPair{ours}, [][32]byte{sender.Public}); err != nil {
-		t.Errorf("BUG: a decoy slot shadowed the genuine one: %v", err)
+		t.Errorf("a decoy slot shadowed the genuine one: %v", err)
 	}
 }
 

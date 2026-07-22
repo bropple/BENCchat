@@ -467,7 +467,23 @@ func (c *Client) verifyRoomEnvelope(cookie, sender, envelope string) (verified, 
 	}
 	c.roomCrypto.mu.Unlock()
 
-	msg, err := e2ee.OpenRoomSigned(c.roomName(cookie), envelope, keys, c.PeerSigningKeys(sender))
+	var msg e2ee.SignedMessage
+	var err error
+	if e2ee.IsRoomChainEnvelope(envelope) {
+		// The chain path is the production path now. Routing everything through
+		// OpenRoomSigned meant a v3 envelope returned "not a room envelope", so
+		// re-verification silently never resolved — recreating, on the new path,
+		// exactly the bug it was written to fix.
+		c.roomCrypto.mu.Lock()
+		views := make(map[string]e2ee.ChainView, len(rk.views))
+		for id, v := range rk.views {
+			views[id] = v
+		}
+		c.roomCrypto.mu.Unlock()
+		msg, err = e2ee.OpenRoomChain(c.roomName(cookie), envelope, views, c.PeerSigningKeys(sender))
+	} else {
+		msg, err = e2ee.OpenRoomSigned(c.roomName(cookie), envelope, keys, c.PeerSigningKeys(sender))
+	}
 	switch {
 	case errors.Is(err, e2ee.ErrForgedSignature):
 		return false, true, true
@@ -832,7 +848,6 @@ func (c *Client) EnsureOutboundChain(cookie string) (view e2ee.ChainView, fresh 
 	rk.staleChain = false
 	rk.chainShared = false // nobody has it yet; sealing stays refused until they do
 	rk.reservedThrough = 0 // a new chain has promised nothing yet
-	rk.encrypted = true
 	// We can read our own chain, so scrollback of our own messages works the
 	// same way everyone else's does rather than through a special case.
 	rk.views[chain.ID] = chain.View()
@@ -1189,6 +1204,14 @@ func (c *Client) roomMembers(cookie string) []string {
 // message instead of one per member, and the person a rotation excluded receives
 // it like everybody else and can open nothing.
 func (c *Client) ensureRoomChainDistributed(cookie string) error {
+	// Only for rooms somebody DECIDED were encrypted. Running unconditionally
+	// meant typing into an ordinary public room minted a chain, broadcast a
+	// key-distribution blob into it, and sealed everything after — so a room
+	// became encrypted by being used, non-BENCchat occupants saw base64 noise,
+	// and CreateEncryptedRoom stopped meaning anything.
+	if !c.RoomEncrypted(cookie) {
+		return nil
+	}
 	view, fresh, err := c.EnsureOutboundChain(cookie)
 	if err != nil {
 		return err

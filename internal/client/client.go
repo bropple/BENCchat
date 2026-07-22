@@ -85,6 +85,9 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// peerHistoryFn reports whether a peer has ever been seen to publish keys,
+	// so a server claiming otherwise can be disbelieved. Guarded by e2eeMu.
+	peerHistoryFn func(screenName string) bool
 	// persistChainFn durably writes a room's chain state before positions on it
 	// are used; see reserveChainPositions. Guarded by e2eeMu.
 	persistChainFn func(cookie string) error

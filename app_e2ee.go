@@ -111,6 +111,7 @@ func (a *App) setupE2EE(screenName string) {
 	// still reserves in memory, which is correct within a process and useless
 	// across a restart.
 	a.client.SetPersistChainFunc(a.persistRoomChain)
+	a.client.SetPeerHistoryFunc(a.peerHasPublishedBefore)
 	a.client.SetCatchupHandler(a.handleCatchup)
 	a.client.SetConnectionRequestHandler(a.handleConnectionRequest)
 	a.client.SetConnectionResponseHandler(a.handleConnectionResponse)
@@ -387,4 +388,19 @@ func (a *App) cloneTrustLocked() trust.Store {
 		out[k] = v
 	}
 	return out
+}
+
+// peerHasPublishedBefore reports whether we hold a persisted record of this peer
+// ever publishing device keys.
+//
+// Used to disbelieve a server that answers "this account has published nothing"
+// about somebody we have already exchanged keys with. The record is the trust
+// store's Seen field, which survives restarts — which is the point, since the
+// in-memory key cache is empty exactly when the lie would be most useful.
+func (a *App) peerHasPublishedBefore(screenName string) bool {
+	key := state.NormalizeScreenName(screenName)
+	a.trustMu.Lock()
+	defer a.trustMu.Unlock()
+	entry, ok := a.trust[key]
+	return ok && entry.Seen != ""
 }

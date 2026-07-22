@@ -1102,6 +1102,9 @@ func TestSealRefusesUntilTheChainIsShared(t *testing.T) {
 	signer, _ := e2ee.GenerateSigningKey()
 	c.SetSigningKey(signer, true)
 	c.store.UpsertRoom("4-0-r", "project")
+	// Explicit now: minting a chain no longer makes a room encrypted, so an
+	// ordinary room cannot become one just by being sent to.
+	c.MarkRoomEncrypted("4-0-r")
 
 	if _, _, err := c.EnsureOutboundChain("4-0-r"); err != nil {
 		t.Fatalf("EnsureOutboundChain: %v", err)

@@ -338,11 +338,11 @@ func (a *App) CreateEncryptedRoom(name string) string {
 	if !ok {
 		return "Joined the room but couldn't identify it — try again."
 	}
-	key, err := e2ee.GenerateRoomKey()
-	if err != nil {
-		return err.Error()
-	}
-	a.client.SetRoomKey(cookie, key)
+	// Marked encrypted and nothing more. The chain is minted and broadcast on
+	// the first send, by the same path every other room uses — a shared key
+	// here would be a second key model to keep alive for one code path.
+	a.client.MarkRoomEncrypted(cookie)
+	a.noteRoomJoined(cookie)
 	a.saveRoomKeys(cookie)
 	a.store.Notify(state.NoticeInfo,
 		"Encrypted room created. Nobody else can read it until you invite them.")
@@ -745,6 +745,14 @@ func (a *App) ReformRoom(cookie string, drop []string) string {
 	for _, sn := range carry {
 		a.members.add(newCookie, sn)
 	}
+	// It has genuinely been distributed below, 1:1, because the carried members
+	// are not in the new room yet and a broadcast would not reach them. Saying
+	// so is what lets the room be sent to: without it the next send found an
+	// unshared chain, declined, and told the user to get re-invited to a room
+	// they had just created.
+	a.client.MarkChainShared(newCookie)
+	a.noteRoomJoined(newCookie)
+
 	roster := a.roomRoster(newCookie)
 	for _, sn := range carry {
 		// The full bundle 1:1, because they are not in the new room yet and an

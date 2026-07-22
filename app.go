@@ -196,6 +196,17 @@ func (a *App) startup(ctx context.Context) {
 			a.histTimer = nil
 		}
 		a.histMu.Unlock()
+
+		// Same reasoning, same block, and it was missed the first time: the room
+		// file key belongs to the session it was loaded for. Kept across a
+		// sign-off, the next account opens ITS room file with the previous
+		// account's key, the load fails, and restore aborts for every room —
+		// leaving that account unable to read or send in any of them until the
+		// process restarts.
+		a.roomsKeyMu.Lock()
+		a.roomsKeyCache = nil
+		a.roomsKeyMu.Unlock()
+
 		a.emitStatus(disconnectStatus(err))
 	}
 

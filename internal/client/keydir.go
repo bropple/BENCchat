@@ -330,6 +330,22 @@ func (c *Client) RefreshPeerKeys(screenName string) peerKeyLookup {
 		return peerKeysUnavailable
 	case !sm.Present:
 		c.RequestUserInfo(screenName)
+		// "This account has published nothing" is an unauthenticated byte, and
+		// treating it as fact is the other half of the downgrade this function
+		// exists to stop. Refusing to answer is now caught; answering FALSELY
+		// was not — a server that says "no keys" for somebody we have already
+		// held keys for still got a plaintext send.
+		//
+		// We cannot verify the claim, but we can notice it contradicts what we
+		// have seen. A peer we have never heard of may genuinely have published
+		// nothing; a peer we hold a record for has not un-published between two
+		// sign-ons, and if they somehow have, refusing to send is the safe way
+		// to be wrong.
+		if c.peerKnownToHavePublished(screenName) {
+			c.log.Warn("refusing to treat a peer we have keys for as having none",
+				"screen_name", screenName)
+			return peerKeysUnavailable
+		}
 		return peerKeysAbsent
 	}
 
@@ -529,4 +545,29 @@ func (c *Client) answerAttestChallenge(body []byte) {
 	if err := sess.AttestDevice(signer.Public, sig); err != nil {
 		c.log.Warn("could not answer the device challenge", "err", err)
 	}
+}
+
+// peerKnownToHavePublished reports whether we have ever held device keys for a
+// peer, from this session's cache or from the persisted trust record.
+//
+// The trust store is the durable half and the one that matters: the cache is
+// empty on the first send after a restart, which is precisely when a hostile
+// "they have no keys" would be believed.
+func (c *Client) peerKnownToHavePublished(screenName string) bool {
+	if _, ok := c.PeerKeys(screenName); ok {
+		return true
+	}
+	c.e2eeMu.Lock()
+	fn := c.peerHistoryFn
+	c.e2eeMu.Unlock()
+	return fn != nil && fn(screenName)
+}
+
+// SetPeerHistoryFunc installs the lookup that says whether a peer has ever been
+// seen to publish keys. The record lives in the app layer's trust store; this
+// layer only needs the answer.
+func (c *Client) SetPeerHistoryFunc(fn func(screenName string) bool) {
+	c.e2eeMu.Lock()
+	c.peerHistoryFn = fn
+	c.e2eeMu.Unlock()
 }

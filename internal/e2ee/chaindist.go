@@ -147,6 +147,7 @@ func DecodeChainBroadcast(body string, ourKeys []KeyPair, senderPubs [][32]byte)
 
 	// Index our own labels once, then walk the slots. The other way round is
 	// devices x slots box operations for no reason.
+	failed := false
 	mine := make(map[string]KeyPair, len(ourKeys))
 	for _, kp := range ourKeys {
 		mine[ChainSlotLabel(kp.Public)] = kp
@@ -172,10 +173,13 @@ func DecodeChainBroadcast(body string, ourKeys []KeyPair, senderPubs [][32]byte)
 			copy(out.state[:], state)
 			return out, nil
 		}
-		// A slot addressed to us that will not open is worth reporting rather
-		// than skipping: it means the sender used a key we no longer hold, or
-		// somebody built the message wrong.
-		return out, errors.New("e2ee: our chain slot failed to open")
+		// Keep looking. Labels are 64-bit truncations, so a slot can bear our
+		// label without being ours — and returning here let one such slot,
+		// placed earlier in the message, deny us the genuine one behind it.
+		failed = true
+	}
+	if failed {
+		return out, errors.New("e2ee: a chain slot addressed to us failed to open")
 	}
 	return out, ErrNoSlotForUs
 }
@@ -206,6 +210,13 @@ func MaxChainSlotsPerBroadcast() int { return maxChainSlots }
 // where the conversation has got to, and quietly advancing here would hide the
 // single most important decision in the whole exchange.
 func EncodeChainBundle(views []ChainView) (string, error) {
+	// Mirror the decoder's cap. Without it an oversized bundle encodes happily
+	// and is then rejected WHOLESALE at the far end, so a newcomer gets nothing
+	// rather than most of what they needed — and above 65535 the count silently
+	// truncates.
+	if len(views) > maxChainSlots {
+		return "", fmt.Errorf("e2ee: %d chains exceeds %d per bundle", len(views), maxChainSlots)
+	}
 	buf := make([]byte, 0, 2+len(views)*(chainIDLen+4+32))
 	var count [2]byte
 	binary.BigEndian.PutUint16(count[:], uint16(len(views)))
