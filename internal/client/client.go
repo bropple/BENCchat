@@ -85,6 +85,9 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// ownDeviceKeys is this ACCOUNT's published device set, ours included.
+	// Guarded by e2eeMu. Not in e2eeKeys — see SetOwnDeviceKeys.
+	ownDeviceKeys [][32]byte
 	// onRoster is notified when a verified roster arrives. Guarded by e2eeMu.
 	onRoster rosterHandler
 	// peerHistoryFn reports whether a peer has ever been seen to publish keys,
@@ -331,6 +334,7 @@ func (c *Client) SendMessage(to, text string) error {
 		ID:        strconv.FormatUint(cookie, 16),
 	})
 	c.trackSend(to, cookie, reqID)
+	c.syncSentMessage(to, text)
 	return nil
 }
 
@@ -1149,6 +1153,11 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 		// A membership statement, not something a person said.
 		if encrypted && e2ee.IsRoster(text) {
 			c.handleRoster(msg.From, text)
+			return
+		}
+		// A copy of something WE sent, from one of our own devices.
+		if encrypted && e2ee.IsSentCopy(text) {
+			c.applySentCopy(msg.From, text)
 			return
 		}
 		// Catch-up traffic is likewise machine-to-machine.

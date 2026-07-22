@@ -555,3 +555,164 @@ func TestDuplicateMessageIsDropped(t *testing.T) {
 		t.Errorf("an identical-text message was mistaken for a replay: %q", text)
 	}
 }
+
+// --- Sent-message sync ------------------------------------------------------
+//
+// K7: your own other devices never saw what you sent, so a conversation opened
+// on the laptop showed their half and none of yours.
+
+// syncTestClient is a client with an account name, a signing key and a device
+// keypair — the three things a sync copy needs to be produced or applied.
+func syncTestClient(t *testing.T, self string) (*Client, e2ee.SigningKeyPair) {
+	t.Helper()
+	c, store := newTestClient(t)
+	store.SetSelf(self)
+	c.selfNormalized = state.NormalizeScreenName(self)
+
+	signer, err := e2ee.GenerateSigningKey()
+	if err != nil {
+		t.Fatalf("GenerateSigningKey: %v", err)
+	}
+	c.SetSigningKey(signer, true)
+
+	kp, err := e2ee.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateKeyPair: %v", err)
+	}
+	c.SetE2EEKeyPair(kp, true)
+	return c, signer
+}
+
+// syncMessages is the thread with a peer, or nothing.
+func syncMessages(c *Client, peer string) []state.Message {
+	conv, ok := c.store.Conversation(peer)
+	if !ok {
+		return nil
+	}
+	return conv.Messages
+}
+
+func syncBody(t *testing.T, sc e2ee.SentCopy) string {
+	t.Helper()
+	body, err := e2ee.EncodeSentCopy(sc)
+	if err != nil {
+		t.Fatalf("EncodeSentCopy: %v", err)
+	}
+	return body
+}
+
+// TestASyncCopyLandsInTheRightConversation: the copy is addressed to US, so the
+// naive reading files it under our own name. It belongs in the thread with the
+// person it was originally sent to.
+func TestASyncCopyLandsInTheRightConversation(t *testing.T) {
+	c, _ := syncTestClient(t, "Me")
+
+	c.applySentCopy("me", syncBody(t, e2ee.SentCopy{
+		Origin: "another-device", Peer: "bob", Text: "sent from my phone",
+		SentAt: time.Now().Unix(),
+	}))
+
+	msgs := syncMessages(c, "bob")
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message in the conversation with bob, got %d", len(msgs))
+	}
+	if msgs[0].Text != "sent from my phone" || !msgs[0].Outgoing {
+		t.Errorf("the copy was not recorded as something we sent: %+v", msgs[0])
+	}
+	if len(syncMessages(c, "me")) != 0 {
+		t.Error("the copy was filed in a conversation with ourselves")
+	}
+}
+
+// TestOurOwnCopyComingBackIsIgnored: whether the server relays a self-addressed
+// message to the instance that sent it is not worth depending on either way, so
+// the sending device is named in the copy. Applying our own would show the user
+// everything they said twice.
+func TestOurOwnCopyComingBackIsIgnored(t *testing.T) {
+	c, signer := syncTestClient(t, "me")
+
+	c.applySentCopy("me", syncBody(t, e2ee.SentCopy{
+		Origin: e2ee.SignerID(signer.Public), Peer: "bob", Text: "hello",
+		SentAt: time.Now().Unix(),
+	}))
+
+	if n := len(syncMessages(c, "bob")); n != 0 {
+		t.Errorf("our own copy was applied back to us: %d message(s)", n)
+	}
+}
+
+// TestADuplicateSyncCopyPostsOnce: a redelivery, or two connections briefly
+// overlapping, must not double up the conversation.
+func TestADuplicateSyncCopyPostsOnce(t *testing.T) {
+	c, _ := syncTestClient(t, "me")
+	body := syncBody(t, e2ee.SentCopy{
+		Origin: "another-device", Peer: "bob", Text: "hello", SentAt: 1_700_000_000,
+	})
+
+	c.applySentCopy("me", body)
+	c.applySentCopy("me", body)
+
+	if n := len(syncMessages(c, "bob")); n != 1 {
+		t.Errorf("want 1 message after a duplicate delivery, got %d", n)
+	}
+}
+
+// TestASyncCopyMustComeFromUs is the one that matters.
+//
+// The envelope is sealed to our own device keys and authenticated against the
+// sender's, so only somebody holding one of THIS ACCOUNT's device private keys
+// could have produced a valid one. But the handler must still check: a copy
+// arriving from anyone else is not a sync, it is somebody writing into our
+// conversations — inventing messages we appear to have sent, to anyone they
+// name.
+func TestASyncCopyMustComeFromUs(t *testing.T) {
+	c, _ := syncTestClient(t, "me")
+
+	c.applySentCopy("mallory", syncBody(t, e2ee.SentCopy{
+		Origin: "mallorys-device", Peer: "bob", Text: "I never said this",
+		SentAt: time.Now().Unix(),
+	}))
+
+	if n := len(syncMessages(c, "bob")); n != 0 {
+		t.Errorf("a stranger wrote %d message(s) into our conversation history", n)
+	}
+}
+
+// TestASyncCopyWithABadClockIsKeptNotDropped: the stamp is another of our own
+// devices' clocks, which can be wrong without anything being wrong. Losing real
+// messages to a timezone bug would be the worse failure.
+func TestASyncCopyWithABadClockIsKeptNotDropped(t *testing.T) {
+	c, _ := syncTestClient(t, "me")
+
+	c.applySentCopy("me", syncBody(t, e2ee.SentCopy{
+		Origin: "another-device", Peer: "bob", Text: "from the future",
+		SentAt: time.Now().Add(48 * time.Hour).Unix(),
+	}))
+
+	msgs := syncMessages(c, "bob")
+	if len(msgs) != 1 {
+		t.Fatalf("a copy with a skewed clock was dropped: %d message(s)", len(msgs))
+	}
+	if msgs[0].At.After(time.Now().Add(time.Minute)) {
+		t.Errorf("an implausible timestamp was kept as-is: %v", msgs[0].At)
+	}
+}
+
+// TestSyncIsSkippedWithNobodyToTellIt: every sync costs a second outbound
+// message against the same rate limiter as the first. A single-device account —
+// which is most of them — must not pay double for a copy nothing will read.
+func TestSyncIsSkippedWithNobodyToTellIt(t *testing.T) {
+	c, _ := syncTestClient(t, "me")
+
+	// No session at all, so a send attempt would be visible as a nil-pointer
+	// panic rather than silently doing nothing. The point is that we return
+	// before getting there.
+	c.syncSentMessage("bob", "hello") // no device keys for us at all
+	c.learnPeerKeys("me", [][32]byte{{1}})
+	c.syncSentMessage("bob", "hello") // exactly one device: still nobody to tell
+
+	// And a message to ourselves is never mirrored: it already reached every
+	// device, and a sync of a sync is a loop with a network hop in it.
+	c.learnPeerKeys("me", [][32]byte{{1}, {2}})
+	c.syncSentMessage("me", "note to self")
+}

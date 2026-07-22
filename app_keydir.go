@@ -289,6 +289,12 @@ func (a *App) onSelfManifest(identity ed25519.PublicKey, m wire.BENCOManifest, d
 	wasLinked := a.linked
 	a.trustMu.Unlock()
 
+	// The client needs these to mirror sent messages to our other devices, and
+	// it cannot get them from the peer cache — our own screen name is
+	// deliberately not filed there, so reading them from it would be a silent
+	// no-op with nothing to say it had happened.
+	a.client.SetOwnDeviceKeys(e2ee.BoxKeysOf(devices))
+
 	if pinned.Key != "" && pinned.Key != encoded {
 		// Proposal §6, row two.
 		a.setLinked(false)
@@ -436,8 +442,12 @@ func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error 
 				devices: devices,
 			}
 			a.e2eeDevices = e2ee.BoxKeysOf(devices)
+			own := a.e2eeDevices
 			a.manifestIssuedAt = issuedAt
 			a.trustMu.Unlock()
+			// Outside trustMu: this takes the client's lock, and holding one
+			// across the other is how a deadlock gets built by accident.
+			a.client.SetOwnDeviceKeys(own)
 			a.setLinked(true)
 			return nil
 		}

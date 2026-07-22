@@ -39,7 +39,10 @@ func signedFor(t *testing.T, kp e2ee.IdentityKey, screenName string, counter uin
 func appForVerify(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	a := &App{store: state.NewStore()}
+	store := state.NewStore()
+	// A real client, because the self-manifest path hands it the account's
+	// device set — the keys sent-message sync mirrors to.
+	a := &App{store: store, client: client.New(store, nil)}
 	a.histAccount = "us" // what currentAccount() names the trust file after
 	return a
 }
@@ -288,7 +291,8 @@ func TestCounterHighWaterMarkIsPersisted(t *testing.T) {
 // a restart: the in-memory manifest memo is gone, the high-water mark is not.
 func restartOver(t *testing.T, a *App) *App {
 	t.Helper()
-	b := &App{store: state.NewStore()}
+	store := state.NewStore()
+	b := &App{store: store, client: client.New(store, nil)}
 	b.histAccount = a.histAccount
 	tr, err := trust.Load(b.currentAccount())
 	if err != nil {

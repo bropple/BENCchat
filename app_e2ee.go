@@ -104,6 +104,11 @@ func (a *App) setupE2EE(screenName string) {
 	// learned — silently, since nothing errors. It goes in before anything can
 	// query the directory.
 	a.installManifestVerifier()
+	// Cleared with the rest of the per-account state above, but from outside
+	// trustMu: this reaches into the client's own lock, and holding one lock
+	// across a call that takes another is how orderings get established by
+	// accident.
+	a.client.SetOwnDeviceKeys(nil)
 	a.client.SetPeerKeyHandler(a.notePeerKey)
 	a.client.SetRoomInviteHandler(a.handleRoomInvite)
 	a.client.SetRoomMembersFunc(a.members.list)
