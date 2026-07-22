@@ -12,6 +12,9 @@ out, and why enforcement has to live in the things holding keys rather than in a
 server policy check. That reasoning is still correct and still worth reading
 before designing anything here.
 
+The one question it left open — how the server could ever know WHICH DEVICE is
+asking — is answered at the end of this document, decided 2026-07-21.
+
 What is now **wrong** is "The problem" immediately below. The password is no
 longer the sole root of trust: a password-holder cannot sign a manifest under
 the existing identity, cannot insert a device unnoticed, and cannot read
@@ -228,3 +231,77 @@ Only then, if wanted: the Double Ratchet, then MLS.
   flag day is probably right — but it means every client updates together.
 - **Do we want signed device lists** (monotonic counter) to detect a server
   serving a stale set? Cheap to add later; awkward to retrofit.
+
+
+---
+
+## Device authentication: the decision, and how it lands
+
+**Decided 2026-07-21.** This section answers the question the document opens
+with — *the server cannot tell which device is asking* — and records the shape
+that was chosen, because the rollout has a foot-gun in it that is worth writing
+down before somebody meets it.
+
+### The rule
+
+**An account with no devices may sign in with a password alone. An account with
+devices must prove it holds one of them.**
+
+That single rule covers bootstrap and enforcement together. A brand-new account —
+one an administrator has just provisioned — has published no manifest, so the
+password is all there is and the first device can get in to publish itself. From
+the moment a manifest exists, a session must demonstrate possession of a device
+signing key that appears in it.
+
+It also supplies its own recovery path, which is the part worth noticing. Somebody
+who loses every device cannot get in, by design; the fix is for an administrator
+to clear the account's device list, which returns it to the zero-device state and
+therefore to password auth. That is the same operation as provisioning, not a
+special-cased backdoor bolted on afterwards.
+
+### What it fixes, and what it does not
+
+**Fixes:** a removed device that ignores the removal signal. It is no longer in
+the manifest, so it cannot answer a challenge, so it does not get a session. Until
+now every check in `benco_keydir.go` was advisory precisely because this was not
+true.
+
+**Does not fix:** somebody with the password publishing a NEW identity and their
+own device, then authenticating as that. `PublishManifest` accepts an unfamiliar
+identity and restarts the counter, so a password-holder can still take the account
+over. Device auth makes that the *only* route rather than one of two, and it stays
+loud — a new identity moves every peer's safety number — but it is not closed.
+See K3 in the findings for the archive that makes it recoverable.
+
+### Where the check goes
+
+**Not in the login exchange.** FLAP sign-on is a single request and response, and
+a challenge needs a nonce the server chose, so folding it in would mean
+restructuring the one path whose failure locks everybody out — including whoever
+would fix it.
+
+Instead the server challenges **just after sign-on**, over the BENCO foodgroup,
+and closes the connection if the answer does not arrive or does not verify. The
+session, not the login, is what gets authenticated. Same effect, and password auth
+is left exactly as it is.
+
+The server needs no new storage for this: it already decodes and validates the
+device list at publish time (`foodgroup/benco_keydir.go`), and the manifest blob
+is kept, so the signing keys can be read back out of it at challenge time. A
+denormalised index would be a second copy to keep honest for no gain.
+
+### The rollout, which is the dangerous part
+
+This is an authentication change. Enforced from the first deploy, a bug in it
+locks out every account that has a device — which is all of them — and the
+management API on its unix socket becomes the only way back in.
+
+So it ships with three modes: **off**, **log** (verify, record the outcome, allow
+either way) and **enforce**. First deploy runs in `log` long enough to see real
+sessions passing, then flips. "If you do not support the protocol you do not get
+to talk" is the right design; it is not a reason to find out in production
+whether the implementation agrees.
+
+Client and server must also land together, since a client that cannot answer is
+indistinguishable from one that should not be allowed to. `log` mode covers that
+window too.
