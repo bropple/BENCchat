@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -113,11 +114,38 @@ func SignerID(pub ed25519.PublicKey) string {
 	return hex.EncodeToString(sum[:signerIDLen])
 }
 
-// signingContext is what a v1 payload signed: the room name and the message,
-// separated by a byte that cannot occur in either, so a room named "a" with
-// message "b:c" cannot collide with room "a:b" and message "c".
+// roomSigDomain separates a room-message signature from everything else the
+// device signing key signs.
 //
-// Kept because v1 messages still have to verify.
+// The first attempt at this tagged only the attestation side, which does not
+// work and is worth recording. A tag on ONE side of a pair is not domain
+// separation when the other side begins with a variable-length,
+// attacker-chosen field: the untagged room context was `room || 0x00 ||
+// message`, so a room literally NAMED "BENCO-ATTEST-v1" carrying
+// `screenName || 0x00 || nonce` as its text produced bytes identical to an
+// attestation. The collision was not removed, only moved to a different room
+// name.
+//
+// Two things fix it together, and both are needed. Every context carries its own
+// tag, so no context can be spelled by choosing another one's leading field. And
+// the variable-length fields are LENGTH-PREFIXED rather than delimited, so
+// `room="a\x00b", message="c"` can no longer produce the same bytes as
+// `room="a", message="b\x00c"` — a separator only separates if it cannot occur
+// in what it separates, and nothing ever enforced that for a room name typed by
+// a person.
+const roomSigDomain = "BENCO-ROOMSIG-v1"
+
+// appendLenPrefixed writes a 32-bit length followed by the bytes.
+func appendLenPrefixed(dst []byte, s string) []byte {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(s)))
+	dst = append(dst, n[:]...)
+	return append(dst, s...)
+}
+
+// signingContext is what a v1 payload signed. Kept ONLY so the shape is on
+// record; nothing produces it and nothing verifies against it any more — see
+// parseSignedPayload.
 func signingContext(room, message string) []byte {
 	out := make([]byte, 0, len(room)+len(message)+1)
 	out = append(out, room...)
@@ -131,11 +159,12 @@ func signingContext(room, message string) []byte {
 // downstream can rewrite, and the attack it defends against is precisely a
 // downstream party choosing when a message appears to have been sent.
 func signingContextV2(room string, stamp []byte, message string) []byte {
-	out := make([]byte, 0, len(room)+1+len(stamp)+len(message))
-	out = append(out, room...)
+	out := make([]byte, 0, len(roomSigDomain)+1+4+len(room)+len(stamp)+4+len(message))
+	out = append(out, roomSigDomain...)
 	out = append(out, 0x00)
-	out = append(out, stamp...)
-	out = append(out, message...)
+	out = appendLenPrefixed(out, room)
+	out = append(out, stamp...) // fixed width, no prefix needed
+	out = appendLenPrefixed(out, message)
 	return out
 }
 
@@ -193,8 +222,12 @@ func parseSignedPayload(raw []byte) (message string, signerID string, sig []byte
 	}
 	switch raw[0] {
 	case signedPayloadV1:
-		id := hex.EncodeToString(raw[1 : 1+signerIDLen])
-		return string(raw[header:]), id, raw[1+signerIDLen : header], nil, true
+		// Deliberately NOT verified any more. Nothing has produced a v1 payload
+		// since the stamp landed, and its context carried no domain tag and no
+		// length prefixes — which made it the acceptance path by which a
+		// signature obtained elsewhere could be rebuilt into a room message.
+		// Treated as unsigned: readable, attributed to nobody.
+		return string(raw[header:]), "", nil, nil, false
 	case signedPayloadV2:
 		if len(raw) < header+stampLen {
 			return string(raw), "", nil, nil, false
@@ -222,10 +255,11 @@ func VerifySigned(room, message, signerID string, sig, stamp []byte, senderKeys 
 	if len(senderKeys) == 0 {
 		return false, nil // unknown signer; caller re-checks once keys arrive
 	}
-	ctx := signingContext(room, message)
-	if stamp != nil {
-		ctx = signingContextV2(room, stamp, message)
+	if stamp == nil {
+		// No stamp means no v2 context, and v1 is no longer accepted.
+		return false, ErrForgedSignature
 	}
+	ctx := signingContextV2(room, stamp, message)
 	var sawSigner bool
 	for _, k := range senderKeys {
 		if SignerID(k) != signerID {
@@ -256,12 +290,11 @@ func VerifySigned(room, message, signerID string, sig, stamp []byte, senderKeys 
 // an attestation can never be mistaken for a signature over anything else this
 // key signs. Room messages use their own context for the same reason.
 func attestContext(screenName string, nonce []byte) []byte {
-	out := make([]byte, 0, len(attestDomain)+1+len(screenName)+1+len(nonce))
+	out := make([]byte, 0, len(attestDomain)+1+4+len(screenName)+4+len(nonce))
 	out = append(out, attestDomain...)
 	out = append(out, 0x00)
-	out = append(out, screenName...)
-	out = append(out, 0x00)
-	out = append(out, nonce...)
+	out = appendLenPrefixed(out, screenName)
+	out = appendLenPrefixed(out, string(nonce))
 	return out
 }
 
@@ -274,6 +307,12 @@ func attestContext(screenName string, nonce []byte) []byte {
 // exactly what domain separation is for — a test fails if they ever line up
 // again.
 const attestDomain = "BENCO-ATTEST-v1"
+
+// AttestNonceLen is the challenge size a server may set. Pinned client-side too:
+// the nonce is one of the two fields the server chooses in what this device
+// signs, and letting it choose the LENGTH as well turns attestation into an
+// oracle over bytes of the server's choosing.
+const AttestNonceLen = 32
 
 // SignAttestation answers a server device challenge.
 func SignAttestation(screenName string, nonce []byte, priv ed25519.PrivateKey) []byte {

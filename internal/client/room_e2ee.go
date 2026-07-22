@@ -307,6 +307,19 @@ func (c *Client) sealRoomMessage(cookie, text string) (string, bool, error) {
 			var chainErr error
 			if usable {
 				chainEnv, chainErr = e2ee.SealRoomChain(roomName, text, rk.out, signer)
+				if chainErr == nil {
+					// Our own chain gets a position like anybody else's. Without
+					// this, `seen` was never written for chains we own, so a
+					// RETIRED one had no position to wind to and went into invite
+					// bundles at index zero. Under the lock that already guards
+					// the advance, so it cannot disagree with the chain.
+					if rk.seen == nil {
+						rk.seen = map[string]uint32{}
+					}
+					if used := rk.out.Index - 1; used >= rk.seen[rk.out.ID] {
+						rk.seen[rk.out.ID] = used
+					}
+				}
 			}
 			c.roomCrypto.mu.Unlock()
 			if usable {
@@ -824,16 +837,33 @@ func (c *Client) MarkChainStale(cookie string) {
 
 // LearnChainView installs a sender's chain so their messages can be read.
 //
-// A view for a chain we already hold is kept only when it reaches FURTHER BACK
-// than what we have. Chains only ever move forward, so a view at a lower index
-// grants strictly more; taking the higher one would silently lose history we
-// were entitled to.
+// A view for a chain we already hold is replaced only when the offer reaches
+// further back AND is provably the same chain — see e2ee.ChainView.Continues.
+//
+// "Lower index wins" alone was a hole, and a bad one. Chain IDs ride in the
+// clear on every message and nothing binds one to an account, so any participant
+// could broadcast their own random state under somebody else's chain ID at index
+// zero and permanently replace our view of that person: their real messages then
+// failed to decrypt forever, and it persisted. Continuity is what tells the two
+// apart, and it needs no trust in the sender — only the chain's real owner can
+// produce a state that hashes forward to the one we already hold.
 func (c *Client) LearnChainView(cookie string, view e2ee.ChainView) {
 	rk := c.roomCrypto.ensure(cookie)
 	c.roomCrypto.mu.Lock()
 	defer c.roomCrypto.mu.Unlock()
 	rk.encrypted = true
-	if have, ok := rk.views[view.ID]; ok && have.Index <= view.Index {
+
+	have, held := rk.views[view.ID]
+	switch {
+	case !held:
+		// Nothing to be continuous with. First sighting is trust-on-first-use,
+		// which is the same position every other key in this client starts from.
+	case have.Index <= view.Index:
+		return // no more read-back than we already have
+	case !view.Continues(have):
+		c.log.Warn("refusing a chain view that is not continuous with the one we hold",
+			"room", c.roomName(cookie), "chain", view.ID,
+			"offered_index", view.Index, "held_index", have.Index)
 		return
 	}
 	rk.views[view.ID] = view
@@ -884,13 +914,6 @@ func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKey
 	}
 	c.roomCrypto.mu.Unlock()
 
-	if chainID, index, ok := e2ee.RoomEnvelopeChain(text); ok {
-		// Note where the conversation has got to even for a message we cannot
-		// open: a bundle for a newcomer should start at the latest position we
-		// have SEEN, not the latest one we could read.
-		c.noteChainPosition(cookie, chainID, index)
-	}
-
 	msg, err := e2ee.OpenRoomChain(c.roomName(cookie), text, views, c.PeerSigningKeys(sender))
 	switch {
 	case errors.Is(err, e2ee.ErrChainRewind):
@@ -920,6 +943,18 @@ func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKey
 		c.log.Warn("dropping a duplicate room message", "room", c.roomName(cookie), "from", sender)
 		return roomDecode{Duplicate: true}
 	}
+	// Only NOW, after the message authenticated under this chain. Recording it
+	// on arrival — before decryption, for any chain ID, from any sender — meant
+	// an unauthenticated wire value drove where an invite bundle starts and how
+	// far retention winds a view. One undecryptable message from a walk-in was
+	// enough to set a position of 0xFFFFFFFF, which wrapped the bundle's +1 back
+	// to zero and handed the next newcomer the room's whole history; a smaller
+	// value permanently blinded a member instead. A position that cannot be
+	// reached without the chain key cannot do either.
+	if chainID, index, ok := e2ee.RoomEnvelopeChain(text); ok {
+		c.noteChainPosition(cookie, chainID, index)
+	}
+
 	if msg.Signed && !msg.Verified {
 		go c.RefreshPeerKeys(sender)
 	}
@@ -1031,16 +1066,40 @@ func (c *Client) ChainBundleFor(cookie string) []e2ee.ChainView {
 
 	out := make([]e2ee.ChainView, 0, len(rk.views))
 	for id, v := range rk.views {
-		if rk.out != nil && id == rk.out.ID {
-			// Our own chain: its view is already the position we are about to
-			// send from, which is exactly "now" with nothing to infer.
-			out = append(out, rk.out.View())
+		// Every chain goes through the SAME winding, including our own. The
+		// special case that used to sit here — "our own chain is already at now"
+		// — was true only of the CURRENT one. A chain we retired stayed in the
+		// map, stopped matching rk.out.ID, and fell through to a `seen` entry
+		// that was never written for our own chains, so it was bundled at index
+		// zero and handed every newcomer our whole pre-rotation history. Deleting
+		// the special case is the fix; sealRoomMessage now records our position
+		// like anybody else's.
+		n, known := rk.seen[id]
+		if !known {
+			// We do not know where this chain has got to, so we cannot wind it
+			// to "now". Dropping it costs the newcomer readability until its
+			// owner next broadcasts; shipping it unwound would cost them nothing
+			// and cost us the entire history.
 			continue
 		}
-		if n, ok := rk.seen[id]; ok && n+1 > v.Index {
-			v = v.Advance(n + 1)
+		// uint64 so a poisoned position cannot wrap the +1 back to zero and
+		// present an unwound view as a wound one.
+		target := uint64(n) + 1
+		if target > uint64(^uint32(0)) {
+			continue
 		}
-		out = append(out, v)
+		if uint32(target) <= v.Index {
+			out = append(out, v) // already at or past where we would wind it
+			continue
+		}
+		wound, ok := v.Advance(uint32(target))
+		if !ok {
+			// Refused to move — too far to hash. Fail closed.
+			c.log.Warn("dropping a chain from an invite bundle: cannot wind it forward",
+				"room", c.roomName(cookie), "chain", id, "from", v.Index, "to", target)
+			continue
+		}
+		out = append(out, wound)
 	}
 	return out
 }
@@ -1055,6 +1114,13 @@ func (c *Client) SetRoomMembersFunc(fn func(cookie string) []string) {
 	c.e2eeMu.Lock()
 	c.roomMembersFn = fn
 	c.e2eeMu.Unlock()
+}
+
+// roomMembersFunc returns the membership lookup, if the app layer installed one.
+func (c *Client) roomMembersFunc() func(string) []string {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	return c.roomMembersFn
 }
 
 func (c *Client) roomMembers(cookie string) []string {
@@ -1154,6 +1220,27 @@ func (c *Client) ourPrivateKey() ([32]byte, bool) {
 
 // handleChainBroadcast learns a sender's chain from an in-room distribution.
 func (c *Client) handleChainBroadcast(cookie, sender, body string) {
+	// A chain from somebody we never gave this room to is not a chain we want to
+	// be able to read. Installing one lets a walk-in who knows the room name
+	// speak into an encrypted room under their own name, rendering as ordinary
+	// chat rather than as the injection the plaintext check catches.
+	if fn := c.roomMembersFunc(); fn != nil {
+		self := state.NormalizeScreenName(c.store.Self().ScreenName)
+		want := state.NormalizeScreenName(sender)
+		member := want == self
+		for _, m := range fn(cookie) {
+			if state.NormalizeScreenName(m) == want {
+				member = true
+				break
+			}
+		}
+		if !member {
+			c.log.Warn("ignoring a room chain broadcast from a non-member",
+				"room", c.roomName(cookie), "from", sender)
+			return
+		}
+	}
+
 	senderPubs, ok := c.PeerKeys(sender)
 	if !ok {
 		// We cannot open it without knowing which key sealed it. Fetch and let
@@ -1240,7 +1327,11 @@ func (c *Client) PruneChainViews(cookie string) int {
 		if v.Index >= floor {
 			continue
 		}
-		rk.views[id] = v.Advance(floor)
+		wound, ok := v.Advance(floor)
+		if !ok {
+			continue // refused to move; do not count it as pruned
+		}
+		rk.views[id] = wound
 		moved++
 	}
 	return moved

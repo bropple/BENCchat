@@ -85,6 +85,9 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// selfNormalized is the account name we signed on AS, normalized, kept apart
+	// from the server's echo in the store. Guarded by e2eeMu.
+	selfNormalized string
 	// roomMembersFn looks up who is in a room. Membership lives in the app layer;
 	// the send path needs it here to distribute a new chain before sealing under
 	// it. Guarded by e2eeMu.
@@ -207,6 +210,18 @@ func (c *Client) SignOn(ctx context.Context, addr string, creds oscar.Credential
 	// Publish identity and the buddy list before the read loop starts, so the
 	// first presence updates land on a populated list rather than racing it.
 	c.store.SetSelf(res.ScreenName)
+
+	// Remember what we asked to BE, normalized, independent of what the server
+	// echoed back. Everything user-facing uses the server's form because that
+	// carries the casing a person recognises — but a device attestation must be
+	// signed over a name WE chose, not one the server handed us. Otherwise the
+	// server picks one of the two variable fields in what our device signs, and
+	// a signing oracle over attacker-chosen bytes is exactly how a signature
+	// obtained in one context gets rebuilt into another.
+	c.e2eeMu.Lock()
+	c.selfNormalized = state.NormalizeScreenName(creds.ScreenName)
+	c.e2eeMu.Unlock()
+
 	c.publishBuddyList(session.BuddyList())
 
 	session.Handler = c.handleSNAC

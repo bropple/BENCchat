@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -160,24 +161,63 @@ func (v ChainView) MessageKey(index uint32) ([32]byte, error) {
 }
 
 // Advance moves a view forward, discarding the ability to read anything before
-// the new position.
+// the new position. ok reports whether it actually moved.
 //
 // This is the room-side retention control: a view kept at position zero can open
 // the whole chain forever, which is what makes a leaked key file worth so much.
 // Winding it forward past what history still needs bounds that without losing
 // anything, since the plaintext lives in the history file under a different key.
-func (v ChainView) Advance(to uint32) ChainView {
+//
+// ok exists because the failure is silent and the callers were treating it as
+// success. A gap past maxChainSkip returns the view UNMOVED, and a caller that
+// ships that into an invite hands a newcomer the whole chain — the same
+// disclosure the winding was there to prevent, reached by a different route.
+// Callers must fail closed on !ok rather than send what they were given.
+func (v ChainView) Advance(to uint32) (ChainView, bool) {
 	if to <= v.Index {
-		return v
+		return v, false
 	}
 	if to-v.Index > maxChainSkip {
-		return v
+		return v, false
 	}
 	state := v.state
 	for i := v.Index; i < to; i++ {
 		state = step(state)
 	}
-	return ChainView{ID: v.ID, state: state, Index: to}
+	return ChainView{ID: v.ID, state: state, Index: to}, true
+}
+
+// maxContinuityCheck bounds how far Continues will hash to prove a link. Ten
+// thousand steps is a couple of milliseconds; past that we decline rather than
+// let a caller hand us an expensive proof obligation.
+const maxContinuityCheck = 10000
+
+// Continues reports whether v is the SAME chain as prior, reaching further back.
+//
+// This is what makes a chain view safe to accept from somebody who is not its
+// owner. Chain IDs are self-asserted — they ride in the clear on every message
+// and nothing binds one to an account — so "same ID, lower index" is not a
+// reason to believe anything. It is exactly the claim an attacker makes when
+// they broadcast their own random state under somebody else's chain ID, and
+// under a lowest-index-wins rule that claim always won.
+//
+// Continuity is checkable without trusting anyone: hash the offered state
+// forward and see whether it arrives at the state we already hold. Only the
+// chain's real owner can produce a state that does, because the step is one-way.
+// A relay legitimately handing us more read-back passes; a stranger substituting
+// a different chain cannot.
+func (v ChainView) Continues(prior ChainView) bool {
+	if v.ID != prior.ID || v.Index > prior.Index {
+		return false
+	}
+	if prior.Index-v.Index > maxContinuityCheck {
+		return false
+	}
+	s := v.state
+	for i := v.Index; i < prior.Index; i++ {
+		s = step(s)
+	}
+	return subtle.ConstantTimeCompare(s[:], prior.state[:]) == 1
 }
 
 // EncodeChainView renders a view for transport in an invite: id, index, state.

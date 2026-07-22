@@ -483,6 +483,16 @@ func (c *Client) answerAttestChallenge(body []byte) {
 		c.log.Warn("bad device attestation challenge", "err", err)
 		return
 	}
+	// The nonce is the other field the server chooses in what we are about to
+	// sign. Pinning its length leaves the server able to vary 32 random bytes
+	// and nothing else — without this it can choose the length too, and between
+	// that and the screen name it has a signing oracle over bytes of its
+	// choosing.
+	if len(ch.Nonce) != e2ee.AttestNonceLen {
+		c.log.Warn("refusing a device challenge with an implausible nonce",
+			"len", len(ch.Nonce), "want", e2ee.AttestNonceLen)
+		return
+	}
 	signer, ok := c.signingKey()
 	if !ok {
 		c.log.Warn("cannot answer a device challenge: no signing key on this device")
@@ -496,7 +506,26 @@ func (c *Client) answerAttestChallenge(body []byte) {
 		return
 	}
 
-	sig := e2ee.SignAttestation(c.store.Self().ScreenName, ch.Nonce, signer.Private)
+	// The name WE signed on as, not the one the server echoed back. Two separate
+	// reasons, and both bite:
+	//
+	// The server verifies against its own normalized form — lowercased, spaces
+	// stripped — while the store holds the string the user typed, echoed back
+	// verbatim. Signing the display form fails attestation for every account
+	// with a capital or a space, which under enforce is a permanent lockout
+	// presenting as a mystery disconnect rather than an auth failure.
+	//
+	// And taking it from the server at all hands the server one of the two
+	// variable fields in what this device signs.
+	c.e2eeMu.Lock()
+	self := c.selfNormalized
+	c.e2eeMu.Unlock()
+	if self == "" {
+		c.log.Warn("cannot answer a device challenge: no signed-on account name")
+		return
+	}
+
+	sig := e2ee.SignAttestation(self, ch.Nonce, signer.Private)
 	if err := sess.AttestDevice(signer.Public, sig); err != nil {
 		c.log.Warn("could not answer the device challenge", "err", err)
 	}

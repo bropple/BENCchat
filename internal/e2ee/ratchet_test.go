@@ -129,7 +129,10 @@ func TestAdvanceDiscardsHistory(t *testing.T) {
 		t.Fatalf("setup: position 5 should be readable (err=%v)", err)
 	}
 
-	wound := view.Advance(10)
+	wound, ok := view.Advance(10)
+	if !ok {
+		t.Fatal("Advance refused a legitimate move")
+	}
 	if wound.Index != 10 {
 		t.Fatalf("Advance left the index at %d", wound.Index)
 	}
@@ -139,9 +142,17 @@ func TestAdvanceDiscardsHistory(t *testing.T) {
 	if got, err := wound.MessageKey(15); err != nil || got != keys[15] {
 		t.Errorf("an advanced view lost a position it should still hold (err=%v)", err)
 	}
-	// Advancing backwards is a no-op rather than a way to regain history.
-	if back := wound.Advance(2); back.Index != 10 {
+	// Advancing backwards is a no-op rather than a way to regain history, and it
+	// reports that it did not move.
+	back, moved := wound.Advance(2)
+	if moved || back.Index != 10 {
 		t.Error("Advance went backwards")
+	}
+	// A gap too large to hash must report failure rather than silently returning
+	// the view unmoved — a caller that treats that as success ships an unwound
+	// view into an invite bundle, which is the disclosure winding exists to stop.
+	if _, moved := wound.Advance(wound.Index + maxChainSkip + 1); moved {
+		t.Error("Advance claimed to move past the skip cap")
 	}
 }
 
@@ -178,5 +189,55 @@ func TestChainSurvivesStorage(t *testing.T) {
 	got, gi := restored.Next()
 	if wi != gi || got != want {
 		t.Errorf("a restored chain diverged at position %d/%d", gi, wi)
+	}
+}
+
+// TestContinuesProvesSameChain: a view may only replace one it can hash forward
+// to. This is what makes a chain view safe to take from somebody who is not its
+// owner — chain IDs are self-asserted, so "same ID, lower index" proves nothing.
+func TestContinuesProvesSameChain(t *testing.T) {
+	c, _ := NewChain()
+	early := c.View()
+	for i := 0; i < 6; i++ {
+		c.Next()
+	}
+	later := c.View()
+
+	if !early.Continues(later) {
+		t.Error("a genuine earlier view of the same chain was rejected")
+	}
+	if later.Continues(early) {
+		t.Error("a LATER view was accepted as continuous with an earlier one")
+	}
+	if !later.Continues(later) {
+		t.Error("a view is not continuous with itself")
+	}
+
+	// The attack: somebody else's chain state wearing this chain's ID at a lower
+	// index. Under a plain lowest-index-wins rule this always won.
+	impostor, _ := NewChain()
+	forged := ChainView{ID: later.ID, Index: 0}
+	forged.state = impostor.View().state
+	if forged.Continues(later) {
+		t.Error("a substituted chain state was accepted as continuous")
+	}
+
+	// A different chain's ID never matches, whatever the indices.
+	if impostor.View().Continues(later) {
+		t.Error("a view with a different chain ID was accepted")
+	}
+}
+
+// TestContinuesRefusesUnboundedWork: the gap comes off the wire, so proving
+// continuity must not be an arbitrary amount of hashing on request.
+func TestContinuesRefusesUnboundedWork(t *testing.T) {
+	c, _ := NewChain()
+	early := c.View()
+	far, ok := early.Advance(maxContinuityCheck + 1)
+	if !ok {
+		t.Fatal("setup: could not advance")
+	}
+	if early.Continues(far) {
+		t.Error("Continues proved a link across more steps than it should hash")
 	}
 }

@@ -306,37 +306,6 @@ func TestRoomStampIsCoveredBySignature(t *testing.T) {
 	}
 }
 
-// TestRoomV1PayloadStillVerifies: an older client signs without a stamp, and
-// those messages must still open and attribute correctly.
-func TestRoomV1PayloadStillVerifies(t *testing.T) {
-	alice := mustSigner(t)
-	key := mustRoomKey(t)
-
-	// Build a v1 payload by hand — the shape an older BENCchat emits.
-	sig := ed25519.Sign(alice.Private, signingContext("r", "hello from v1"))
-	id, _ := hex.DecodeString(SignerID(alice.Public))
-	payload := []byte{signedPayloadV1}
-	payload = append(payload, id...)
-	payload = append(payload, sig...)
-	payload = append(payload, "hello from v1"...)
-
-	env, err := sealRoomPayload(payload, key, roomEnvelopePrefixV2)
-	if err != nil {
-		t.Fatalf("sealRoomPayload: %v", err)
-	}
-	got, err := OpenRoomSigned("r", env, map[string]RoomKey{key.ID(): key},
-		[]ed25519.PublicKey{alice.Public})
-	if err != nil {
-		t.Fatalf("a v1 signed payload did not open: %v", err)
-	}
-	if !got.Verified || got.Text != "hello from v1" {
-		t.Errorf("v1 payload = %+v, want verified text", got)
-	}
-	if !got.SentAt.IsZero() {
-		t.Errorf("v1 produced a send time from nowhere: %v", got.SentAt)
-	}
-}
-
 // TestAttestationRoundTrips: the client half of device attestation must agree
 // with the server's, byte for byte, or every session fails to prove itself.
 func TestAttestationRoundTrips(t *testing.T) {
@@ -373,5 +342,132 @@ func TestAttestationIsNotARoomSignature(t *testing.T) {
 	roomSig := ed25519.Sign(kp.Private, signingContext("alice", string(nonce)))
 	if VerifyAttestation("alice", nonce, kp.Public, roomSig) {
 		t.Error("a room-message signature was accepted as a device attestation")
+	}
+}
+
+// TestAttestationUsesNormalizedNames pins a MIXED-CASE vector.
+//
+// The server verifies against its normalized screen name — lowercased, spaces
+// stripped — so a client signing the display form fails on every account whose
+// user typed a capital or a space. Every existing test used "alice", where the
+// display and normalized forms are identical, so the whole suite was structurally
+// blind to it.
+func TestAttestationUsesNormalizedNames(t *testing.T) {
+	kp := mustSigner(t)
+	nonce := []byte("a-32-byte-nonce-for-attestation!")
+
+	// What the client must sign, and what the server will check.
+	sig := SignAttestation("rtriy", nonce, kp.Private)
+
+	if !VerifyAttestation("rtriy", nonce, kp.Public, sig) {
+		t.Fatal("the normalized form did not verify")
+	}
+	// The display form must NOT verify — if it did, the two would be
+	// interchangeable and the bug would be invisible again.
+	if VerifyAttestation("R Triy", nonce, kp.Public, sig) {
+		t.Error("display and normalized forms verify interchangeably; " +
+			"this test cannot catch the bug it exists for")
+	}
+}
+
+// TestAttestationContextBytesArePinned fixes the exact wire bytes.
+//
+// The server builds this independently. If the two drift, the symptom is
+// "nobody can sign in", which is a long way from "somebody changed a constant" —
+// so both sides pin the same vector. The server's lives in
+// TestAttestContextsMatchAcrossImplementations.
+func TestAttestationContextBytesArePinned(t *testing.T) {
+	got := attestContext("alice", []byte{1, 2, 3})
+	want := []byte("BENCO-ATTEST-v1\x00\x00\x00\x00\x05alice\x00\x00\x00\x03\x01\x02\x03")
+	if string(got) != string(want) {
+		t.Errorf("attest context = %q, want %q", got, want)
+	}
+}
+
+// TestNoContextCanSpellAnother is the general form of the bug that got through
+// twice, and it is written to fail on the SHAPE rather than on one example.
+//
+// The first fix tagged only the attestation context. That did not separate
+// anything: the room context began with a variable-length attacker-chosen field,
+// so a room NAMED "BENCO-ATTEST-v1" carrying `screenName || 0x00 || nonce`
+// produced byte-identical output. The collision moved rather than closed.
+//
+// This asserts the property directly: no choice of room name and message can
+// produce the bytes of an attestation, and no choice of screen name and nonce
+// can produce the bytes of a room signature.
+func TestNoContextCanSpellAnother(t *testing.T) {
+	nonce := []byte("a-32-byte-nonce-for-attestation!")
+
+	// The exact attack that defeated the first fix.
+	spelled := signingContextV2(attestDomain, make([]byte, stampLen), "alice\x00"+string(nonce))
+	if string(spelled) == string(attestContext("alice", nonce)) {
+		t.Error("a room named after the attest domain still spells an attestation")
+	}
+
+	// And the reverse.
+	back := attestContext(roomSigDomain, []byte("anything"))
+	if string(back) == string(signingContextV2(roomSigDomain, make([]byte, stampLen), "anything")) {
+		t.Error("an attestation for a screen name equal to the room domain spells a room signature")
+	}
+
+	// Every context must begin with its own tag, which is what makes the above
+	// impossible rather than merely unlikely.
+	for name, ctx := range map[string][]byte{
+		"attest": attestContext("alice", nonce),
+		"roomv2": signingContextV2("room", make([]byte, stampLen), "hello"),
+	} {
+		want := map[string]string{"attest": attestDomain, "roomv2": roomSigDomain}[name]
+		if string(ctx[:len(want)]) != want {
+			t.Errorf("%s context does not begin with its domain tag", name)
+		}
+	}
+}
+
+// TestContextFieldsAreUnambiguous: a NUL separator only separates if it cannot
+// occur in what it separates, and nothing ever stopped a room name or a message
+// containing one. Length prefixes remove the question.
+func TestContextFieldsAreUnambiguous(t *testing.T) {
+	stamp := make([]byte, stampLen)
+	a := signingContextV2("a\x00b", stamp, "c")
+	b := signingContextV2("a", stamp, "b\x00c")
+	if string(a) == string(b) {
+		t.Error("a NUL in a room name shifts the field boundary; length prefixes are missing")
+	}
+
+	nonce := []byte("a-32-byte-nonce-for-attestation!")
+	if string(attestContext("a\x00b", nonce)) == string(attestContext("a", append([]byte("b\x00"), nonce...))) {
+		t.Error("a NUL in a screen name shifts the attestation field boundary")
+	}
+}
+
+// TestV1SignedPayloadsAreNoLongerVerified: the v1 context had no tag and no
+// length prefixes, which made it the path by which a signature obtained
+// elsewhere could be rebuilt as a room message. Nothing produces v1; accepting
+// it kept the weakest construction reachable.
+func TestV1SignedPayloadsAreNoLongerVerified(t *testing.T) {
+	alice := mustSigner(t)
+	key := mustRoomKey(t)
+
+	sig := ed25519.Sign(alice.Private, signingContext("r", "hello from v1"))
+	id, _ := hex.DecodeString(SignerID(alice.Public))
+	payload := []byte{signedPayloadV1}
+	payload = append(payload, id...)
+	payload = append(payload, sig...)
+	payload = append(payload, "hello from v1"...)
+
+	env, err := sealRoomPayload(payload, key, roomEnvelopePrefixV2)
+	if err != nil {
+		t.Fatalf("sealRoomPayload: %v", err)
+	}
+	got, err := OpenRoomSigned("r", env, map[string]RoomKey{key.ID(): key},
+		[]ed25519.PublicKey{alice.Public})
+	if err != nil {
+		t.Fatalf("a v1 payload should still OPEN, just not be attributed: %v", err)
+	}
+	if got.Verified || got.Signed {
+		t.Error("a v1 signed payload was still attributed to its signer")
+	}
+	if got.Text != "hello from v1" {
+		t.Errorf("v1 text was lost: %q", got.Text)
 	}
 }
