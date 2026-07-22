@@ -241,3 +241,58 @@ func TestContinuesRefusesUnboundedWork(t *testing.T) {
 		t.Error("Continues proved a link across more steps than it should hash")
 	}
 }
+
+// TestAChainAndAViewCannotBeMistakenForEachOther.
+//
+// They used to encode identically, so a stored view WAS a storable sending
+// chain. Nothing promoted one, but nothing stopped it either — and the cost of
+// that line eventually being written is two devices advancing one position
+// counter, sealing different messages at the same position under the same key.
+func TestAChainAndAViewCannotBeMistakenForEachOther(t *testing.T) {
+	c, err := NewChain()
+	if err != nil {
+		t.Fatalf("NewChain: %v", err)
+	}
+	v := c.View()
+
+	if EncodeChain(c) == EncodeChainView(v) {
+		t.Fatal("a chain and a view of it still encode identically")
+	}
+	if _, err := DecodeChain(EncodeChainView(v)); err == nil {
+		t.Error("a chain view decoded as a sending chain")
+	}
+	if _, err := DecodeChainView(EncodeChain(c)); err == nil {
+		t.Error("a sending chain decoded as a chain view")
+	}
+
+	// Each still round-trips as itself, or the tags broke what they protect.
+	back, err := DecodeChain(EncodeChain(c))
+	if err != nil || back.ID != c.ID || back.Index != c.Index {
+		t.Errorf("a chain did not survive its own round trip: %+v %v", back, err)
+	}
+	backView, err := DecodeChainView(EncodeChainView(v))
+	if err != nil || backView != v {
+		t.Errorf("a view did not survive its own round trip: %+v %v", backView, err)
+	}
+}
+
+// TestUntaggedChainStateStillRestores: room files written before the tags hold
+// both kinds untagged. They must still load, and they must load as VIEWS —
+// reading an untagged string as a sending chain is the direction that hurts.
+func TestUntaggedChainStateStillRestores(t *testing.T) {
+	c, _ := NewChain()
+	untagged := encodeChainBody(c.ID, c.Index, c.state)
+
+	v, err := DecodeChainView(untagged)
+	if err != nil {
+		t.Fatalf("a pre-tag view no longer restores: %v", err)
+	}
+	if v.ID != c.ID || v.Index != c.Index {
+		t.Errorf("a pre-tag view restored wrong: %+v", v)
+	}
+	// And the outbound chain a pre-tag room file holds still restores too, or a
+	// restart would strand every room we can send in.
+	if _, err := DecodeChain(untagged); err != nil {
+		t.Errorf("a pre-tag sending chain no longer restores: %v", err)
+	}
+}

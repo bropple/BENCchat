@@ -238,16 +238,20 @@ func (v ChainView) Continues(prior ChainView) bool {
 
 // EncodeChainView renders a view for transport in an invite: id, index, state.
 func EncodeChainView(v ChainView) string {
-	buf := make([]byte, 0, 4+32)
-	var idx [4]byte
-	binary.BigEndian.PutUint32(idx[:], v.Index)
-	buf = append(buf, idx[:]...)
-	buf = append(buf, v.state[:]...)
-	return v.ID + ":" + base64.StdEncoding.EncodeToString(buf)
+	return chainViewTag + encodeChainBody(v.ID, v.Index, v.state)
 }
 
 // DecodeChainView parses one.
 func DecodeChainView(s string) (ChainView, error) {
+	if strings.HasPrefix(s, chainTag) {
+		return ChainView{}, errors.New("e2ee: that is a sending chain, not a chain view")
+	}
+	// Untagged is read as a view: that is what a pre-tag room file holds, and it
+	// is the safe direction to guess.
+	return decodeChainBody(strings.TrimPrefix(s, chainViewTag))
+}
+
+func decodeChainBody(s string) (ChainView, error) {
 	var v ChainView
 	i := strings.Index(s, ":")
 	if i <= 0 {
@@ -279,17 +283,49 @@ func DecodeChainView(s string) (ChainView, error) {
 // is what we hand somebody else, and a chain is the thing we advance. Storing a
 // view where a chain belongs would silently lose the ability to send.
 func EncodeChain(c Chain) string {
+	return chainTag + encodeChainBody(c.ID, c.Index, c.state)
+}
+
+// The two encodings used to be byte-identical, which made a stored VIEW a
+// storable outbound CHAIN — DecodeChain was DecodeChainView with a struct
+// rename, so anything holding one could be read as the other. Nothing did, and
+// the device-transfer work leaned on that accident: it shipped views and relied
+// on no code path ever promoting one into a sending chain.
+//
+// That is not a property to leave resting on nobody having written the wrong
+// line yet. A chain is a position counter, and two devices advancing one seal
+// two different messages at the same position under the same key. The tags make
+// the confusion refuse to parse instead.
+//
+// Untagged input still decodes as a VIEW, and only as a view: room files
+// written before this carry both kinds untagged, and a view read as a view is
+// the safe direction — the unsafe one is a view read as a chain, which is
+// exactly what the missing tag allowed.
+const (
+	chainTag     = "c1:"
+	chainViewTag = "v1:"
+)
+
+func encodeChainBody(id string, index uint32, state [32]byte) string {
 	buf := make([]byte, 0, 4+32)
 	var idx [4]byte
-	binary.BigEndian.PutUint32(idx[:], c.Index)
+	binary.BigEndian.PutUint32(idx[:], index)
 	buf = append(buf, idx[:]...)
-	buf = append(buf, c.state[:]...)
-	return c.ID + ":" + base64.StdEncoding.EncodeToString(buf)
+	buf = append(buf, state[:]...)
+	return id + ":" + base64.StdEncoding.EncodeToString(buf)
 }
 
 // DecodeChain parses a stored outbound chain.
 func DecodeChain(s string) (Chain, error) {
-	v, err := DecodeChainView(s)
+	if strings.HasPrefix(s, chainViewTag) {
+		return Chain{}, errors.New("e2ee: that is a chain view, not a sending chain")
+	}
+	rest, ok := strings.CutPrefix(s, chainTag)
+	if !ok {
+		// An untagged chain from a room file written before the tags existed.
+		rest = s
+	}
+	v, err := decodeChainBody(rest)
 	if err != nil {
 		return Chain{}, err
 	}
