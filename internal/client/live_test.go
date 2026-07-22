@@ -435,7 +435,7 @@ func TestLiveChatRoomListen(t *testing.T) {
 // same account; one blocks a target, the other should see it appear in its
 // blocked list within a few seconds, and see it disappear on unblock.
 //
-//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SERVER=$SERVER:5191 BENCCHAT_LIVE_TLS=1 \
 //	BENCCHAT_LIVE_SCREENNAME=cmaximus BENCCHAT_LIVE_PASSWORD=... \
 //	BENCCHAT_LIVE_BLOCK_TARGET=someuser \
 //	go test ./internal/client/ -run TestLiveFeedbagPropagation -v -timeout 90s

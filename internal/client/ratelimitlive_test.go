@@ -20,7 +20,7 @@ import (
 //
 //  2. any that vanished end up marked NotSent rather than looking delivered.
 //
-//     BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//     BENCCHAT_LIVE_SERVER=$SERVER:5191 BENCCHAT_LIVE_TLS=1 \
 //     BENCCHAT_LIVE_A=cmaximus  BENCCHAT_LIVE_A_PW=... \
 //     BENCCHAT_LIVE_B=cmaximus2 BENCCHAT_LIVE_B_PW=... \
 //     BENCCHAT_LIVE_BURST=40 \

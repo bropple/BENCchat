@@ -16,7 +16,7 @@ import (
 // what the SERVER stored (via a fresh session) and confirms messaging still
 // works (i.e. the move didn't sever the connection).
 //
-//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SERVER=$SERVER:5191 BENCCHAT_LIVE_TLS=1 \
 //	BENCCHAT_LIVE_A=cmaximus  BENCCHAT_LIVE_A_PW=... \
 //	BENCCHAT_LIVE_B=cmaximus2 BENCCHAT_LIVE_B_PW=... \
 //	go test ./internal/client/ -run TestLiveMoveConnectedBuddy -v -timeout 120s

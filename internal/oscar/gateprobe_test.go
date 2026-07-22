@@ -21,7 +21,7 @@ import (
 //
 // Run:
 //
-//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SERVER=$SERVER:5191 BENCCHAT_LIVE_TLS=1 \
 //	BENCCHAT_LIVE_SCREENNAME=cmaximus2 BENCCHAT_LIVE_PASSWORD=... \
 //	BENCCHAT_LIVE_GATE_TARGET=usec \
 //	go test ./internal/oscar/ -run TestLiveGateProbe -v

@@ -23,7 +23,7 @@ import (
 // Delivery is judged by the send-tracking added for rate limiting: a refused or
 // dropped message ends up flagged NotSent, a delivered one doesn't.
 //
-//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SERVER=$SERVER:5191 BENCCHAT_LIVE_TLS=1 \
 //	BENCCHAT_LIVE_A=cmaximus  BENCCHAT_LIVE_A_PW=... \
 //	BENCCHAT_LIVE_B=cmaximus2 BENCCHAT_LIVE_B_PW=... \
 //	go test ./internal/client/ -run TestLiveGateEndToEnd -v -timeout 200s

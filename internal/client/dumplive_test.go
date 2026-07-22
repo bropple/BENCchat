@@ -13,7 +13,7 @@ import (
 // useful for checking a probe's preconditions before trusting its verdict (e.g.
 // "the gate is absent" really meaning "these two are legitimately connected").
 //
-//	BENCCHAT_LIVE_SERVER=aim.benco.lol:5191 BENCCHAT_LIVE_TLS=1 \
+//	BENCCHAT_LIVE_SERVER=$SERVER:5191 BENCCHAT_LIVE_TLS=1 \
 //	BENCCHAT_LIVE_SCREENNAME=cmaximus2 BENCCHAT_LIVE_PASSWORD=... \
 //	go test ./internal/client/ -run TestLiveDumpBuddies -v
 func TestLiveDumpBuddies(t *testing.T) {
