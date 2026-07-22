@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -1124,5 +1125,93 @@ func TestSealRefusesUntilTheChainIsShared(t *testing.T) {
 	c.EnsureOutboundChain("4-0-r")
 	if _, _, err := c.sealRoomMessage("4-0-r", "after a removal"); err == nil {
 		t.Error("sealed under a replacement chain nobody has been given")
+	}
+}
+
+// TestPruneChainViewsBoundsWhatAStolenFileOpens is R8's remaining half, and the
+// room half of forward secrecy.
+//
+// A view kept at the position it was first handed opens the room's entire life.
+// Winding it forward is irreversible by construction — the step is a one-way
+// hash — so a stolen room file after this opens only the recent past.
+func TestPruneChainViewsBoundsWhatAStolenFileOpens(t *testing.T) {
+	c, _ := newTestClient(t)
+	chain, err := e2ee.NewChain()
+	if err != nil {
+		t.Fatalf("NewChain: %v", err)
+	}
+
+	// Handed the chain at the very beginning, then the room runs on well past
+	// the retention window.
+	c.LearnChainView("4-0-r", chain.View())
+	var keys [][32]byte
+	for i := 0; i < chainRetention+500; i++ {
+		k, _ := chain.Next()
+		keys = append(keys, k)
+	}
+	c.noteChainPosition("4-0-r", chain.ID, uint32(len(keys)-1))
+
+	// Before pruning the earliest message still opens.
+	if got, err := c.ChainViews("4-0-r")[chain.ID].MessageKey(0); err != nil || got != keys[0] {
+		t.Fatalf("setup: position 0 should be readable (err=%v)", err)
+	}
+
+	if moved := c.PruneChainViews("4-0-r"); moved != 1 {
+		t.Fatalf("pruned %d chains, want 1", moved)
+	}
+
+	view := c.ChainViews("4-0-r")[chain.ID]
+	if _, err := view.MessageKey(0); !errors.Is(err, e2ee.ErrChainRewind) {
+		t.Error("the oldest message is still readable after pruning")
+	}
+	// The recent past must survive, or catch-up breaks.
+	recent := uint32(len(keys) - 1)
+	if got, err := view.MessageKey(recent); err != nil || got != keys[recent] {
+		t.Errorf("pruning cost us a recent position (err=%v)", err)
+	}
+}
+
+// TestPruneChainViewsLeavesShortChainsAlone: a room that has not run past the
+// window loses nothing, and a chain we have never seen a position for is not
+// wound forward on a guess.
+func TestPruneChainViewsLeavesShortChainsAlone(t *testing.T) {
+	c, _ := newTestClient(t)
+
+	young, _ := e2ee.NewChain()
+	c.LearnChainView("4-0-r", young.View())
+	for i := 0; i < 50; i++ {
+		young.Next()
+	}
+	c.noteChainPosition("4-0-r", young.ID, 49)
+
+	unknown, _ := e2ee.NewChain()
+	c.LearnChainView("4-0-r", unknown.View()) // no position ever noted
+
+	if moved := c.PruneChainViews("4-0-r"); moved != 0 {
+		t.Errorf("pruned %d chains, want none", moved)
+	}
+	if got := c.ChainViews("4-0-r")[young.ID]; got.Index != 0 {
+		t.Errorf("a short chain was wound to %d", got.Index)
+	}
+	if got := c.ChainViews("4-0-r")[unknown.ID]; got.Index != 0 {
+		t.Errorf("a chain with no known position was wound forward on a guess to %d", got.Index)
+	}
+}
+
+// TestPruneChainViewsSparesOurOwnChain: our own view is regenerated from the
+// outbound chain at its current position, so pruning it is pointless — and
+// counting it would make the result misleading.
+func TestPruneChainViewsSparesOurOwnChain(t *testing.T) {
+	c, _ := newTestClient(t)
+	c.store.UpsertRoom("4-0-r", "project")
+
+	view, _, err := c.EnsureOutboundChain("4-0-r")
+	if err != nil {
+		t.Fatalf("EnsureOutboundChain: %v", err)
+	}
+	c.noteChainPosition("4-0-r", view.ID, chainRetention+100)
+
+	if moved := c.PruneChainViews("4-0-r"); moved != 0 {
+		t.Errorf("pruned our own chain (%d moved)", moved)
 	}
 }

@@ -1189,3 +1189,59 @@ func (c *Client) ourKeyPairs() ([]e2ee.KeyPair, bool) {
 	}
 	return []e2ee.KeyPair{c.e2eeKP}, true
 }
+
+// chainRetention is how many positions back a chain view is kept readable.
+//
+// This is the room half of forward secrecy, and it is the whole of it: a chain
+// advances by a one-way hash, so a view wound forward genuinely cannot open what
+// it passed. Without this the mechanism exists and nothing uses it — a view sits
+// at the earliest position it was ever given and opens the room's entire life,
+// which is exactly what makes a stolen room file worth so much.
+//
+// Nothing is lost by winding it on. Scrollback comes from the history file,
+// which stores decrypted text under a different key; chain views are needed only
+// to open CIPHERTEXT, and the only ciphertext that arrives late is a catch-up
+// envelope forwarded by another member. That is bounded by the catch-up window,
+// which is bounded by when we joined.
+//
+// Generous on purpose, because winding forward is irreversible: too small and a
+// legitimate catch-up renders as "sent before you joined" forever. Two thousand
+// positions is far past any window anybody asks for, and still turns "the room's
+// entire history" into "the recent past".
+const chainRetention = 2000
+
+// PruneChainViews winds each view forward so it can no longer open messages more
+// than chainRetention positions old, and reports how many moved.
+//
+// Only peer chains move. Our own view is regenerated from the outbound chain at
+// its current position on every restore, so it is already as far forward as it
+// goes.
+func (c *Client) PruneChainViews(cookie string) int {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return 0
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+
+	moved := 0
+	for id, v := range rk.views {
+		if rk.out != nil && id == rk.out.ID {
+			continue
+		}
+		seen, ok := rk.seen[id]
+		if !ok || seen < chainRetention {
+			// We do not know where this chain has got to, or it has not run far
+			// enough for anything to be old yet. Winding forward on a guess
+			// would destroy readability we are entitled to.
+			continue
+		}
+		floor := seen - chainRetention
+		if v.Index >= floor {
+			continue
+		}
+		rk.views[id] = v.Advance(floor)
+		moved++
+	}
+	return moved
+}

@@ -180,6 +180,13 @@ func (a *App) saveRoomKeys(cookie string) {
 		return
 	}
 
+	// Wind old views forward before they reach disk. A view kept at the position
+	// it was first given opens the room's whole life, which is what makes a
+	// stolen room file valuable; nothing is lost, because scrollback comes from
+	// the history file rather than from re-opening ciphertext.
+	if moved := a.client.PruneChainViews(cookie); moved > 0 {
+		slog.Default().Debug("wound room chain views forward", "room", cookie, "chains", moved)
+	}
 	out, views, seen := a.client.RoomChainState(cookie)
 	store[cookie] = roomkeys.Room{
 		Name:    room.Name,
