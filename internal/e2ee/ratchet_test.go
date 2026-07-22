@@ -159,3 +159,24 @@ func TestSenderCannotReReadItsOwnPastMessages(t *testing.T) {
 	}
 	_ = first
 }
+
+// TestChainSurvivesStorage: a chain reloaded from disk must keep sealing where
+// it left off. Restarting at an earlier position would reuse message keys.
+func TestChainSurvivesStorage(t *testing.T) {
+	c, _ := NewChain()
+	for i := 0; i < 9; i++ {
+		c.Next()
+	}
+	restored, err := DecodeChain(EncodeChain(c))
+	if err != nil {
+		t.Fatalf("DecodeChain: %v", err)
+	}
+	if restored.ID != c.ID || restored.Index != c.Index {
+		t.Fatalf("restored %+v, want id=%s index=%d", restored, c.ID, c.Index)
+	}
+	want, wi := c.Next()
+	got, gi := restored.Next()
+	if wi != gi || got != want {
+		t.Errorf("a restored chain diverged at position %d/%d", gi, wi)
+	}
+}

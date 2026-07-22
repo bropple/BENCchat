@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"github.com/benco-holdings/benchat/internal/secret"
 	"log/slog"
 	"sort"
 	"strings"
@@ -104,69 +105,117 @@ func (m *roomMembers) setAll(cookie string, names []string, self string) {
 	m.mu.Unlock()
 }
 
-// saveRoomKeys persists the current key set for a room, so a restart doesn't
-// lock the user out of their own encrypted rooms.
+// roomsKey returns this account's room-file encryption key, minting and storing
+// one on first use.
+//
+// Unlike the history key there is no "off" setting to respect: a room file that
+// cannot be written means losing the ability to read or send in every encrypted
+// room after a restart, so this is not optional. It still fails CLOSED — a
+// keyring we cannot reach disables saving rather than writing key material in
+// the clear, and it never replaces a stored key it merely failed to parse, since
+// that would strand the file that key wrote.
+func (a *App) roomsKey() *[32]byte {
+	acct := a.currentAccount()
+	if acct == "" {
+		return nil
+	}
+	a.roomsKeyMu.Lock()
+	defer a.roomsKeyMu.Unlock()
+	if a.roomsKeyCache != nil {
+		return a.roomsKeyCache
+	}
+
+	stored, err := secret.RetrieveRoomsKey(acct)
+	if err != nil {
+		slog.Default().Warn("could not read the room key file's key", "err", err)
+		return nil
+	}
+	if stored != "" {
+		raw, derr := base64.StdEncoding.DecodeString(stored)
+		if derr == nil && len(raw) == 32 {
+			var k [32]byte
+			copy(k[:], raw)
+			a.roomsKeyCache = &k
+			return a.roomsKeyCache
+		}
+		slog.Default().Warn("the stored room-file key is unusable", "err", derr, "len", len(raw))
+		return nil
+	}
+
+	k, err := roomkeys.NewKey()
+	if err != nil {
+		slog.Default().Warn("could not mint a room-file key", "err", err)
+		return nil
+	}
+	if err := secret.StoreRoomsKey(acct, base64.StdEncoding.EncodeToString(k[:])); err != nil {
+		slog.Default().Warn("could not store the room-file key", "err", err)
+		return nil
+	}
+	a.roomsKeyCache = k
+	return k
+}
+
+// saveRoomKeys persists a room's chain state, so a restart resumes sealing where
+// it left off and can still read what it could before.
 func (a *App) saveRoomKeys(cookie string) {
 	acct := a.currentAccount()
 	if acct == "" {
+		return
+	}
+	key := a.roomsKey()
+	if key == nil {
+		slog.Default().Warn("not saving room keys: no usable encryption key")
 		return
 	}
 	room, ok := a.store.Room(cookie)
 	if !ok {
 		return
 	}
-	keys, currentID := a.client.RoomKeySet(cookie)
 
-	store, err := roomkeys.Load(acct)
+	store, err := roomkeys.Load(acct, key)
 	if err != nil {
-		slog.Default().Warn("could not read saved room keys", "err", err)
-		store = roomkeys.Store{}
+		// Do NOT fall back to an empty store: saving over a file we merely
+		// failed to read would discard every room key it holds.
+		slog.Default().Warn("could not read saved room keys; not saving", "err", err)
+		return
 	}
-	encoded := make(map[string]string, len(keys))
-	for id, k := range keys {
-		encoded[id] = e2ee.EncodeRoomKey(k)
-	}
+
+	out, views, seen := a.client.RoomChainState(cookie)
 	store[cookie] = roomkeys.Room{
-		Name:      room.Name,
-		Keys:      encoded,
-		CurrentID: currentID,
-		Members:   a.members.list(cookie),
-		Updated:   time.Now(),
+		Name:    room.Name,
+		Out:     out,
+		Views:   views,
+		Seen:    seen,
+		Members: a.members.list(cookie),
+		Updated: time.Now(),
 	}
-	if err := roomkeys.Save(acct, store); err != nil {
+	if err := roomkeys.Save(acct, store, key); err != nil {
 		slog.Default().Warn("could not save room keys", "err", err)
 	}
 }
 
-// restoreRoomKeys reinstalls saved keys after sign-on.
+// restoreRoomKeys reinstalls saved chain state after sign-on.
 //
-// Rooms are matched by cookie, which is derived from the room name, so a room
-// rejoined later gets its key back. A room whose key we can't decode is still
-// marked encrypted — better to refuse to send than to quietly go plaintext.
+// A room whose state we cannot decode is still marked encrypted — better to
+// refuse to send than to quietly go plaintext into a room the user believes is
+// private.
 func (a *App) restoreRoomKeys() {
 	acct := a.currentAccount()
 	if acct == "" {
 		return
 	}
-	store, err := roomkeys.Load(acct)
+	key := a.roomsKey()
+	if key == nil {
+		slog.Default().Warn("could not restore room keys: no usable encryption key")
+		return
+	}
+	store, err := roomkeys.Load(acct, key)
 	if err != nil {
 		slog.Default().Warn("could not load saved room keys", "err", err)
 		return
 	}
 	for cookie, r := range store {
-		keys := make(map[string]e2ee.RoomKey, len(r.Keys))
-		for id, enc := range r.Keys {
-			k, derr := e2ee.DecodeRoomKey(enc)
-			if derr != nil {
-				continue
-			}
-			keys[id] = k
-		}
-		if len(keys) == 0 {
-			a.client.MarkRoomEncrypted(cookie)
-			continue
-		}
-		a.client.RestoreRoomKeys(cookie, keys, r.CurrentID)
+		a.client.RestoreChainState(cookie, r.Out, r.Views, r.Seen)
 		for _, m := range r.Members {
 			a.members.add(cookie, m)
 		}
@@ -604,7 +653,7 @@ func (a *App) ReformRoom(cookie string, drop []string) string {
 	a.client.ForgetRoomKeys(cookie)
 	a.members.forget(cookie)
 	if acct := a.currentAccount(); acct != "" {
-		if err := roomkeys.Forget(acct, cookie); err != nil {
+		if err := roomkeys.Forget(acct, cookie, a.roomsKey()); err != nil {
 			slog.Default().Warn("could not forget the old room's keys", "err", err)
 		}
 	}

@@ -56,6 +56,14 @@ type App struct {
 	// otherwise become an unending stream of identical notices.
 	histNoticeShown bool
 
+	// roomsKeyCache seals the room file, which holds live chain state. Read from
+	// the keyring once per session, since every room save consults it. Kept
+	// separate from histKey: the two protect different files with different
+	// lifetimes, and sharing one would mean losing either takes both.
+	// Guarded by roomsKeyMu.
+	roomsKeyMu    sync.Mutex
+	roomsKeyCache *[32]byte
+
 	// End-to-end encryption: our current public key (for publishing in the
 	// profile) and whether a keypair is loaded. The private key never lives here
 	// — it's in the OS secret store and the client.

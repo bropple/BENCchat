@@ -216,3 +216,26 @@ func DecodeChainView(s string) (ChainView, error) {
 	copy(v.state[:], raw[4:])
 	return v, nil
 }
+
+// EncodeChain renders our own outbound chain for storage.
+//
+// Separate from EncodeChainView because the two are not interchangeable: a view
+// is what we hand somebody else, and a chain is the thing we advance. Storing a
+// view where a chain belongs would silently lose the ability to send.
+func EncodeChain(c Chain) string {
+	buf := make([]byte, 0, 4+32)
+	var idx [4]byte
+	binary.BigEndian.PutUint32(idx[:], c.Index)
+	buf = append(buf, idx[:]...)
+	buf = append(buf, c.state[:]...)
+	return c.ID + ":" + base64.StdEncoding.EncodeToString(buf)
+}
+
+// DecodeChain parses a stored outbound chain.
+func DecodeChain(s string) (Chain, error) {
+	v, err := DecodeChainView(s)
+	if err != nil {
+		return Chain{}, err
+	}
+	return Chain{ID: v.ID, state: v.state, Index: v.Index}, nil
+}

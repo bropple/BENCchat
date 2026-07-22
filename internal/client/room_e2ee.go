@@ -45,6 +45,10 @@ type roomKeys struct {
 	// we do not hold is readable by nobody here — which is the normal state for
 	// anything sent before we joined.
 	views map[string]e2ee.ChainView
+	// seen is the highest position observed on each chain, which is where a
+	// newcomer's bundle should start — the views above say how far BACK we may
+	// read, which is a different question and the wrong answer to hand over.
+	seen map[string]uint32
 }
 
 type roomCrypto struct {
@@ -864,6 +868,13 @@ func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKey
 	}
 	c.roomCrypto.mu.Unlock()
 
+	if chainID, index, ok := e2ee.RoomEnvelopeChain(text); ok {
+		// Note where the conversation has got to even for a message we cannot
+		// open: a bundle for a newcomer should start at the latest position we
+		// have SEEN, not the latest one we could read.
+		c.noteChainPosition(cookie, chainID, index)
+	}
+
 	msg, err := e2ee.OpenRoomChain(c.roomName(cookie), text, views, c.PeerSigningKeys(sender))
 	switch {
 	case errors.Is(err, e2ee.ErrChainRewind):
@@ -900,4 +911,86 @@ func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKey
 		Text: msg.Text, Encrypted: true,
 		Verified: msg.Verified, Signed: msg.Signed, SentAt: msg.SentAt,
 	}
+}
+
+// RoomChainState exports a room's chain state for persistence: our outbound
+// chain, the views we can read, and how far each chain has got.
+func (c *Client) RoomChainState(cookie string) (out string, views map[string]string, seen map[string]uint32) {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return "", nil, nil
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+
+	if rk.out != nil {
+		out = e2ee.EncodeChain(*rk.out)
+	}
+	views = make(map[string]string, len(rk.views))
+	for id, v := range rk.views {
+		views[id] = e2ee.EncodeChainView(v)
+	}
+	seen = make(map[string]uint32, len(rk.seen))
+	for id, n := range rk.seen {
+		seen[id] = n
+	}
+	return out, views, seen
+}
+
+// RestoreChainState reinstalls persisted chain state after sign-on.
+//
+// A room whose state is present but undecodable is still marked encrypted. That
+// is the important half: losing the state must mean "refuse to send" rather than
+// "this is an ordinary room", or the client broadcasts in the clear into a
+// conversation everybody believes is private.
+func (c *Client) RestoreChainState(cookie, out string, views map[string]string, seen map[string]uint32) {
+	rk := c.roomCrypto.ensure(cookie)
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	rk.encrypted = true
+
+	if out != "" {
+		if chain, err := e2ee.DecodeChain(out); err == nil {
+			rk.out = &chain
+			rk.views[chain.ID] = chain.View()
+		} else {
+			// A chain we cannot decode must not be replaced silently here: a
+			// fresh one would seal messages nobody has been given the view for.
+			// Leaving it nil makes the next send mint and distribute one properly.
+			c.log.Warn("could not restore a room's outbound chain", "room", cookie, "err", err)
+		}
+	}
+	for id, enc := range views {
+		v, err := e2ee.DecodeChainView(enc)
+		if err != nil || v.ID != id {
+			c.log.Warn("could not restore a room chain view", "room", cookie, "chain", id, "err", err)
+			continue
+		}
+		if have, ok := rk.views[id]; ok && have.Index <= v.Index {
+			continue
+		}
+		rk.views[id] = v
+	}
+	for id, n := range seen {
+		if rk.seen == nil {
+			rk.seen = map[string]uint32{}
+		}
+		if n > rk.seen[id] {
+			rk.seen[id] = n
+		}
+	}
+}
+
+// noteChainPosition records how far a chain has got, for handing a newcomer a
+// bundle that starts at "now" rather than at the earliest we may read.
+func (c *Client) noteChainPosition(cookie, chainID string, index uint32) {
+	rk := c.roomCrypto.ensure(cookie)
+	c.roomCrypto.mu.Lock()
+	if rk.seen == nil {
+		rk.seen = map[string]uint32{}
+	}
+	if index >= rk.seen[chainID] {
+		rk.seen[chainID] = index
+	}
+	c.roomCrypto.mu.Unlock()
 }

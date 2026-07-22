@@ -113,3 +113,39 @@ func ClearHistoryKey(account string) error {
 	}
 	return nil
 }
+
+// roomsUser is the keyring entry for an account's room-key file.
+//
+// Its own key rather than the history one, though both protect local files for
+// the same account. They hold different things with different lifetimes — losing
+// history costs you scrollback, losing room keys costs you the ability to read
+// or write the rooms themselves — and a single key means one of those failures
+// always drags the other with it.
+func roomsUser(account string) string { return "rooms:" + account }
+
+// StoreRoomsKey saves an account's room-file encryption key (base64).
+func StoreRoomsKey(account, keyB64 string) error {
+	return keyring.Set(service, roomsUser(account), keyB64)
+}
+
+// RetrieveRoomsKey returns the stored room-file key, or "" if none is stored.
+//
+// As with the history key, "" and an error are different answers: a keyring that
+// could not be reached is not an account without a key, and only one of them
+// means "generate one". Minting a fresh key over a readable file would lock the
+// account out of every room it is in.
+func RetrieveRoomsKey(account string) (string, error) {
+	k, err := keyring.Get(service, roomsUser(account))
+	if errors.Is(err, keyring.ErrNotFound) {
+		return "", nil
+	}
+	return k, err
+}
+
+// ClearRoomsKey removes an account's room-file key. Missing is not an error.
+func ClearRoomsKey(account string) error {
+	if err := keyring.Delete(service, roomsUser(account)); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return err
+	}
+	return nil
+}
