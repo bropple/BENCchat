@@ -10,6 +10,10 @@ export function AddBuddy(arg1, arg2) {
   return window['go']['main']['App']['AddBuddy'](arg1, arg2);
 }
 
+export function ApplyDeviceTransfer(arg1) {
+  return window['go']['main']['App']['ApplyDeviceTransfer'](arg1);
+}
+
 export function ApproveConnectionRequest(arg1) {
   return window['go']['main']['App']['ApproveConnectionRequest'](arg1);
 }
@@ -32,6 +36,10 @@ export function BlockBuddy(arg1) {
 
 export function BlockedUsers() {
   return window['go']['main']['App']['BlockedUsers']();
+}
+
+export function BuildDeviceTransfer(arg1) {
+  return window['go']['main']['App']['BuildDeviceTransfer'](arg1);
 }
 
 export function CancelIdentitySetup() {
@@ -98,6 +106,10 @@ export function DeleteGroup(arg1) {
   return window['go']['main']['App']['DeleteGroup'](arg1);
 }
 
+export function ExportDeviceTransfer(arg1, arg2) {
+  return window['go']['main']['App']['ExportDeviceTransfer'](arg1, arg2);
+}
+
 export function FindUser(arg1) {
   return window['go']['main']['App']['FindUser'](arg1);
 }
@@ -156,6 +168,10 @@ export function GetServerSettings() {
 
 export function Groups() {
   return window['go']['main']['App']['Groups']();
+}
+
+export function ImportDeviceTransfer(arg1) {
+  return window['go']['main']['App']['ImportDeviceTransfer'](arg1);
 }
 
 export function InviteToRoom(arg1, arg2) {
@@ -336,6 +352,10 @@ export function SignedOn() {
 
 export function ToggleMaximiseWindow() {
   return window['go']['main']['App']['ToggleMaximiseWindow']();
+}
+
+export function TransferTargets() {
+  return window['go']['main']['App']['TransferTargets']();
 }
 
 export function UnblockBuddy(arg1) {

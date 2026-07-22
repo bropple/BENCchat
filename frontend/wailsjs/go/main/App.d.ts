@@ -8,6 +8,8 @@ export function AcceptRoomInvite(arg1:string):Promise<string>;
 
 export function AddBuddy(arg1:string,arg2:string):Promise<string>;
 
+export function ApplyDeviceTransfer(arg1:string):Promise<void>;
+
 export function ApproveConnectionRequest(arg1:string):Promise<string>;
 
 export function AutoSignIn():Promise<void>;
@@ -19,6 +21,8 @@ export function BeginRecoveryKeyRotation(arg1:string):Promise<main.RecoveryKeyIn
 export function BlockBuddy(arg1:string):Promise<string>;
 
 export function BlockedUsers():Promise<Array<string>>;
+
+export function BuildDeviceTransfer(arg1:string):Promise<string>;
 
 export function CancelIdentitySetup():Promise<void>;
 
@@ -52,6 +56,8 @@ export function DeclineRoomInvite(arg1:string):Promise<void>;
 
 export function DeleteGroup(arg1:string):Promise<string>;
 
+export function ExportDeviceTransfer(arg1:string,arg2:string):Promise<string>;
+
 export function FindUser(arg1:string):Promise<string>;
 
 export function ForgetRoom(arg1:string):Promise<void>;
@@ -81,6 +87,8 @@ export function GetSelf():Promise<state.Self>;
 export function GetServerSettings():Promise<main.ServerSettings>;
 
 export function Groups():Promise<Array<client.GroupInfo>>;
+
+export function ImportDeviceTransfer(arg1:string):Promise<string>;
 
 export function InviteToRoom(arg1:string,arg2:string):Promise<string>;
 
@@ -171,6 +179,8 @@ export function SignOff():Promise<void>;
 export function SignedOn():Promise<boolean>;
 
 export function ToggleMaximiseWindow():Promise<void>;
+
+export function TransferTargets():Promise<Array<main.TransferTarget>>;
 
 export function UnblockBuddy(arg1:string):Promise<string>;
 

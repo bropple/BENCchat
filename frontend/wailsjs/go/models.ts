@@ -222,6 +222,7 @@ export namespace main {
 	    readable: boolean;
 	    nonReaders: string[];
 	    members: string[];
+	    owner: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new RoomSecurity(source);
@@ -233,6 +234,7 @@ export namespace main {
 	        this.readable = source["readable"];
 	        this.nonReaders = source["nonReaders"];
 	        this.members = source["members"];
+	        this.owner = source["owner"];
 	    }
 	}
 	export class ServerSettings {
@@ -257,6 +259,20 @@ export namespace main {
 	        this.lastScreenName = source["lastScreenName"];
 	        this.remembered = source["remembered"];
 	        this.build = source["build"];
+	    }
+	}
+	export class TransferTarget {
+	    id: string;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TransferTarget(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
 	    }
 	}
 	export class Verification {
@@ -370,6 +386,8 @@ export namespace state {
 	    autoResponse?: boolean;
 	    encrypted?: boolean;
 	    senderVerified?: boolean;
+	    signed?: boolean;
+	    transferred?: boolean;
 	    forged?: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -388,6 +406,8 @@ export namespace state {
 	        this.autoResponse = source["autoResponse"];
 	        this.encrypted = source["encrypted"];
 	        this.senderVerified = source["senderVerified"];
+	        this.signed = source["signed"];
+	        this.transferred = source["transferred"];
 	        this.forged = source["forged"];
 	    }
 	
