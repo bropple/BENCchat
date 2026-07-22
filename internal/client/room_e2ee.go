@@ -3,7 +3,6 @@ package client
 import (
 	"crypto/ed25519"
 	"errors"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -67,7 +66,25 @@ type roomCrypto struct {
 	rooms     map[string]*roomKeys // by room cookie
 	onInvite  roomInviteHandler
 	onCatchup catchupHandler
+	// pendingRosters holds rosters that arrived before their author's signing
+	// keys did, so they can be re-checked when the keys land. Discarding them
+	// instead — the old behaviour — silently lost any roster delivered as an
+	// offline message at sign-on, and a removal is exactly the roster most
+	// likely to arrive that way. Bounded; see maxPendingRosters.
+	pendingRosters []pendingRoster
 }
+
+// pendingRoster is one stashed roster body, kept exactly as it arrived so the
+// retry verifies the same bytes the sender signed.
+type pendingRoster struct {
+	sender string
+	body   string
+}
+
+// maxPendingRosters bounds the stash. Rosters are rare and small, and a peer's
+// keys either arrive within one directory round trip or not at all, so anything
+// beyond a handful of authors' worth is someone flooding us.
+const maxPendingRosters = 32
 
 func (rc *roomCrypto) get(cookie string) *roomKeys {
 	rc.mu.Lock()
@@ -424,6 +441,9 @@ func (c *Client) learnPeerSigningKeys(screenName string, keys []ed25519.PublicKe
 	c.e2eeMu.Unlock()
 	// A message we couldn't attribute before may be attributable now.
 	c.reverifyRoomMessages(screenName)
+	// And a roster we couldn't check may check out now. Same event, same
+	// reasoning — the roster was stashed, not judged.
+	c.retryPendingRosters(screenName)
 }
 
 // PeerSigningKeys returns the signing keys we hold for a peer.
@@ -878,6 +898,20 @@ func (c *Client) MarkChainStale(cookie string) {
 	c.roomCrypto.mu.Unlock()
 }
 
+// RoomChainStale reports whether the outbound chain is due for replacement, so
+// the mark can be PERSISTED. Rotation is lazy, and between a removal and the
+// next send this mark is the only record of it — a restart that lost it resumed
+// sealing on the chain the removed member still holds.
+func (c *Client) RoomChainStale(cookie string) bool {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return false
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	return rk.staleChain
+}
+
 // LearnChainView installs a sender's chain so their messages can be read.
 //
 // A view for a chain we already hold is replaced only when the offer reaches
@@ -1088,8 +1122,20 @@ func (c *Client) RestoreChainState(cookie, out string, views map[string]string, 
 			c.log.Warn("could not restore a room chain view", "room", cookie, "chain", id, "err", err)
 			continue
 		}
-		if have, ok := rk.views[id]; ok && have.Index <= v.Index {
-			continue
+		if have, ok := rk.views[id]; ok {
+			if have.Index <= v.Index {
+				continue
+			}
+			// Same continuity rule as LearnChainView, and for the same reason.
+			// Disk used to be trustworthy so restore skipped it; the device
+			// transfer feature makes the room file an input another machine
+			// wrote, and "lower index wins" alone would let a crafted file
+			// replace a chain we hold with fabricated state under its ID.
+			if !v.Continues(have) {
+				c.log.Warn("refusing a restored chain view that is not continuous with the one we hold",
+					"room", cookie, "chain", id, "offered_index", v.Index, "held_index", have.Index)
+				continue
+			}
 		}
 		rk.views[id] = v
 	}
@@ -1571,26 +1617,31 @@ func (c *Client) VerifiedRoster(sender, body string) (e2ee.Roster, bool) {
 //
 // Delivering to somebody twice would be harmless — a roster is a complete list
 // at an epoch, not a delta, so applying one is idempotent.
-func (c *Client) SendRoster(r e2ee.Roster, to []string) error {
+//
+// Failures are reported PER RECIPIENT, because the caller's next move differs
+// per recipient: a member the roster reached is fine, and one it did not keeps
+// broadcasting on whatever chains they already hold — which after a removal
+// means chains the removed member still reads. Collapsing that into one error
+// made every partial failure read as a total one, and the app then told the
+// user to re-invite people who had received the roster perfectly well.
+func (c *Client) SendRoster(r e2ee.Roster, to []string) (failed []string, err error) {
 	body, err := c.SignRosterBody(r)
 	if err != nil {
-		return err
+		// Nothing was sent to anybody, and the caller must know that is the
+		// scale of it — everyone but us is un-told.
+		return nil, err
 	}
 	self := state.NormalizeScreenName(c.store.Self().ScreenName)
-	var failed []string
 	for _, sn := range to {
 		if state.NormalizeScreenName(sn) == self {
 			continue
 		}
-		if err := c.sendProtocolMessage(sn, body); err != nil {
-			c.log.Debug("could not deliver a roster", "peer", sn, "err", err)
+		if serr := c.sendProtocolMessage(sn, body); serr != nil {
+			c.log.Debug("could not deliver a roster", "peer", sn, "err", serr)
 			failed = append(failed, sn)
 		}
 	}
-	if len(failed) > 0 {
-		return fmt.Errorf("client: could not reach %s", strings.Join(failed, ", "))
-	}
-	return nil
+	return failed, nil
 }
 
 // handleRoster verifies an inbound roster and hands it up.
@@ -1615,8 +1666,11 @@ func (c *Client) handleRoster(sender, body string) {
 	}
 	keys := c.PeerSigningKeys(r.Author)
 	if len(keys) == 0 {
-		// Not a verdict — we simply cannot check it yet. Fetch, and let the next
-		// copy land rather than acting on a membership claim we could not verify.
+		// Not a verdict — we simply cannot check it yet. Stash the exact bytes
+		// and fetch: "let the next copy land" was the old plan, and there is no
+		// next copy for a roster delivered as an offline message, which is how
+		// every removal reaches a member who was away.
+		c.stashPendingRoster(sender, body)
 		go c.RefreshPeerKeys(r.Author)
 		return
 	}
@@ -1625,10 +1679,15 @@ func (c *Client) handleRoster(sender, body string) {
 		return
 	}
 
+	// The lookup covers rooms we are NOT currently connected to, deliberately.
+	// Joined is false for every room at sign-on, which is exactly when an
+	// offline-delivered removal arrives — and nothing re-sends a roster when a
+	// member rejoins, so "apply it on join instead" is a copy that never comes.
+	// Applying to a known room updates the persisted membership directly.
 	cookie, ok := c.roomCookieByName(r.Room)
 	if !ok {
-		// A roster for a room we are not in. Nothing to apply it to, and nothing
-		// worth remembering: joining later hands us a current one with the invite.
+		// A room we hold no record of at all. Nothing to apply it to; if we are
+		// ever invited, the invite carries a current roster.
 		return
 	}
 
@@ -1640,13 +1699,65 @@ func (c *Client) handleRoster(sender, body string) {
 	}
 }
 
-// roomCookieByName finds a joined room by name.
-func (c *Client) roomCookieByName(name string) (string, bool) {
-	want := state.NormalizeScreenName(name)
-	for _, r := range c.store.Rooms() {
-		if state.NormalizeScreenName(r.Name) == want && r.Joined {
-			return r.Cookie, true
+// stashPendingRoster keeps a roster whose author's keys have not arrived, for
+// retryPendingRosters. Bounded by dropping the oldest: a genuine backlog is a
+// handful of rosters, and past the cap somebody is feeding us junk.
+func (c *Client) stashPendingRoster(sender, body string) {
+	c.roomCrypto.mu.Lock()
+	if len(c.roomCrypto.pendingRosters) >= maxPendingRosters {
+		c.roomCrypto.pendingRosters = c.roomCrypto.pendingRosters[1:]
+	}
+	c.roomCrypto.pendingRosters = append(c.roomCrypto.pendingRosters, pendingRoster{sender: sender, body: body})
+	c.roomCrypto.mu.Unlock()
+}
+
+// retryPendingRosters re-runs stashed rosters from one author, now that their
+// keys have arrived. Re-entry through handleRoster is safe: keys are only ever
+// recorded non-empty, so the retry cannot stash the same roster again.
+func (c *Client) retryPendingRosters(author string) {
+	want := state.NormalizeScreenName(author)
+	c.roomCrypto.mu.Lock()
+	var mine, rest []pendingRoster
+	for _, p := range c.roomCrypto.pendingRosters {
+		if state.NormalizeScreenName(p.sender) == want {
+			mine = append(mine, p)
+		} else {
+			rest = append(rest, p)
 		}
 	}
-	return "", false
+	c.roomCrypto.pendingRosters = rest
+	c.roomCrypto.mu.Unlock()
+	for _, p := range mine {
+		c.handleRoster(p.sender, p.body)
+	}
+}
+
+// roomCookieByName finds a known room by name — joined or not, preferring a
+// joined one.
+//
+// The comparison is the room-name rule, not the screen-name one: case folded,
+// outer whitespace trimmed, interior spaces KEPT. NormalizeScreenName strips
+// interior spaces, which made "Team Chat" and "teamchat" the same room here
+// while the roster's signature covers the exact string — so a roster signed for
+// one room could be steered at a differently-named other.
+func (c *Client) roomCookieByName(name string) (string, bool) {
+	var cookie string
+	var found bool
+	for _, r := range c.store.Rooms() {
+		if !sameRoomName(r.Name, name) {
+			continue
+		}
+		if r.Joined {
+			return r.Cookie, true
+		}
+		if !found {
+			cookie, found = r.Cookie, true
+		}
+	}
+	return cookie, found
+}
+
+// sameRoomName is the one rule for matching a signed room name to a room.
+func sameRoomName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }

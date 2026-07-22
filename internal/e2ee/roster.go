@@ -35,13 +35,22 @@ import (
 // RosterPrefix marks a signed roster. ESC-prefixed base64 like every other
 // in-band room payload, so the server's HTML tokenizer and its "^//roll" match
 // cannot mistake it for markup or a command.
-const RosterPrefix = "\x1bBENCO-ROSTER:v1:"
+const RosterPrefix = "\x1bBENCO-ROSTER:v2:"
+
+// legacyRosterPrefix is v1, which could not state who a roster REMOVED — a
+// recipient inferred that from its own member list, and a list that never named
+// the removed person produced a removal nobody rotated for. Still recognized by
+// IsRoster so a stray v1 body is intercepted as protocol traffic rather than
+// rendered as chat, but DecodeRoster refuses it: acting on a v1 roster would
+// reopen exactly the gap v2 closes.
+const legacyRosterPrefix = "\x1bBENCO-ROSTER:v1:"
 
 // rosterDomain separates a roster signature from every other thing a device
-// signing key signs. Length-prefixed fields throughout, for the reason recorded
-// in roomsign.go: a delimiter only delimits if it cannot occur in what it
+// signing key signs — including a v1 roster, whose signature must not verify as
+// a v2 one. Length-prefixed fields throughout, for the reason recorded in
+// roomsign.go: a delimiter only delimits if it cannot occur in what it
 // separates, and nothing enforces that for a room name or a screen name.
-const rosterDomain = "BENCO-ROSTER-v1"
+const rosterDomain = "BENCO-ROSTER-v2"
 
 // maxRosterMembers bounds a roster. Generous against any plausible room, and
 // present so a malformed length cannot make us allocate without limit.
@@ -62,6 +71,22 @@ type Roster struct {
 	// a removal expressible at all: a delta of "remove X" is indistinguishable
 	// from a delta somebody dropped.
 	Members []string
+	// Removed is everyone the owner has taken out of the room, by name, and it
+	// is the statement a recipient ROTATES on. Only meaningful when the author
+	// is the owner; anybody else's is ignored.
+	//
+	// It exists because omission cannot carry the message. Members replaces the
+	// recipient's list, but a recipient who never learned somebody existed —
+	// because the roster announcing them failed to arrive — sees no shrink when
+	// they are removed, and that recipient may hold exactly the chains the
+	// removed person can read. Naming the removed makes the trigger part of the
+	// signed statement instead of a diff against whatever each recipient
+	// happened to know.
+	//
+	// The full tombstone set, not a delta, for the same reason Members is: it
+	// makes applying one idempotent, and a member who missed the removal roster
+	// itself still learns of it from any later one.
+	Removed []string
 	// Owner is the room's owner, and it is signed like everything else. A
 	// recipient pins it the first time it sees the room and requires every later
 	// roster to name the same person — which makes handing ownership on an act
@@ -89,19 +114,28 @@ func rosterSigningContext(r Roster) []byte {
 	binary.BigEndian.PutUint64(epoch[:], r.Epoch)
 	out = append(out, epoch[:]...)
 
+	out = appendNameList(out, r.Members)
+	out = appendNameList(out, r.Removed)
+	return out
+}
+
+// appendNameList appends a counted, length-prefixed list of names. The count is
+// always present — even for an empty list — so the Members and Removed lists
+// can never be misread as one another's tail.
+func appendNameList(out []byte, names []string) []byte {
 	var count [4]byte
-	binary.BigEndian.PutUint32(count[:], uint32(len(r.Members)))
+	binary.BigEndian.PutUint32(count[:], uint32(len(names)))
 	out = append(out, count[:]...)
-	for _, m := range r.Members {
-		out = appendLenPrefixed(out, m)
+	for _, n := range names {
+		out = appendLenPrefixed(out, n)
 	}
 	return out
 }
 
 // SignRoster produces a signed roster ready to send.
 func SignRoster(r Roster, kp SigningKeyPair) (Roster, error) {
-	if len(r.Members) > maxRosterMembers {
-		return Roster{}, fmt.Errorf("e2ee: roster has %d members, limit is %d", len(r.Members), maxRosterMembers)
+	if err := checkRosterBounds(r); err != nil {
+		return Roster{}, err
 	}
 	r.SignerID = SignerID(kp.Public)
 	r.Signature = ed25519.Sign(kp.Private, rosterSigningContext(r))
@@ -133,14 +167,28 @@ func VerifyRoster(r Roster, authorKeys []ed25519.PublicKey) error {
 	return ErrRosterSignature
 }
 
+// checkRosterBounds refuses a roster either list of which is implausibly large,
+// so a malformed count can never make us allocate — or sign — without limit.
+func checkRosterBounds(r Roster) error {
+	if len(r.Members) > maxRosterMembers {
+		return fmt.Errorf("e2ee: roster has %d members, limit is %d", len(r.Members), maxRosterMembers)
+	}
+	if len(r.Removed) > maxRosterMembers {
+		return fmt.Errorf("e2ee: roster removes %d names, limit is %d", len(r.Removed), maxRosterMembers)
+	}
+	return nil
+}
+
 // IsRoster reports whether a body is a signed roster. Machine-to-machine, and
 // must never be shown as chat text.
-func IsRoster(body string) bool { return strings.HasPrefix(body, RosterPrefix) }
+func IsRoster(body string) bool {
+	return strings.HasPrefix(body, RosterPrefix) || strings.HasPrefix(body, legacyRosterPrefix)
+}
 
 // EncodeRoster renders a roster for the wire.
 func EncodeRoster(r Roster) (string, error) {
-	if len(r.Members) > maxRosterMembers {
-		return "", fmt.Errorf("e2ee: roster has %d members, limit is %d", len(r.Members), maxRosterMembers)
+	if err := checkRosterBounds(r); err != nil {
+		return "", err
 	}
 	buf := make([]byte, 0, 128)
 	buf = appendLenPrefixed(buf, r.Room)
@@ -152,12 +200,8 @@ func EncodeRoster(r Roster) (string, error) {
 	binary.BigEndian.PutUint64(epoch[:], r.Epoch)
 	buf = append(buf, epoch[:]...)
 
-	var count [4]byte
-	binary.BigEndian.PutUint32(count[:], uint32(len(r.Members)))
-	buf = append(buf, count[:]...)
-	for _, m := range r.Members {
-		buf = appendLenPrefixed(buf, m)
-	}
+	buf = appendNameList(buf, r.Members)
+	buf = appendNameList(buf, r.Removed)
 	buf = appendLenPrefixed(buf, string(r.Signature))
 	return RosterPrefix + base64.StdEncoding.EncodeToString(buf), nil
 }
@@ -165,7 +209,10 @@ func EncodeRoster(r Roster) (string, error) {
 // DecodeRoster parses one.
 func DecodeRoster(body string) (Roster, error) {
 	var r Roster
-	if !IsRoster(body) {
+	if strings.HasPrefix(body, legacyRosterPrefix) {
+		return r, errors.New("e2ee: v1 roster; it cannot state removals and is no longer accepted")
+	}
+	if !strings.HasPrefix(body, RosterPrefix) {
 		return r, errors.New("e2ee: not a roster")
 	}
 	raw, err := base64.StdEncoding.DecodeString(body[len(RosterPrefix):])
@@ -199,21 +246,36 @@ func DecodeRoster(body string) (Roster, error) {
 	if r.SignerID, ok = take(); !ok {
 		return Roster{}, errors.New("e2ee: truncated roster")
 	}
-	if len(raw) < 12 {
+	if len(raw) < 8 {
 		return Roster{}, errors.New("e2ee: truncated roster")
 	}
 	r.Epoch = binary.BigEndian.Uint64(raw[:8])
-	count := binary.BigEndian.Uint32(raw[8:12])
-	raw = raw[12:]
-	if count > maxRosterMembers {
-		return Roster{}, fmt.Errorf("e2ee: roster claims %d members, limit is %d", count, maxRosterMembers)
-	}
-	for i := uint32(0); i < count; i++ {
-		m, got := take()
-		if !got {
-			return Roster{}, errors.New("e2ee: truncated roster members")
+	raw = raw[8:]
+
+	takeList := func(what string) ([]string, error) {
+		if len(raw) < 4 {
+			return nil, fmt.Errorf("e2ee: truncated roster %s", what)
 		}
-		r.Members = append(r.Members, m)
+		count := binary.BigEndian.Uint32(raw[:4])
+		raw = raw[4:]
+		if count > maxRosterMembers {
+			return nil, fmt.Errorf("e2ee: roster claims %d %s, limit is %d", count, what, maxRosterMembers)
+		}
+		var names []string
+		for i := uint32(0); i < count; i++ {
+			n, got := take()
+			if !got {
+				return nil, fmt.Errorf("e2ee: truncated roster %s", what)
+			}
+			names = append(names, n)
+		}
+		return names, nil
+	}
+	if r.Members, err = takeList("members"); err != nil {
+		return Roster{}, err
+	}
+	if r.Removed, err = takeList("removals"); err != nil {
+		return Roster{}, err
 	}
 	sig, got := take()
 	if !got {

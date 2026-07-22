@@ -55,6 +55,12 @@ type Room struct {
 	// send, and the export path writes the chain whether or not it was shared.
 	// A reformed room hit exactly that and could never be sent to again.
 	Shared bool `json:"shared,omitempty"`
+	// Stale records that Out must be replaced before anything is sealed under
+	// it, because somebody who holds it was removed. Rotation is lazy — the new
+	// chain is minted at the next send — so between the removal and that send
+	// this mark is the ONLY record of it, and a restart that dropped it would
+	// resume sealing on the chain the removed member still reads.
+	Stale bool `json:"stale,omitempty"`
 	// Views are the sender chains we can read, by chain ID. Each is stored at
 	// the EARLIEST position we are entitled to, which is what makes scrollback
 	// work; winding one forward is a deliberate act, not something a save does.

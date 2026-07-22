@@ -1263,3 +1263,216 @@ func TestARosterMustBeSignedByWhoeverSentIt(t *testing.T) {
 		t.Error("the sender/author check does not normalize screen names")
 	}
 }
+
+// signedRosterBody signs a roster as alice and teaches the recipient her keys.
+func signedRosterBody(t *testing.T, recipient *Client, r e2ee.Roster) string {
+	t.Helper()
+	alice, _ := newTestClient(t)
+	kp, err := e2ee.GenerateSigningKey()
+	if err != nil {
+		t.Fatalf("GenerateSigningKey: %v", err)
+	}
+	alice.SetSigningKey(kp, true)
+	body, err := alice.SignRosterBody(r)
+	if err != nil {
+		t.Fatalf("SignRosterBody: %v", err)
+	}
+	recipient.learnPeerSigningKeys(r.Author, []ed25519.PublicKey{kp.Public})
+	return body
+}
+
+// TestRosterForAKnownUnjoinedRoomIsApplied is the offline-removal path.
+//
+// Joined is false for EVERY room at sign-on, and nothing re-sends a roster when
+// a member rejoins a room they were already in — so a removal delivered as an
+// offline message used to be discarded on the "not joined" branch while the
+// pre-removal member list came faithfully back from disk. A roster for a room
+// we hold any record of must reach the app layer, joined or not.
+func TestRosterForAKnownUnjoinedRoomIsApplied(t *testing.T) {
+	c, store := newTestClient(t)
+	store.UpsertRoom("4-0-project", "project")
+	// Known from a previous session; not connected right now.
+	store.SetRoomJoined("4-0-project", false)
+
+	var gotCookie string
+	c.SetRosterHandler(func(cookie string, r e2ee.Roster) { gotCookie = cookie })
+
+	body := signedRosterBody(t, c, e2ee.Roster{
+		Room: "project", Epoch: 2, Members: []string{"alice", "bob"},
+		Removed: []string{"dave"}, Owner: "alice", Author: "alice",
+	})
+	c.handleRoster("alice", body)
+
+	if gotCookie != "4-0-project" {
+		t.Fatalf("handler got cookie %q, want the not-joined room — an offline removal was dropped", gotCookie)
+	}
+
+	// A room we hold NO record of stays undeliverable: there is nothing to
+	// apply it to, and an eventual invite carries a current roster.
+	gotCookie = ""
+	c.handleRoster("alice", signedRosterBody(t, c, e2ee.Roster{
+		Room: "never-heard-of-it", Epoch: 2, Members: []string{"alice"},
+		Owner: "alice", Author: "alice",
+	}))
+	if gotCookie != "" {
+		t.Errorf("a roster for an unknown room was delivered to %q", gotCookie)
+	}
+}
+
+// TestRosterHeldUntilTheAuthorsKeysArrive: "we cannot check it yet" must stash,
+// not discard. A roster delivered as an offline message has no second copy
+// coming, and it is exactly the delivery every removal takes to a member who
+// was away.
+func TestRosterHeldUntilTheAuthorsKeysArrive(t *testing.T) {
+	c, store := newTestClient(t)
+	store.UpsertRoom("4-0-project", "project")
+	store.SetRoomJoined("4-0-project", true)
+
+	var delivered []e2ee.Roster
+	c.SetRosterHandler(func(_ string, r e2ee.Roster) { delivered = append(delivered, r) })
+
+	alice, _ := newTestClient(t)
+	kp, _ := e2ee.GenerateSigningKey()
+	alice.SetSigningKey(kp, true)
+	body, err := alice.SignRosterBody(e2ee.Roster{
+		Room: "project", Epoch: 3, Members: []string{"alice", "bob"},
+		Removed: []string{"dave"}, Owner: "alice", Author: "alice",
+	})
+	if err != nil {
+		t.Fatalf("SignRosterBody: %v", err)
+	}
+
+	// Arrives before we hold alice's keys: held, not judged.
+	c.handleRoster("alice", body)
+	if len(delivered) != 0 {
+		t.Fatal("an uncheckable roster was delivered anyway")
+	}
+
+	// The keys land — the stashed roster must now go through, once.
+	c.learnPeerSigningKeys("alice", []ed25519.PublicKey{kp.Public})
+	if len(delivered) != 1 {
+		t.Fatalf("delivered %d rosters after the keys arrived, want 1", len(delivered))
+	}
+	if len(delivered[0].Removed) != 1 || delivered[0].Removed[0] != "dave" {
+		t.Errorf("the recovered roster lost its removal: %+v", delivered[0])
+	}
+
+	// And it was consumed: the same keys arriving again must not replay it.
+	c.learnPeerSigningKeys("alice", []ed25519.PublicKey{kp.Public})
+	if len(delivered) != 1 {
+		t.Errorf("a stashed roster was applied %d times", len(delivered))
+	}
+}
+
+// TestPendingRosterStashIsBounded: the stash takes unauthenticated input, so it
+// must not grow with it.
+func TestPendingRosterStashIsBounded(t *testing.T) {
+	c, _ := newTestClient(t)
+	for i := 0; i < maxPendingRosters*3; i++ {
+		c.stashPendingRoster("someone", "body")
+	}
+	c.roomCrypto.mu.Lock()
+	n := len(c.roomCrypto.pendingRosters)
+	c.roomCrypto.mu.Unlock()
+	if n > maxPendingRosters {
+		t.Fatalf("stash grew to %d, cap is %d", n, maxPendingRosters)
+	}
+}
+
+// TestRosterRoomNameMatchKeepsInteriorSpaces: the lookup used the SCREEN NAME
+// normalizer, which strips interior spaces — so a roster signed for "team chat"
+// applied to the room "teamchat", a wider target set than the exact string the
+// signature covers. Case may fold (the join path already matches names
+// case-insensitively); spaces may not.
+func TestRosterRoomNameMatchKeepsInteriorSpaces(t *testing.T) {
+	c, store := newTestClient(t)
+	store.UpsertRoom("4-0-teamchat", "teamchat")
+	store.SetRoomJoined("4-0-teamchat", true)
+
+	var gotCookie string
+	c.SetRosterHandler(func(cookie string, r e2ee.Roster) { gotCookie = cookie })
+
+	// Signed for a DIFFERENT room whose name space-strips to ours.
+	c.handleRoster("alice", signedRosterBody(t, c, e2ee.Roster{
+		Room: "team chat", Epoch: 1, Members: []string{"alice"},
+		Owner: "alice", Author: "alice",
+	}))
+	if gotCookie != "" {
+		t.Fatalf("a roster for %q was applied to %q", "team chat", "teamchat")
+	}
+
+	// Case alone still matches, consistent with how joining resolves names.
+	c.handleRoster("alice", signedRosterBody(t, c, e2ee.Roster{
+		Room: "TeamChat", Epoch: 1, Members: []string{"alice"},
+		Owner: "alice", Author: "alice",
+	}))
+	if gotCookie != "4-0-teamchat" {
+		t.Errorf("a case-variant of the room's own name did not match (got %q)", gotCookie)
+	}
+}
+
+// TestSendRosterReportsPerRecipientFailures: the caller's next move differs per
+// recipient, so the answer has to name exactly who was not reached. One
+// collapsed error made every partial failure read as a total one, and the user
+// was told to re-invite members who had received the roster fine.
+func TestSendRosterReportsPerRecipientFailures(t *testing.T) {
+	c, store := newTestClient(t)
+	store.SetSelf("alice")
+	kp, _ := e2ee.GenerateSigningKey()
+	c.SetSigningKey(kp, true)
+
+	r := e2ee.Roster{Room: "project", Epoch: 1, Members: []string{"alice", "bob", "carol"},
+		Owner: "alice", Author: "alice"}
+	// No session, so every delivery fails — each recipient individually, never
+	// as one undifferentiated error.
+	failed, err := c.SendRoster(r, []string{"bob", "carol", "alice"})
+	if err != nil {
+		t.Fatalf("per-recipient failures came back as a signing error: %v", err)
+	}
+	if strings.Join(failed, ",") != "bob,carol" {
+		t.Errorf("failed = %v, want exactly bob,carol (self is skipped, not failed)", failed)
+	}
+
+	// No signing key IS a total failure: nothing was sent to anybody.
+	c.SetSigningKey(e2ee.SigningKeyPair{}, false)
+	if _, err := c.SendRoster(r, []string{"bob"}); err == nil {
+		t.Error("an unsignable roster reported success")
+	}
+}
+
+// TestRestoreRefusesADiscontinuousView: the room file is no longer a trusted
+// input — device transfer lets another machine write it — so restore honours
+// the same continuity rule as LearnChainView. "Lower index wins" alone would
+// let a crafted file replace a chain we hold with fabricated state under its
+// ID, permanently blinding us to its real owner's messages.
+func TestRestoreRefusesADiscontinuousView(t *testing.T) {
+	c, _ := newTestClient(t)
+	chain, err := e2ee.NewChain()
+	if err != nil {
+		t.Fatalf("NewChain: %v", err)
+	}
+	early := chain.View() // index 0, the genuine root
+	for i := 0; i < 5; i++ {
+		chain.Next()
+	}
+	held := chain.View() // index 5, what we hold
+	c.LearnChainView("4-0-r", held)
+
+	// A forged view: a different chain's state re-labelled with this chain's ID
+	// at a lower index. Exactly what an attacker-written room file would carry.
+	other, _ := e2ee.NewChain()
+	otherEnc := e2ee.EncodeChainView(other.View())
+	forged := held.ID + otherEnc[strings.Index(otherEnc, ":"):]
+
+	c.RestoreChainState("4-0-r", "", map[string]string{held.ID: forged}, nil, 0, false)
+	if got := c.ChainViews("4-0-r")[held.ID]; got.Index != 5 {
+		t.Fatalf("a discontinuous view replaced ours (index %d) — its owner's messages are lost for good", got.Index)
+	}
+
+	// The genuine earlier view IS continuous, and restoring it must still work:
+	// that is how scrollback comes back after a restart.
+	c.RestoreChainState("4-0-r", "", map[string]string{held.ID: e2ee.EncodeChainView(early)}, nil, 0, false)
+	if got := c.ChainViews("4-0-r")[held.ID]; got.Index != 0 {
+		t.Errorf("the genuine earlier view was refused (index %d, want 0)", got.Index)
+	}
+}

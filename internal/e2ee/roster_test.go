@@ -13,6 +13,7 @@ func TestRosterRoundTrips(t *testing.T) {
 	in, err := SignRoster(Roster{
 		Room: "a room: with punctuation", Epoch: 7,
 		Members: []string{"alice", "bob, jr", "carol"},
+		Removed: []string{"dave"},
 		Author:  "alice",
 	}, kp)
 	if err != nil {
@@ -36,6 +37,9 @@ func TestRosterRoundTrips(t *testing.T) {
 	if strings.Join(got.Members, "|") != strings.Join(in.Members, "|") {
 		t.Errorf("members mangled: %v", got.Members)
 	}
+	if strings.Join(got.Removed, "|") != strings.Join(in.Removed, "|") {
+		t.Errorf("removed set mangled: %v", got.Removed)
+	}
 	if err := VerifyRoster(got, []ed25519.PublicKey{kp.Public}); err != nil {
 		t.Errorf("a round-tripped roster did not verify: %v", err)
 	}
@@ -46,7 +50,8 @@ func TestRosterRoundTrips(t *testing.T) {
 func TestRosterSignatureCoversEveryField(t *testing.T) {
 	kp := mustSigner(t)
 	base, _ := SignRoster(Roster{
-		Room: "project", Epoch: 3, Members: []string{"alice", "bob"}, Author: "alice",
+		Room: "project", Epoch: 3, Members: []string{"alice", "bob"},
+		Removed: []string{"dave"}, Author: "alice",
 	}, kp)
 
 	tamper := map[string]func(Roster) Roster{
@@ -56,6 +61,11 @@ func TestRosterSignatureCoversEveryField(t *testing.T) {
 		"a member":        func(r Roster) Roster { r.Members = []string{"alice", "mallory"}; return r },
 		"member count":    func(r Roster) Roster { r.Members = []string{"alice"}; return r },
 		"member ordering": func(r Roster) Roster { r.Members = []string{"bob", "alice"}; return r },
+		// The removed set is what recipients ROTATE on, so an attacker's best
+		// edits are dropping a removal or inventing one.
+		"a removal dropped": func(r Roster) Roster { r.Removed = nil; return r },
+		"a removal added":   func(r Roster) Roster { r.Removed = []string{"dave", "bob"}; return r },
+		"a removal swapped": func(r Roster) Roster { r.Removed = []string{"carol"}; return r },
 	}
 	for name, edit := range tamper {
 		if err := VerifyRoster(edit(base), []ed25519.PublicKey{kp.Public}); !errors.Is(err, ErrRosterSignature) {
@@ -73,6 +83,28 @@ func TestRosterFieldsAreUnambiguous(t *testing.T) {
 	b, _ := SignRoster(Roster{Room: "a\x00b", Author: "c", Members: []string{"m"}}, kp)
 	if string(rosterSigningContext(a)) == string(rosterSigningContext(b)) {
 		t.Error("a NUL in a field shifts the boundary; length prefixes are missing")
+	}
+
+	// The two name lists must not be readable as one another's tail: a name in
+	// Members is a member, and the same name in Removed is the opposite claim.
+	c, _ := SignRoster(Roster{Room: "r", Members: []string{"alice", "dave"}, Author: "alice"}, kp)
+	d, _ := SignRoster(Roster{Room: "r", Members: []string{"alice"}, Removed: []string{"dave"}, Author: "alice"}, kp)
+	if string(rosterSigningContext(c)) == string(rosterSigningContext(d)) {
+		t.Error("moving a name from Members to Removed left the signing context unchanged")
+	}
+}
+
+// TestLegacyRosterIsInterceptedButRefused: a v1 roster cannot state removals,
+// so acting on one would reopen the gap the removed set closes — but it must
+// still be recognized as protocol traffic, or a stray one renders as a wall of
+// base64 in somebody's chat window.
+func TestLegacyRosterIsInterceptedButRefused(t *testing.T) {
+	legacy := legacyRosterPrefix + "AAAA"
+	if !IsRoster(legacy) {
+		t.Error("a v1 roster was not recognized as protocol traffic")
+	}
+	if _, err := DecodeRoster(legacy); err == nil {
+		t.Error("a v1 roster decoded; its contents cannot be safely acted on")
 	}
 }
 
