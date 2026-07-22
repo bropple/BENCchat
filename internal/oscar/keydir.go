@@ -2,6 +2,7 @@ package oscar
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"fmt"
 
 	"github.com/benco-holdings/benchat/internal/wire"
@@ -146,4 +147,32 @@ func DecodeKeyDirGetBackupReply(body []byte) (wire.SNAC_0xBE00_0x0009_BENCOKeyDi
 		return reply, fmt.Errorf("oscar: decode key directory get backup reply: %w", err)
 	}
 	return reply, nil
+}
+
+// DecodeKeyDirAttestChallenge parses the server's device challenge.
+func DecodeKeyDirAttestChallenge(body []byte) (wire.SNAC_0xBE00_0x000A_BENCOKeyDirAttestChallenge, error) {
+	var out wire.SNAC_0xBE00_0x000A_BENCOKeyDirAttestChallenge
+	err := wire.UnmarshalBE(&out, bytes.NewReader(body))
+	return out, err
+}
+
+// DecodeKeyDirAttestReply parses the server's verdict.
+func DecodeKeyDirAttestReply(body []byte) (wire.SNAC_0xBE00_0x000C_BENCOKeyDirAttestReply, error) {
+	var out wire.SNAC_0xBE00_0x000C_BENCOKeyDirAttestReply
+	err := wire.UnmarshalBE(&out, bytes.NewReader(body))
+	return out, err
+}
+
+// AttestDevice answers a device challenge, proving which device this session is.
+func (s *Session) AttestDevice(signPub ed25519.PublicKey, signature []byte) error {
+	_, err := s.SendReq(wire.BENCOKeyDir, wire.BENCOKeyDirAttestResponse,
+		wire.SNAC_0xBE00_0x000B_BENCOKeyDirAttestResponse{
+			Version:   wire.BENCOKeyDirVersion,
+			SignKey:   wire.BENCOKey{Alg: wire.BENCOAlgEd25519, Key: signPub},
+			Signature: signature,
+		})
+	if err != nil {
+		return fmt.Errorf("oscar: attest device: %w", err)
+	}
+	return nil
 }

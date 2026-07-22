@@ -246,3 +246,42 @@ func VerifySigned(room, message, signerID string, sig, stamp []byte, senderKeys 
 	// key but can only sign as themselves.
 	return false, ErrForgedSignature
 }
+
+// attestContext is what a device signs to prove which device it is: a domain
+// tag, the account name and the server's nonce, separated by a byte that cannot
+// occur in a screen name.
+//
+// The account is in there so a signature collected on one account cannot be
+// replayed onto another that enrols the same device key — and, more usefully, so
+// an attestation can never be mistaken for a signature over anything else this
+// key signs. Room messages use their own context for the same reason.
+func attestContext(screenName string, nonce []byte) []byte {
+	out := make([]byte, 0, len(attestDomain)+1+len(screenName)+1+len(nonce))
+	out = append(out, attestDomain...)
+	out = append(out, 0x00)
+	out = append(out, screenName...)
+	out = append(out, 0x00)
+	out = append(out, nonce...)
+	return out
+}
+
+// attestDomain separates an attestation from everything else this key signs.
+//
+// Without it the two constructions collide outright: a room signature covers
+// `room || 0x00 || message` and an attestation covered `account || 0x00 ||
+// nonce`, which are the same bytes when a room is named after an account and
+// carries the nonce as its text. Contrived to exploit, trivial to prevent, and
+// exactly what domain separation is for — a test fails if they ever line up
+// again.
+const attestDomain = "BENCO-ATTEST-v1"
+
+// SignAttestation answers a server device challenge.
+func SignAttestation(screenName string, nonce []byte, priv ed25519.PrivateKey) []byte {
+	return ed25519.Sign(priv, attestContext(screenName, nonce))
+}
+
+// VerifyAttestation checks one, for tests and for anybody reimplementing the
+// client half.
+func VerifyAttestation(screenName string, nonce []byte, pub ed25519.PublicKey, sig []byte) bool {
+	return ed25519.Verify(pub, attestContext(screenName, nonce), sig)
+}

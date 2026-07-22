@@ -5,6 +5,7 @@ import (
 
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/oscar"
+	"github.com/benco-holdings/benchat/internal/state"
 	"github.com/benco-holdings/benchat/internal/wire"
 )
 
@@ -346,6 +347,25 @@ func (c *Client) RefreshPeerKeys(screenName string) peerKeyLookup {
 // handleKeyDir dispatches an inbound key directory SNAC.
 func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 	switch frame.SubGroup {
+	case wire.BENCOKeyDirAttestChallenge:
+		c.answerAttestChallenge(body)
+
+	case wire.BENCOKeyDirAttestReply:
+		reply, err := oscar.DecodeKeyDirAttestReply(body)
+		if err != nil {
+			c.log.Warn("bad device attestation reply", "err", err)
+			return
+		}
+		if reply.Accepted == 0 {
+			// The session is not proven. The server decides what that costs —
+			// it may simply close the connection — but say so, because the
+			// alternative is a session that silently stops working.
+			c.log.Warn("the server did not accept this device's attestation")
+			c.store.Notify(state.NoticeWarn,
+				"This device couldn't prove itself to the server. If it was removed "+
+					"from your account, link it again with your recovery key.")
+		}
+
 	case wire.BENCOKeyDirQueryReply:
 		reply, err := oscar.DecodeKeyDirQueryReply(body)
 		if err != nil {
@@ -445,4 +465,39 @@ func (c *Client) learnFromManifest(sm SignedManifest) {
 	}
 	c.learnPeerKeys(sm.ScreenName, e2ee.BoxKeysOf(devices))
 	c.learnPeerSigningKeys(sm.ScreenName, e2ee.SigningKeysOf(devices))
+}
+
+// answerAttestChallenge proves which device this session is.
+//
+// The server asks because a password proves an ACCOUNT and not which of its
+// devices is talking — without this, a device removed from the manifest keeps
+// signing in with the same password and nothing on the server can tell.
+//
+// A challenge we cannot answer is left unanswered rather than answered badly.
+// There is nothing useful to send without the signing key, and an empty or
+// invented response would look like an attestation failure rather than like a
+// device that has not finished setting itself up.
+func (c *Client) answerAttestChallenge(body []byte) {
+	ch, err := oscar.DecodeKeyDirAttestChallenge(body)
+	if err != nil {
+		c.log.Warn("bad device attestation challenge", "err", err)
+		return
+	}
+	signer, ok := c.signingKey()
+	if !ok {
+		c.log.Warn("cannot answer a device challenge: no signing key on this device")
+		return
+	}
+
+	c.mu.Lock()
+	sess := c.session
+	c.mu.Unlock()
+	if sess == nil {
+		return
+	}
+
+	sig := e2ee.SignAttestation(c.store.Self().ScreenName, ch.Nonce, signer.Private)
+	if err := sess.AttestDevice(signer.Public, sig); err != nil {
+		c.log.Warn("could not answer the device challenge", "err", err)
+	}
 }

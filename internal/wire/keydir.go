@@ -301,3 +301,37 @@ type SNAC_0xBE00_0x0009_BENCOKeyDirGetBackupReply struct {
 	Salt    []byte `oscar:"len_prefix=uint16"`
 	Blob    []byte `oscar:"len_prefix=uint16"`
 }
+
+// Device attestation subgroups.
+//
+// A password proves an ACCOUNT. These prove a DEVICE: after sign-on the server
+// sends a nonce, and the session returns it signed by a device signing key from
+// the account's current manifest. Without this a device removed from the
+// manifest kept full access, because it authenticated with the same password as
+// before and the server had no way to tell it apart.
+const (
+	BENCOKeyDirAttestChallenge uint16 = 0x000A
+	BENCOKeyDirAttestResponse  uint16 = 0x000B
+	BENCOKeyDirAttestReply     uint16 = 0x000C
+)
+
+// SNAC_0xBE00_0x000A_BENCOKeyDirAttestChallenge asks this session to prove which
+// device it is.
+type SNAC_0xBE00_0x000A_BENCOKeyDirAttestChallenge struct {
+	Version uint16
+	Nonce   []byte `oscar:"len_prefix=uint16"`
+}
+
+// SNAC_0xBE00_0x000B_BENCOKeyDirAttestResponse answers one.
+type SNAC_0xBE00_0x000B_BENCOKeyDirAttestResponse struct {
+	Version   uint16
+	SignKey   BENCOKey
+	Signature []byte `oscar:"len_prefix=uint16"`
+}
+
+// SNAC_0xBE00_0x000C_BENCOKeyDirAttestReply reports the outcome.
+type SNAC_0xBE00_0x000C_BENCOKeyDirAttestReply struct {
+	Version uint16
+	// Accepted is 1 when the session is now attested.
+	Accepted uint8
+}

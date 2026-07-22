@@ -336,3 +336,42 @@ func TestRoomV1PayloadStillVerifies(t *testing.T) {
 		t.Errorf("v1 produced a send time from nowhere: %v", got.SentAt)
 	}
 }
+
+// TestAttestationRoundTrips: the client half of device attestation must agree
+// with the server's, byte for byte, or every session fails to prove itself.
+func TestAttestationRoundTrips(t *testing.T) {
+	kp := mustSigner(t)
+	nonce := []byte("a-32-byte-nonce-for-attestation!")
+
+	sig := SignAttestation("alice", nonce, kp.Private)
+	if !VerifyAttestation("alice", nonce, kp.Public, sig) {
+		t.Fatal("a freshly made attestation did not verify")
+	}
+}
+
+// TestAttestationBindsAccountAndNonce: a signature must not be liftable onto
+// another account, or replayable from an earlier session into a later one.
+func TestAttestationBindsAccountAndNonce(t *testing.T) {
+	kp := mustSigner(t)
+	nonce := []byte("a-32-byte-nonce-for-attestation!")
+	sig := SignAttestation("alice", nonce, kp.Private)
+
+	if VerifyAttestation("mallory", nonce, kp.Public, sig) {
+		t.Error("an attestation for alice verified for mallory")
+	}
+	if VerifyAttestation("alice", []byte("a-different-32-byte-nonce-here!!"), kp.Public, sig) {
+		t.Error("an attestation over one nonce verified against another")
+	}
+}
+
+// TestAttestationIsNotARoomSignature: the two contexts must not collide, or a
+// room message could be replayed as proof of device possession.
+func TestAttestationIsNotARoomSignature(t *testing.T) {
+	kp := mustSigner(t)
+	nonce := []byte("a-32-byte-nonce-for-attestation!")
+
+	roomSig := ed25519.Sign(kp.Private, signingContext("alice", string(nonce)))
+	if VerifyAttestation("alice", nonce, kp.Public, roomSig) {
+		t.Error("a room-message signature was accepted as a device attestation")
+	}
+}
