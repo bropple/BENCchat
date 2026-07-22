@@ -106,6 +106,7 @@ func (a *App) setupE2EE(screenName string) {
 	a.installManifestVerifier()
 	a.client.SetPeerKeyHandler(a.notePeerKey)
 	a.client.SetRoomInviteHandler(a.handleRoomInvite)
+	a.client.SetRoomMembersFunc(a.members.list)
 	a.client.SetCatchupHandler(a.handleCatchup)
 	a.client.SetConnectionRequestHandler(a.handleConnectionRequest)
 	a.client.SetConnectionResponseHandler(a.handleConnectionResponse)

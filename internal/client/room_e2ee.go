@@ -33,6 +33,12 @@ type roomKeys struct {
 	// out is our own outbound chain for this room, once one has been started.
 	// Every sender has their own; ours is the only one we can advance.
 	out *e2ee.Chain
+	// chainShared records that our current chain has actually been handed to the
+	// room. A chain nobody has been given seals messages nobody can read, and
+	// relying on the send path to remember to distribute first is exactly the
+	// kind of ordering that survives until somebody reorders two lines. Sealing
+	// refuses while this is false, so the mistake cannot compile away.
+	chainShared bool
 	// staleChain marks that our chain must be replaced before we send again.
 	//
 	// Set when somebody is removed. Rotation is LAZY on purpose: a chain nobody
@@ -296,7 +302,7 @@ func (c *Client) sealRoomMessage(cookie, text string) (string, bool, error) {
 	if signer, ok := c.signingKey(); ok {
 		if rk := c.roomCrypto.get(cookie); rk != nil {
 			c.roomCrypto.mu.Lock()
-			usable := rk.out != nil && !rk.staleChain
+			usable := rk.out != nil && !rk.staleChain && rk.chainShared
 			var chainEnv string
 			var chainErr error
 			if usable {
@@ -584,13 +590,13 @@ func (c *Client) sendRoomMessageReflected(cookie, text string) error {
 // It refuses to send unless that channel is actually encrypted: handing out a
 // group key in the clear would publish the room to anyone watching the wire,
 // which defeats the whole arrangement.
-func (c *Client) InviteToRoom(screenName, roomName string, key e2ee.RoomKey, members []string) error {
+func (c *Client) InviteToRoom(screenName, roomName string, chains []e2ee.ChainView, members []string) error {
 	if !c.CanEncryptTo(screenName) {
 		return errors.New("client: can't invite them privately — no encryption key for that person yet")
 	}
 	return c.sendProtocolMessage(screenName, e2ee.EncodeRoomInvite(e2ee.RoomInvite{
 		Room:    roomName,
-		Key:     key,
+		Chains:  chains,
 		Members: members,
 	}))
 }
@@ -790,11 +796,21 @@ func (c *Client) EnsureOutboundChain(cookie string) (view e2ee.ChainView, fresh 
 	}
 	rk.out = &chain
 	rk.staleChain = false
+	rk.chainShared = false // nobody has it yet; sealing stays refused until they do
 	rk.encrypted = true
 	// We can read our own chain, so scrollback of our own messages works the
 	// same way everyone else's does rather than through a special case.
 	rk.views[chain.ID] = chain.View()
 	return chain.View(), true, nil
+}
+
+// MarkChainShared records that our chain has reached the room, which is what
+// permits sealing under it.
+func (c *Client) MarkChainShared(cookie string) {
+	rk := c.roomCrypto.ensure(cookie)
+	c.roomCrypto.mu.Lock()
+	rk.chainShared = true
+	c.roomCrypto.mu.Unlock()
 }
 
 // MarkChainStale records that our outbound chain must be replaced before we send
@@ -952,6 +968,9 @@ func (c *Client) RestoreChainState(cookie, out string, views map[string]string, 
 	if out != "" {
 		if chain, err := e2ee.DecodeChain(out); err == nil {
 			rk.out = &chain
+			// A chain that reached disk had already reached the room: it is only
+			// persisted after a send, and sending requires it to be shared.
+			rk.chainShared = true
 			rk.views[chain.ID] = chain.View()
 		} else {
 			// A chain we cannot decode must not be replaced silently here: a
@@ -993,4 +1012,180 @@ func (c *Client) noteChainPosition(cookie, chainID string, index uint32) {
 		rk.seen[chainID] = index
 	}
 	c.roomCrypto.mu.Unlock()
+}
+
+// ChainBundleFor builds what a newcomer needs: every chain we can read, each
+// wound forward to where the conversation has actually got to.
+//
+// The winding is the whole point and it is why `seen` is tracked separately from
+// the views. A view says how far BACK we may read; handing that over would give
+// a newcomer our own read-back, which is precisely the history chains exist to
+// withhold. What they should get is "from the next message onward".
+func (c *Client) ChainBundleFor(cookie string) []e2ee.ChainView {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return nil
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+
+	out := make([]e2ee.ChainView, 0, len(rk.views))
+	for id, v := range rk.views {
+		if rk.out != nil && id == rk.out.ID {
+			// Our own chain: its view is already the position we are about to
+			// send from, which is exactly "now" with nothing to infer.
+			out = append(out, rk.out.View())
+			continue
+		}
+		if n, ok := rk.seen[id]; ok && n+1 > v.Index {
+			v = v.Advance(n + 1)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// SetRoomMembersFunc tells the client how to look up who is in a room.
+//
+// Membership lives in the app layer, but chain distribution has to happen on the
+// send path down here — a message sealed under a chain nobody has been given is
+// unreadable, and the only moment that is certainly before the message is just
+// before it. A callback keeps the membership model where it belongs.
+func (c *Client) SetRoomMembersFunc(fn func(cookie string) []string) {
+	c.e2eeMu.Lock()
+	c.roomMembersFn = fn
+	c.e2eeMu.Unlock()
+}
+
+func (c *Client) roomMembers(cookie string) []string {
+	c.e2eeMu.Lock()
+	fn := c.roomMembersFn
+	c.e2eeMu.Unlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(cookie)
+}
+
+// ensureRoomChainDistributed starts an outbound chain if needed and broadcasts
+// it into the room before anything is sealed under it.
+//
+// Ordering is the requirement: the broadcast must land BEFORE the first message
+// on the new chain, or every recipient sees a message naming a chain they were
+// never given. Broadcasting into the room rather than fanning out 1:1 costs one
+// message instead of one per member, and the person a rotation excluded receives
+// it like everybody else and can open nothing.
+func (c *Client) ensureRoomChainDistributed(cookie string) error {
+	view, fresh, err := c.EnsureOutboundChain(cookie)
+	if err != nil {
+		return err
+	}
+	if !fresh {
+		return nil
+	}
+
+	members := c.roomMembers(cookie)
+	self := state.NormalizeScreenName(c.store.Self().ScreenName)
+	var recipients [][32]byte
+	for _, m := range members {
+		if state.NormalizeScreenName(m) == self {
+			continue
+		}
+		keys, ok := c.PeerKeys(m)
+		if !ok {
+			// Somebody whose device keys we have never fetched cannot be sealed
+			// to. Say so rather than dropping them silently into a room they can
+			// no longer read.
+			c.log.Warn("no device keys for a room member; they will not receive the new chain",
+				"room", c.roomName(cookie), "member", m)
+			continue
+		}
+		recipients = append(recipients, keys...)
+	}
+	if len(recipients) == 0 {
+		// A room with nobody else in it. Nothing to distribute, so the chain is
+		// as shared as it can be and sealing may proceed.
+		c.MarkChainShared(cookie)
+		return nil
+	}
+
+	ourPriv, ok := c.ourPrivateKey()
+	if !ok {
+		return errors.New("client: no encryption key, so the room chain can't be shared")
+	}
+
+	c.chatMu.Lock()
+	rc := c.rooms[cookie]
+	c.chatMu.Unlock()
+	if rc == nil {
+		return errors.New("client: not in that room")
+	}
+
+	// Chunk rather than truncate: a room too big for one message is a room that
+	// needs several, and dropping the overflow would leave those members unable
+	// to read with nothing to show for it.
+	per := e2ee.MaxChainSlotsPerBroadcast()
+	for start := 0; start < len(recipients); start += per {
+		end := start + per
+		if end > len(recipients) {
+			end = len(recipients)
+		}
+		body, berr := e2ee.EncodeChainBroadcast(view, recipients[start:end], ourPriv)
+		if berr != nil {
+			return berr
+		}
+		if serr := rc.session.SendChatMessage(body); serr != nil {
+			return serr
+		}
+	}
+	c.MarkChainShared(cookie)
+	return nil
+}
+
+// ourPrivateKey returns this device's encryption private key.
+func (c *Client) ourPrivateKey() ([32]byte, bool) {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	if !c.e2eeHasKP {
+		return [32]byte{}, false
+	}
+	return c.e2eeKP.Private, true
+}
+
+// handleChainBroadcast learns a sender's chain from an in-room distribution.
+func (c *Client) handleChainBroadcast(cookie, sender, body string) {
+	senderPubs, ok := c.PeerKeys(sender)
+	if !ok {
+		// We cannot open it without knowing which key sealed it. Fetch and let
+		// the sender's next broadcast land, rather than guessing.
+		go c.RefreshPeerKeys(sender)
+		return
+	}
+	ourKeys, ok := c.ourKeyPairs()
+	if !ok {
+		return
+	}
+	view, err := e2ee.DecodeChainBroadcast(body, ourKeys, senderPubs)
+	switch {
+	case errors.Is(err, e2ee.ErrNoSlotForUs):
+		// Nothing here for us. The ordinary result of a rotation that left this
+		// account out, and not worth a warning: the room will simply stop being
+		// readable, which the message placeholders already say.
+		return
+	case err != nil:
+		c.log.Warn("could not open a room chain broadcast", "room", c.roomName(cookie), "from", sender, "err", err)
+		return
+	}
+	c.LearnChainView(cookie, view)
+	c.reverifyRoomMessages(sender)
+}
+
+// ourKeyPairs is this device's encryption keypair, as the slot opener wants it.
+func (c *Client) ourKeyPairs() ([]e2ee.KeyPair, bool) {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	if !c.e2eeHasKP {
+		return nil, false
+	}
+	return []e2ee.KeyPair{c.e2eeKP}, true
 }

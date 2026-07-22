@@ -85,6 +85,10 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
+	// roomMembersFn looks up who is in a room. Membership lives in the app layer;
+	// the send path needs it here to distribute a new chain before sealing under
+	// it. Guarded by e2eeMu.
+	roomMembersFn func(cookie string) []string
 	// keyLookupProbe, when set, stands in for the directory round trip in
 	// RefreshPeerKeys. A test hook: the difference between "answered: nothing
 	// published" and "would not answer" decides whether a send goes out in the

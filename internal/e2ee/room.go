@@ -45,6 +45,8 @@ const (
 	roomEnvelopePrefixV2 = "\x1bBENCO-ROOM:v2:"
 	roomInvitePrefix     = "\x1bBENCO-ROOMINV:v1:"
 	roomInvitePrefixV2   = "\x1bBENCO-ROOMINV:v2:"
+	// v3 carries a BUNDLE of chains instead of a shared key.
+	roomInvitePrefixV3 = "\x1bBENCO-ROOMINV:v3:"
 
 	// roomKeyIDLen is how many bytes of the key's hash identify it. Eight is
 	// ample to tell a handful of keys apart and keeps the envelope short.
@@ -230,7 +232,13 @@ func OpenRoomSigned(room, envelope string, keys map[string]RoomKey, senderKeys [
 // message.
 type RoomInvite struct {
 	Room string
-	Key  RoomKey
+	// Chains is every chain the sender can read, each already wound forward to
+	// where the conversation has got to. This is what a newcomer needs: one
+	// chain would let them read only its owner, and views as the sender holds
+	// them would grant the sender's own read-back.
+	Chains []ChainView
+	// Key is the legacy shared room key, zero on a v3 invite.
+	Key RoomKey
 	// Members is everyone the sender believes holds this key, INCLUDING the
 	// sender. It travels with the key because that is precisely what it
 	// describes — the set of people this key was given to.
@@ -254,9 +262,13 @@ func EncodeRoomInvite(inv RoomInvite) string {
 	for _, m := range inv.Members {
 		encoded = append(encoded, base64.StdEncoding.EncodeToString([]byte(m)))
 	}
-	return roomInvitePrefixV2 +
+	bundle, err := EncodeChainBundle(inv.Chains)
+	if err != nil {
+		bundle = ""
+	}
+	return roomInvitePrefixV3 +
 		base64.StdEncoding.EncodeToString([]byte(inv.Room)) + ":" +
-		EncodeRoomKey(inv.Key) + ":" +
+		bundle + ":" +
 		strings.Join(encoded, ",")
 }
 
@@ -264,7 +276,8 @@ func EncodeRoomInvite(inv RoomInvite) string {
 // machine-to-machine and must never be shown as chat text.
 func IsRoomInvite(body string) bool {
 	return strings.HasPrefix(body, roomInvitePrefix) ||
-		strings.HasPrefix(body, roomInvitePrefixV2)
+		strings.HasPrefix(body, roomInvitePrefixV2) ||
+		strings.HasPrefix(body, roomInvitePrefixV3)
 }
 
 // DecodeRoomInvite parses either version. v1 yields no Members, which callers
@@ -272,8 +285,11 @@ func IsRoomInvite(body string) bool {
 // "the room is empty".
 func DecodeRoomInvite(body string) (RoomInvite, bool) {
 	var rest string
-	v2 := strings.HasPrefix(body, roomInvitePrefixV2)
+	v3 := strings.HasPrefix(body, roomInvitePrefixV3)
+	v2 := v3 || strings.HasPrefix(body, roomInvitePrefixV2)
 	switch {
+	case v3:
+		rest = body[len(roomInvitePrefixV3):]
 	case v2:
 		rest = body[len(roomInvitePrefixV2):]
 	case strings.HasPrefix(body, roomInvitePrefix):
@@ -312,6 +328,15 @@ func DecodeRoomInvite(body string) (RoomInvite, bool) {
 		}
 	}
 
+	if v3 {
+		// The middle field is a chain bundle rather than a key. Empty is legal —
+		// a room whose members have not started chains yet.
+		chains, cerr := DecodeChainBundle(keyPart)
+		if cerr != nil {
+			return RoomInvite{}, false
+		}
+		return RoomInvite{Room: string(nameRaw), Chains: chains, Members: members}, true
+	}
 	key, err := DecodeRoomKey(keyPart)
 	if err != nil {
 		return RoomInvite{}, false

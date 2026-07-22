@@ -120,39 +120,29 @@ func TestRoomKeyRotationOnlyFromMembers(t *testing.T) {
 	a := &App{store: store, client: client.New(store, nil)}
 	store.UpsertRoom("room-1", "secret room")
 	store.SetRoomJoined("room-1", true)
+	a.client.MarkRoomEncrypted("room-1")
+	a.members.add("room-1", "alice") // alice gave us this room's chains
 
-	original, err := e2ee.GenerateRoomKey()
+	attacker, err := e2ee.NewChain()
 	if err != nil {
-		t.Fatalf("GenerateRoomKey: %v", err)
+		t.Fatalf("NewChain: %v", err)
 	}
-	a.client.SetRoomKey("room-1", original)
-	a.members.add("room-1", "alice") // alice gave us this room's key
-
-	attacker, err := e2ee.GenerateRoomKey()
-	if err != nil {
-		t.Fatalf("GenerateRoomKey: %v", err)
-	}
-	a.handleRoomInvite("mallory", e2ee.RoomInvite{Room: "secret room", Key: attacker})
-
-	got, ok := a.client.RoomKey("room-1")
-	if !ok {
-		t.Fatal("the room key vanished")
-	}
-	if got.ID() == attacker.ID() {
-		t.Fatal("a non-member replaced the key we send under — our messages would go to them, not the room")
-	}
-	if got.ID() != original.ID() {
-		t.Fatalf("room key changed unexpectedly: got %s, want %s", got.ID(), original.ID())
+	a.handleRoomInvite("mallory", e2ee.RoomInvite{
+		Room:   "secret room",
+		Chains: []e2ee.ChainView{attacker.View()},
+	})
+	if _, ok := a.client.ChainViews("room-1")[attacker.ID]; ok {
+		t.Error("a non-member's chain was installed — their messages would read as the room's")
 	}
 
-	// The person who gave us the key can still rotate it.
-	rotated, err := e2ee.GenerateRoomKey()
-	if err != nil {
-		t.Fatalf("GenerateRoomKey: %v", err)
-	}
-	a.handleRoomInvite("alice", e2ee.RoomInvite{Room: "secret room", Key: rotated})
-	if got, _ = a.client.RoomKey("room-1"); got.ID() != rotated.ID() {
-		t.Error("a legitimate rotation from the member who invited us was rejected")
+	// The person who invited us can still hand over chains.
+	legit, _ := e2ee.NewChain()
+	a.handleRoomInvite("alice", e2ee.RoomInvite{
+		Room:   "secret room",
+		Chains: []e2ee.ChainView{legit.View()},
+	})
+	if _, ok := a.client.ChainViews("room-1")[legit.ID]; !ok {
+		t.Error("a legitimate chain from the member who invited us was rejected")
 	}
 }
 
@@ -165,6 +155,14 @@ func rosterTestApp(t *testing.T, self string) *App {
 	store.UpsertRoom("room-1", "secret room")
 	store.SetRoomJoined("room-1", true)
 	return a
+}
+
+// chainWasReplaced reports whether the room's outbound chain is due for
+// replacement — the observable effect of a removal now that re-keying is lazy.
+// Calling this performs the replacement, so assert with it last.
+func chainWasReplaced(a *App, cookie, before string) bool {
+	view, fresh, err := a.client.EnsureOutboundChain(cookie)
+	return err == nil && fresh && view.ID != before
 }
 
 func sortedMembers(a *App, cookie string) string {
@@ -214,22 +212,21 @@ func TestRosterFromInviteReachesEveryMember(t *testing.T) {
 // which a removal actually reaches the rest of the room.
 func TestRotationRosterPropagatesRemoval(t *testing.T) {
 	a := rosterTestApp(t, "carol")
-	oldKey, _ := e2ee.GenerateRoomKey()
-	a.client.SetRoomKey("room-1", oldKey)
+	a.client.MarkRoomEncrypted("room-1")
 	a.members.setAll("room-1", []string{"alice", "bob", "dave"}, "carol")
 
-	newKey, _ := e2ee.GenerateRoomKey()
+	fresh, _ := e2ee.NewChain()
 	a.handleRoomInvite("alice", e2ee.RoomInvite{
 		Room:    "secret room",
-		Key:     newKey,
+		Chains:  []e2ee.ChainView{fresh.View()},
 		Members: []string{"alice", "bob", "carol"}, // dave is out
 	})
 
 	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
 		t.Errorf("members = %q, want %q — a removal did not propagate", got, "alice,bob")
 	}
-	if cur, ok := a.client.RoomKey("room-1"); !ok || cur.ID() != newKey.ID() {
-		t.Error("the rotated key was not installed")
+	if _, ok := a.client.ChainViews("room-1")[fresh.ID]; !ok {
+		t.Error("the re-keyed chain was not installed")
 	}
 }
 
@@ -237,14 +234,13 @@ func TestRotationRosterPropagatesRemoval(t *testing.T) {
 // not erase each other's newcomer. Only a rotation replaces.
 func TestSameKeyRosterUnionsRatherThanReplaces(t *testing.T) {
 	a := rosterTestApp(t, "carol")
-	key, _ := e2ee.GenerateRoomKey()
-	a.client.SetRoomKey("room-1", key)
+	a.client.MarkRoomEncrypted("room-1")
 	// We invited Eve a moment ago; Alice has not heard about her yet.
 	a.members.setAll("room-1", []string{"alice", "eve"}, "carol")
 
+	// A roster-only invite: no chains, so this is somebody announcing an ADD.
 	a.handleRoomInvite("alice", e2ee.RoomInvite{
 		Room:    "secret room",
-		Key:     key,
 		Members: []string{"alice", "carol", "dave"},
 	})
 
@@ -257,12 +253,13 @@ func TestSameKeyRosterUnionsRatherThanReplaces(t *testing.T) {
 // "said nothing", not "the room is empty".
 func TestV1InviteDoesNotWipeRoster(t *testing.T) {
 	a := rosterTestApp(t, "carol")
-	oldKey, _ := e2ee.GenerateRoomKey()
-	a.client.SetRoomKey("room-1", oldKey)
+	a.client.MarkRoomEncrypted("room-1")
 	a.members.setAll("room-1", []string{"alice", "bob"}, "carol")
 
-	newKey, _ := e2ee.GenerateRoomKey()
-	a.handleRoomInvite("alice", e2ee.RoomInvite{Room: "secret room", Key: newKey})
+	fresh, _ := e2ee.NewChain()
+	a.handleRoomInvite("alice", e2ee.RoomInvite{
+		Room: "secret room", Chains: []e2ee.ChainView{fresh.View()},
+	})
 
 	if got := sortedMembers(a, "room-1"); got != "alice,bob" {
 		t.Errorf("members = %q, want %q — a rosterless invite emptied the room", got, "alice,bob")
@@ -274,22 +271,21 @@ func TestV1InviteDoesNotWipeRoster(t *testing.T) {
 // otherwise they could add themselves and rotate next time.
 func TestNonMemberCannotInjectRoster(t *testing.T) {
 	a := rosterTestApp(t, "carol")
-	key, _ := e2ee.GenerateRoomKey()
-	a.client.SetRoomKey("room-1", key)
+	a.client.MarkRoomEncrypted("room-1")
 	a.members.add("room-1", "alice")
 
-	attackerKey, _ := e2ee.GenerateRoomKey()
+	attacker, _ := e2ee.NewChain()
 	a.handleRoomInvite("mallory", e2ee.RoomInvite{
 		Room:    "secret room",
-		Key:     attackerKey,
+		Chains:  []e2ee.ChainView{attacker.View()},
 		Members: []string{"mallory", "carol"},
 	})
 
 	if got := sortedMembers(a, "room-1"); got != "alice" {
 		t.Errorf("members = %q — a non-member rewrote the roster", got)
 	}
-	if cur, ok := a.client.RoomKey("room-1"); !ok || cur.ID() != key.ID() {
-		t.Error("a non-member replaced the room key")
+	if _, ok := a.client.ChainViews("room-1")[attacker.ID]; ok {
+		t.Error("a non-member's chain was installed")
 	}
 }
 
@@ -311,11 +307,11 @@ func TestRosterOnTheWireIncludesUs(t *testing.T) {
 // has always been supported, and until now the UI never passed one.
 func TestRemovingAMemberDropsThemFromTheRoster(t *testing.T) {
 	a := rosterTestApp(t, "me")
-	key, err := e2ee.GenerateRoomKey()
+	a.client.MarkRoomEncrypted("room-1")
+	before, _, err := a.client.EnsureOutboundChain("room-1")
 	if err != nil {
-		t.Fatalf("GenerateRoomKey: %v", err)
+		t.Fatalf("EnsureOutboundChain: %v", err)
 	}
-	a.client.SetRoomKey("room-1", key)
 	a.members.setAll("room-1", []string{"alice", "bob"}, "me")
 
 	a.RotateRoomKey("room-1", []string{"bob"})
@@ -323,16 +319,18 @@ func TestRemovingAMemberDropsThemFromTheRoster(t *testing.T) {
 	if got := sortedMembers(a, "room-1"); got != "alice" {
 		t.Errorf("members = %q, want %q", got, "alice")
 	}
-	cur, ok := a.client.RoomKey("room-1")
-	if !ok || cur.ID() == key.ID() {
-		t.Error("removing a member did not rotate the key, so they can still read")
-	}
 	// The roster that goes to the people who remain must not name the removed
-	// person, or their next rotation would invite them straight back in.
+	// person, or their next re-key would include them straight back in.
 	for _, r := range a.roomRoster("room-1") {
 		if r == "bob" {
 			t.Errorf("a removed member is still on the outgoing roster: %v", a.roomRoster("room-1"))
 		}
+	}
+	// And our chain must be due for replacement, or the next message we send is
+	// still readable by the person we just removed. Lazily: the new chain is
+	// minted and broadcast at that send, not here.
+	if !chainWasReplaced(a, "room-1", before.ID) {
+		t.Error("removing a member left our chain in place, so they can still read what we send next")
 	}
 }
 
@@ -352,19 +350,19 @@ func TestDeviceRemovalRekeysOnlyAffectedRooms(t *testing.T) {
 	store.UpsertRoom("room-b", "beta")
 	store.SetRoomJoined("room-b", true)
 
-	keyA, _ := e2ee.GenerateRoomKey()
-	keyB, _ := e2ee.GenerateRoomKey()
-	a.client.SetRoomKey("room-a", keyA)
-	a.client.SetRoomKey("room-b", keyB)
+	a.client.MarkRoomEncrypted("room-a")
+	a.client.MarkRoomEncrypted("room-b")
+	beforeA, _, _ := a.client.EnsureOutboundChain("room-a")
+	beforeB, _, _ := a.client.EnsureOutboundChain("room-b")
 	a.members.add("room-a", "bob")
 	a.members.add("room-b", "carol")
 
 	a.rotateRoomsAfterDeviceRemoval("bob")
 
-	if got, ok := a.client.RoomKey("room-a"); !ok || got.ID() == keyA.ID() {
-		t.Error("a room the removed device could read was not re-keyed")
+	if !chainWasReplaced(a, "room-a", beforeA.ID) {
+		t.Error("a room the removed device could read was not marked for re-keying")
 	}
-	if got, ok := a.client.RoomKey("room-b"); !ok || got.ID() != keyB.ID() {
+	if chainWasReplaced(a, "room-b", beforeB.ID) {
 		t.Error("a room the removed device was never in was re-keyed anyway")
 	}
 }
@@ -384,22 +382,22 @@ func TestOwnDeviceRemovalRekeysEveryRoom(t *testing.T) {
 	store.UpsertRoom("room-c", "plain")
 	store.SetRoomJoined("room-c", true)
 
-	keyA, _ := e2ee.GenerateRoomKey()
-	keyB, _ := e2ee.GenerateRoomKey()
-	a.client.SetRoomKey("room-a", keyA)
-	a.client.SetRoomKey("room-b", keyB)
+	a.client.MarkRoomEncrypted("room-a")
+	a.client.MarkRoomEncrypted("room-b")
+	beforeA, _, _ := a.client.EnsureOutboundChain("room-a")
+	beforeB, _, _ := a.client.EnsureOutboundChain("room-b")
 	a.members.add("room-a", "bob")
 
 	a.rotateRoomsAfterDeviceRemoval("")
 
-	if got, _ := a.client.RoomKey("room-a"); got.ID() == keyA.ID() {
+	if !chainWasReplaced(a, "room-a", beforeA.ID) {
 		t.Error("room-a was not re-keyed after our own device was removed")
 	}
-	// room-b has no other members, but our removed device still held its key.
-	if got, _ := a.client.RoomKey("room-b"); got.ID() == keyB.ID() {
-		t.Error("a room with no other members was skipped, but the removed device held its key")
+	// room-b has no other members, but our removed device still held its chain.
+	if !chainWasReplaced(a, "room-b", beforeB.ID) {
+		t.Error("a room with no other members was skipped, but the removed device held its chain")
 	}
 	if a.client.RoomEncrypted("room-c") {
-		t.Error("an unencrypted room was given a key")
+		t.Error("an unencrypted room was marked encrypted")
 	}
 }

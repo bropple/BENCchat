@@ -270,40 +270,43 @@ func (a *App) CreateEncryptedRoom(name string) string {
 	return ""
 }
 
-// InviteToRoom shares the active room's key with someone, over the 1:1
+// InviteToRoom gives somebody the chains they need to read a room, over the 1:1
 // encrypted channel.
 func (a *App) InviteToRoom(cookie, screenName string) string {
 	screenName = strings.TrimSpace(screenName)
 	if screenName == "" {
 		return "Enter a screen name."
 	}
-	key, ok := a.client.RoomKey(cookie)
-	if !ok {
-		return "This room isn't encrypted, so there's no key to share."
+	if !a.client.RoomEncrypted(cookie) {
+		return "This room isn't encrypted, so there's nothing to share."
 	}
 	room, ok := a.store.Room(cookie)
 	if !ok {
 		return "You're not in that room."
 	}
-	// Record them BEFORE distributing, so the roster that goes out already names
+	// Recorded BEFORE distributing, so the roster that goes out already names
 	// the newcomer — that is how the existing members learn about them.
 	a.members.add(cookie, screenName)
 	a.saveRoomKeys(cookie)
 
-	// Sent to everyone, not just the newcomer. The key is unchanged for the
-	// people who already had it; what they are being told is the new roster,
-	// without which their own rotations would never reach the person just added.
-	if failed := a.distributeRoomKey(cookie, room.Name, key, nil); len(failed) > 0 {
-		if len(failed) == 1 && state.NormalizeScreenName(failed[0]) == state.NormalizeScreenName(screenName) {
-			// The invitee themselves is the one we could not reach, so nothing
-			// happened at all. Undo, rather than leaving a member recorded who
-			// never got a key.
-			a.members.remove(cookie, screenName)
-			a.saveRoomKeys(cookie)
-			return "Couldn't reach " + screenName + " — they haven't been invited."
-		}
+	// A bundle, not one chain. One chain would let them read only its owner;
+	// what they need is every chain we can read, each wound forward to where the
+	// conversation has got to — readable from here on, and not one message
+	// before. ChainBundleFor does the winding.
+	bundle := a.client.ChainBundleFor(cookie)
+	if err := a.client.InviteToRoom(screenName, room.Name, bundle, a.roomRoster(cookie)); err != nil {
+		// Nothing happened, so do not leave a member recorded who got nothing.
+		a.members.remove(cookie, screenName)
+		a.saveRoomKeys(cookie)
+		return "Couldn't reach " + screenName + " — they haven't been invited."
+	}
+
+	// The people already here need only the new roster; they hold the chains
+	// already. Without it their own broadcasts would leave the newcomer out.
+	dropped := map[string]bool{state.NormalizeScreenName(screenName): true}
+	if failed := a.distributeRoster(cookie, room.Name, dropped); len(failed) > 0 {
 		a.store.Notify(state.NoticeWarn, "Invited "+screenName+", but couldn't tell "+
-			strings.Join(failed, ", ")+" about it — their next key rotation may miss people.")
+			strings.Join(failed, ", ")+" about it — their next re-key may miss people.")
 		return ""
 	}
 	a.store.Notify(state.NoticeInfo, screenName+" can now read this room.")
@@ -326,22 +329,29 @@ func (a *App) roomRoster(cookie string) []string {
 	return roster
 }
 
-// distributeRoomKey sends a room's key and current roster to every member,
-// skipping anyone in dropped, and returns those it could not reach.
+// distributeRoster tells every member who else is in the room, and returns those
+// it could not reach.
 //
-// Shared by invite, rotation and reform so all three compute the roster
-// identically — the bug this exists to prevent is three call sites drifting into
-// three different ideas of who is in the room.
-func (a *App) distributeRoomKey(cookie, roomName string, key e2ee.RoomKey, dropped map[string]bool) []string {
+// Only the ROSTER travels this way now. Key material goes out as a single
+// in-room broadcast on the send path (see Client.ensureRoomChainDistributed),
+// so the expensive part of what used to happen here — one sealed message per
+// member — is gone. What remains is small and still has to reach everybody,
+// because a member with a stale roster leaves people out of their own
+// broadcasts.
+//
+// Shared by invite, removal and reform so all three compute the roster
+// identically; three call sites drifting into three ideas of who is in the room
+// is the bug this exists to prevent.
+func (a *App) distributeRoster(cookie, roomName string, dropped map[string]bool) []string {
 	roster := a.roomRoster(cookie)
 	var failed []string
 	for _, sn := range a.members.list(cookie) {
 		if dropped[sn] {
 			continue
 		}
-		if err := a.client.InviteToRoom(sn, roomName, key, roster); err != nil {
+		if err := a.client.InviteToRoom(sn, roomName, nil, roster); err != nil {
 			failed = append(failed, sn)
-			slog.Default().Warn("could not deliver a room key", "peer", sn, "room", roomName, "err", err)
+			slog.Default().Warn("could not deliver a room roster", "peer", sn, "room", roomName, "err", err)
 		}
 	}
 	return failed
@@ -392,21 +402,18 @@ func (a *App) handleRoomInvite(from string, inv e2ee.RoomInvite) {
 				"” but was never given it. Ignored.")
 			return
 		}
-		// Not every one of these is a rotation. An invite sent to somebody ELSE
-		// goes to the whole room so everyone learns the new roster, and it
-		// carries the key we already hold. Announcing that as "the key was
-		// rotated" would be a lie, and a frequent one.
-		cur, hadKey := a.client.RoomKey(cookie)
-		keyIsNew := !hadKey || cur.ID() != inv.Key.ID()
-		a.learnRoomRoster(cookie, inv.Members, keyIsNew)
-
-		if !keyIsNew {
-			a.saveRoomKeys(cookie)
-			return
+		// Most of these carry no chains at all: an invite sent to somebody ELSE
+		// goes round the room so everybody learns the new roster, and there is
+		// nothing to announce about that. Chains arriving for a room we are
+		// already in are somebody re-keying, which the room does not need told —
+		// their broadcast is what actually delivers it.
+		for _, v := range inv.Chains {
+			a.client.LearnChainView(cookie, v)
 		}
-		a.client.SetRoomKey(cookie, inv.Key)
+		// Chains present means the sender re-keyed, which is authoritative about
+		// who holds the new state; a roster alone is somebody announcing an add.
+		a.learnRoomRoster(cookie, inv.Members, len(inv.Chains) > 0)
 		a.saveRoomKeys(cookie)
-		a.store.Notify(state.NoticeInfo, "The key for “"+inv.Room+"” was rotated by "+from+".")
 		return
 	}
 
@@ -468,11 +475,16 @@ func (a *App) AcceptRoomInvite(roomName string) string {
 	if !found {
 		return "Joined but couldn't identify the room."
 	}
-	a.client.SetRoomKey(cookie, inv.Key)
-	// The roster names everyone who holds this key, so take the lot — knowing
-	// only the person who invited us is what left three-way rooms unable to
-	// rotate. `from` is added regardless: a v1 invite carries no roster, and
-	// even in v2 the inviter is the one member we can be certain of.
+	// Every chain the inviter could read, each already wound forward to where
+	// the conversation stands. We can read from here on and nothing before it,
+	// which is the whole point of joining a room mid-conversation.
+	a.client.MarkRoomEncrypted(cookie)
+	for _, v := range inv.Chains {
+		a.client.LearnChainView(cookie, v)
+	}
+	// The roster names everyone in the room, so take the lot — knowing only the
+	// person who invited us is what left three-way rooms unable to re-key.
+	// `from` is added regardless: they are the one member we can be certain of.
 	a.members.add(cookie, from)
 	a.learnRoomRoster(cookie, inv.Members, false)
 	a.saveRoomKeys(cookie)
@@ -510,12 +522,19 @@ func (a *App) RotateRoomKey(cookie string, drop []string) string {
 	return ""
 }
 
-// rekeyRoom mints a new group key and distributes it, dropping anyone named.
+// rekeyRoom drops the named members and marks our chain for replacement.
 //
-// Says nothing to the user. A rotation somebody asked for and one triggered by a
-// device disappearing elsewhere in the room want very different words — and the
-// second kind can affect several rooms at once, where a notice each would be
-// noise rather than information.
+// Nothing is minted or sent here, and that is the design rather than an
+// omission. Our chain is replaced LAZILY, before the next message we send: a
+// chain nobody advances gives the removed member nothing, so the earliest point
+// it matters is the next send, and a room where nobody speaks costs nothing.
+// The replacement then goes out as one in-room broadcast, which the removed
+// member receives like everybody else and can open nothing in.
+//
+// Says nothing to the user either. A removal somebody asked for and one
+// triggered by a device disappearing elsewhere want very different words, and
+// the second kind can affect several rooms at once where a notice each would be
+// noise.
 func (a *App) rekeyRoom(cookie string, drop []string) (failed []string, errMsg string) {
 	if !a.client.RoomEncrypted(cookie) {
 		return nil, "This room isn't encrypted."
@@ -530,14 +549,12 @@ func (a *App) rekeyRoom(cookie string, drop []string) (failed []string, errMsg s
 		a.members.remove(cookie, d)
 	}
 
-	key, err := e2ee.GenerateRoomKey()
-	if err != nil {
-		return nil, err.Error()
-	}
-	a.client.SetRoomKey(cookie, key)
+	a.client.MarkChainStale(cookie)
 	a.saveRoomKeys(cookie)
 
-	return a.distributeRoomKey(cookie, room.Name, key, dropped), ""
+	// The roster still has to reach everybody who remains: a member working from
+	// a stale list leaves people out of their own broadcasts.
+	return a.distributeRoster(cookie, room.Name, dropped), ""
 }
 
 // rotateRoomsAfterDeviceRemoval re-keys the encrypted rooms a removed device
@@ -630,11 +647,13 @@ func (a *App) ReformRoom(cookie string, drop []string) string {
 	if !found {
 		return "Created the new room but couldn't identify it."
 	}
-	key, err := e2ee.GenerateRoomKey()
+	// A brand new room gets a brand new chain, and nobody is carried into it
+	// from the old one: reform exists precisely so the person left behind reads
+	// nothing further, and reusing a chain they hold would defeat the point.
+	view, _, err := a.client.EnsureOutboundChain(newCookie)
 	if err != nil {
 		return err.Error()
 	}
-	a.client.SetRoomKey(newCookie, key)
 
 	// Record everyone being carried over BEFORE distributing, so the roster each
 	// of them receives already names all the others. Doing it as each invite
@@ -643,8 +662,14 @@ func (a *App) ReformRoom(cookie string, drop []string) string {
 	for _, sn := range carry {
 		a.members.add(newCookie, sn)
 	}
-	for _, sn := range a.distributeRoomKey(newCookie, newName, key, nil) {
-		a.members.remove(newCookie, sn)
+	roster := a.roomRoster(newCookie)
+	for _, sn := range carry {
+		// The full bundle 1:1, because they are not in the new room yet and an
+		// in-room broadcast would not reach them.
+		if err := a.client.InviteToRoom(sn, newName, []e2ee.ChainView{view}, roster); err != nil {
+			slog.Default().Warn("could not invite to the reformed room", "peer", sn, "err", err)
+			a.members.remove(newCookie, sn)
+		}
 	}
 	a.saveRoomKeys(newCookie)
 

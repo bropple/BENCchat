@@ -132,12 +132,15 @@ func TestRoomEnvelopeSurvivesTheServer(t *testing.T) {
 	}
 }
 
-// TestRoomInviteRoundTrip covers key delivery, including a room name with a
+// TestRoomInviteRoundTrip covers chain delivery, including a room name with a
 // colon in it — which would split a naively formatted invite.
 func TestRoomInviteRoundTrip(t *testing.T) {
-	k := mustRoomKey(t)
+	chain, err := NewChain()
+	if err != nil {
+		t.Fatalf("NewChain: %v", err)
+	}
 	for _, name := range []string{"bencchat-livetest", "weird:name:with:colons", "spaces and 🎲"} {
-		body := EncodeRoomInvite(RoomInvite{Room: name, Key: k})
+		body := EncodeRoomInvite(RoomInvite{Room: name, Chains: []ChainView{chain.View()}})
 		if !IsRoomInvite(body) {
 			t.Fatalf("invite for %q not recognized", name)
 		}
@@ -148,16 +151,17 @@ func TestRoomInviteRoundTrip(t *testing.T) {
 		if got.Room != name {
 			t.Errorf("room = %q, want %q", got.Room, name)
 		}
-		if got.Key != k {
-			t.Errorf("key did not survive the invite for %q", name)
+		if len(got.Chains) != 1 || got.Chains[0].ID != chain.ID {
+			t.Errorf("the chain did not survive the invite for %q: %+v", name, got.Chains)
 		}
 	}
 
 	for _, bad := range []string{
 		"hello there",
 		roomInvitePrefix + "no-separator",
-		roomInvitePrefix + "!!!:" + EncodeRoomKey(k),
+		roomInvitePrefix + "!!!:" + EncodeRoomKey(mustRoomKey(t)),
 		roomInvitePrefix + "dGVzdA==:not-a-key",
+		roomInvitePrefixV3 + "dGVzdA==:not-a-bundle:",
 	} {
 		if _, ok := DecodeRoomInvite(bad); ok {
 			t.Errorf("malformed invite accepted: %q", bad)
@@ -296,13 +300,13 @@ func TestCatchupMalformedRejected(t *testing.T) {
 // TestRoomInviteRosterRoundTrips: the roster travels with the key because it
 // describes exactly that — who the key was given to.
 func TestRoomInviteRosterRoundTrips(t *testing.T) {
-	key, err := GenerateRoomKey()
+	chain, err := NewChain()
 	if err != nil {
-		t.Fatalf("GenerateRoomKey: %v", err)
+		t.Fatalf("NewChain: %v", err)
 	}
 	in := RoomInvite{
-		Room: "a room: with punctuation",
-		Key:  key,
+		Room:   "a room: with punctuation",
+		Chains: []ChainView{chain.View()},
 		// A name with a comma would split a naive roster encoding.
 		Members: []string{"alice", "bob, jr", "carol"},
 	}
@@ -313,8 +317,8 @@ func TestRoomInviteRosterRoundTrips(t *testing.T) {
 	if out.Room != in.Room {
 		t.Errorf("room = %q, want %q", out.Room, in.Room)
 	}
-	if out.Key.ID() != in.Key.ID() {
-		t.Errorf("key id = %s, want %s", out.Key.ID(), in.Key.ID())
+	if len(out.Chains) != 1 || out.Chains[0].ID != in.Chains[0].ID {
+		t.Errorf("chains = %+v, want the one that went in", out.Chains)
 	}
 	if strings.Join(out.Members, "|") != strings.Join(in.Members, "|") {
 		t.Errorf("members = %v, want %v", out.Members, in.Members)
@@ -324,8 +328,8 @@ func TestRoomInviteRosterRoundTrips(t *testing.T) {
 // TestRoomInviteWithEmptyRosterRoundTrips: a room of one has no other members,
 // which must not be confused with a malformed invite.
 func TestRoomInviteWithEmptyRosterRoundTrips(t *testing.T) {
-	key, _ := GenerateRoomKey()
-	out, ok := DecodeRoomInvite(EncodeRoomInvite(RoomInvite{Room: "solo", Key: key}))
+	chain, _ := NewChain()
+	out, ok := DecodeRoomInvite(EncodeRoomInvite(RoomInvite{Room: "solo", Chains: []ChainView{chain.View()}}))
 	if !ok {
 		t.Fatal("an invite with no roster did not decode")
 	}

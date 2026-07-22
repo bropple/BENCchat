@@ -187,10 +187,8 @@ func TestChatRosterDoesNotProveIncapability(t *testing.T) {
 // in the clear, or the room is published to anyone watching.
 func TestRoomInviteNeedsAnEncryptedChannel(t *testing.T) {
 	c, _ := newTestClient(t)
-	key, _ := e2ee.GenerateRoomKey()
-
 	// No 1:1 key for this peer, so no encrypted channel exists.
-	if err := c.InviteToRoom("stranger", "room", key, nil); err == nil {
+	if err := c.InviteToRoom("stranger", "room", nil, nil); err == nil {
 		t.Fatal("a room key was sent over an unencrypted channel")
 	}
 }
@@ -205,10 +203,13 @@ func TestRoomInviteIsInterceptedNotDisplayed(t *testing.T) {
 	var from string
 	c.SetRoomInviteHandler(func(f string, inv e2ee.RoomInvite) { from, got = f, inv })
 
-	key, _ := e2ee.GenerateRoomKey()
-	c.handleRoomInvite("bob", e2ee.EncodeRoomInvite(e2ee.RoomInvite{Room: "secret-room", Key: key}))
+	chain, _ := e2ee.NewChain()
+	c.handleRoomInvite("bob", e2ee.EncodeRoomInvite(e2ee.RoomInvite{
+		Room: "secret-room", Chains: []e2ee.ChainView{chain.View()},
+	}))
 
-	if from != "bob" || got.Room != "secret-room" || got.Key != key {
+	if from != "bob" || got.Room != "secret-room" ||
+		len(got.Chains) != 1 || got.Chains[0].ID != chain.ID {
 		t.Fatalf("invite not delivered to the handler: from=%q inv=%+v", from, got)
 	}
 	if convo, ok := store.Conversation("bob"); ok && len(convo.Messages) > 0 {
@@ -231,8 +232,10 @@ func TestLateRoomInviteIsStillHonored(t *testing.T) {
 	bob.SetRoomInviteHandler(func(_ string, inv e2ee.RoomInvite) { got = inv })
 
 	// Alice invites Bob to a room, but Bob doesn't know Alice's key yet.
-	roomKey, _ := e2ee.GenerateRoomKey()
-	body := e2ee.EncodeRoomInvite(e2ee.RoomInvite{Room: "secret-room", Key: roomKey})
+	chain, _ := e2ee.NewChain()
+	body := e2ee.EncodeRoomInvite(e2ee.RoomInvite{
+		Room: "secret-room", Chains: []e2ee.ChainView{chain.View()},
+	})
 	peerKeys, ourPriv, _ := alice.sealFor("bob")
 	env, err := e2ee.SealFor(body, peerKeys, ourPriv)
 	if err != nil {
@@ -248,7 +251,7 @@ func TestLateRoomInviteIsStillHonored(t *testing.T) {
 	// Alice's key arrives — the invite must now be honored.
 	bob.learnPeerKeys("alice", [][32]byte{alicePub})
 
-	if got.Room != "secret-room" || got.Key != roomKey {
+	if got.Room != "secret-room" || len(got.Chains) != 1 || got.Chains[0].ID != chain.ID {
 		t.Fatalf("late invite was not acted on: %+v", got)
 	}
 	// The invitation is protocol traffic, not something a person said, so once
@@ -768,8 +771,7 @@ func TestProtocolTrafficIsNotStoredAsAMessage(t *testing.T) {
 
 	// No session, so the send fails at the wire — but the point is that nothing
 	// is recorded in the conversation either way.
-	key, _ := e2ee.GenerateRoomKey()
-	_ = c.InviteToRoom("bob", "secret-room", key, nil)
+	_ = c.InviteToRoom("bob", "secret-room", nil, nil)
 	_ = c.RequestCatchup("bob", "secret-room", time.Now())
 	_ = c.SendCatchup("bob", e2ee.CatchupResponse{Room: "secret-room"})
 
@@ -986,6 +988,7 @@ func TestChainSendAndReceive(t *testing.T) {
 		t.Fatal("the first chain for a room should be reported as fresh")
 	}
 	recipient.LearnChainView("4-0-r", view)
+	sender.MarkChainShared("4-0-r") // stands in for the in-room broadcast
 
 	env, encrypted, err := sender.sealRoomMessage("4-0-r", "ship it")
 	if err != nil || !encrypted {
@@ -1011,6 +1014,7 @@ func TestChainHidesPreJoinHistoryAtClientLevel(t *testing.T) {
 	joiner.learnPeerSigningKeys("alice", []ed25519.PublicKey{signer.Public})
 
 	sender.EnsureOutboundChain("4-0-r")
+	sender.MarkChainShared("4-0-r")
 	before, _, _ := sender.sealRoomMessage("4-0-r", "said before they joined")
 
 	// They join here and are handed the chain where it currently stands.
@@ -1082,5 +1086,43 @@ func TestLearnChainViewKeepsTheFurthestBack(t *testing.T) {
 	c.LearnChainView("4-0-r", late)
 	if got := c.ChainViews("4-0-r")[chain.ID]; got.Index != 0 {
 		t.Errorf("a later view overwrote an earlier one, losing history (index %d)", got.Index)
+	}
+}
+
+// TestSealRefusesUntilTheChainIsShared is the ordering guarantee, enforced here
+// rather than left to the send path to remember.
+//
+// A message sealed under a chain nobody has been given is unreadable to the
+// entire room, and it looks exactly like success from the sender's side. Making
+// the seal refuse means the mistake cannot survive somebody reordering two lines
+// on the send path — which is precisely how it was nearly shipped.
+func TestSealRefusesUntilTheChainIsShared(t *testing.T) {
+	c, _ := newTestClient(t)
+	signer, _ := e2ee.GenerateSigningKey()
+	c.SetSigningKey(signer, true)
+	c.store.UpsertRoom("4-0-r", "project")
+
+	if _, _, err := c.EnsureOutboundChain("4-0-r"); err != nil {
+		t.Fatalf("EnsureOutboundChain: %v", err)
+	}
+	if _, _, err := c.sealRoomMessage("4-0-r", "too soon"); err == nil {
+		t.Error("sealed under a chain the room has never been given")
+	}
+
+	c.MarkChainShared("4-0-r")
+	env, encrypted, err := c.sealRoomMessage("4-0-r", "now it is fine")
+	if err != nil || !encrypted {
+		t.Fatalf("seal after sharing: encrypted=%v err=%v", encrypted, err)
+	}
+	if !e2ee.IsRoomChainEnvelope(env) {
+		t.Error("did not seal under the chain")
+	}
+
+	// A replacement is undistributed again, so sealing must refuse until it too
+	// has gone out — otherwise a removal silently produces unreadable messages.
+	c.MarkChainStale("4-0-r")
+	c.EnsureOutboundChain("4-0-r")
+	if _, _, err := c.sealRoomMessage("4-0-r", "after a removal"); err == nil {
+		t.Error("sealed under a replacement chain nobody has been given")
 	}
 }

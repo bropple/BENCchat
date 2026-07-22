@@ -177,6 +177,12 @@ func (c *Client) SendRoomMessage(cookie, text string) error {
 		return errors.New("client: message is empty")
 	}
 
+	// Before sealing, not after: a message under a chain nobody has been given
+	// is unreadable to the whole room, and the only moment certainly earlier
+	// than the message is just before it.
+	if err := c.ensureRoomChainDistributed(cookie); err != nil {
+		return err
+	}
 	wireText, encrypted, err := c.sealRoomMessage(cookie, text)
 	if err != nil {
 		return err
@@ -245,6 +251,12 @@ func (c *Client) handleChatSNAC(cookie string, frame wire.SNACFrame, body []byte
 	case wire.ChatChannelMsgToClient:
 		sender, text, err := oscar.DecodeChatMessage(body)
 		if err != nil || text == "" {
+			return
+		}
+		if e2ee.IsChainBroadcast(text) {
+			// Machine-to-machine: this carries key material, not something a
+			// person said, and must never land in the conversation.
+			c.handleChainBroadcast(cookie, sender, text)
 			return
 		}
 		d := c.decodeRoomMessageFrom(cookie, sender, text)
