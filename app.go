@@ -64,6 +64,11 @@ type App struct {
 	roomsKeyMu    sync.Mutex
 	roomsKeyCache *[32]byte
 
+	// roomJoinedAt is when we first entered each room, which bounds how far back
+	// catch-up may ask. Guarded by roomJoinMu.
+	roomJoinMu   sync.Mutex
+	roomJoinedAt map[string]time.Time
+
 	// End-to-end encryption: our current public key (for publishing in the
 	// profile) and whether a keypair is loaded. The private key never lives here
 	// — it's in the OS secret store and the client.
@@ -738,6 +743,24 @@ func (a *App) SearchDirectory(firstName string, lastName string) string {
 func (a *App) JoinRoom(name string) string {
 	if err := a.client.JoinRoom(name); err != nil {
 		return err.Error()
+	}
+	cookie, ok := a.roomCookieByName(name)
+	if !ok {
+		return ""
+	}
+
+	// Catching up belongs HERE, on a rejoin, and it used to fire on the opposite
+	// event: accepting an invitation, where by construction there is nothing
+	// readable to fetch. Coming back to a room we already hold chains for is the
+	// case it exists for — messages sent while we were away sit at positions we
+	// can derive, and nobody else will re-send them.
+	//
+	// A room we are entering for the first time has no join time recorded yet, so
+	// noteRoomJoined pins the floor and there is nothing to ask for.
+	_, known := a.roomJoinedAtTime(cookie)
+	a.noteRoomJoined(cookie)
+	if known && a.client.RoomEncrypted(cookie) {
+		go a.requestRoomCatchup(cookie)
 	}
 	return ""
 }

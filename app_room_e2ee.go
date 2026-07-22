@@ -189,6 +189,11 @@ func (a *App) saveRoomKeys(cookie string) {
 		Members: a.members.list(cookie),
 		Updated: time.Now(),
 	}
+	if joined, ok := a.roomJoinedAtTime(cookie); ok {
+		entry := store[cookie]
+		entry.JoinedAt = joined
+		store[cookie] = entry
+	}
 	if err := roomkeys.Save(acct, store, key); err != nil {
 		slog.Default().Warn("could not save room keys", "err", err)
 	}
@@ -218,6 +223,14 @@ func (a *App) restoreRoomKeys() {
 		a.client.RestoreChainState(cookie, r.Out, r.Views, r.Seen)
 		for _, m := range r.Members {
 			a.members.add(cookie, m)
+		}
+		if !r.JoinedAt.IsZero() {
+			a.roomJoinMu.Lock()
+			if a.roomJoinedAt == nil {
+				a.roomJoinedAt = map[string]time.Time{}
+			}
+			a.roomJoinedAt[cookie] = r.JoinedAt
+			a.roomJoinMu.Unlock()
 		}
 	}
 }
@@ -487,8 +500,12 @@ func (a *App) AcceptRoomInvite(roomName string) string {
 	// `from` is added regardless: they are the one member we can be certain of.
 	a.members.add(cookie, from)
 	a.learnRoomRoster(cookie, inv.Members, false)
+	// From here, and not one message before it. The bundle grants exactly that,
+	// and asking for history would fetch messages sealed at positions we cannot
+	// derive — a screenful of "sent before you joined", which is the ratchet
+	// working correctly presented as though something had broken.
+	a.noteRoomJoined(cookie)
 	a.saveRoomKeys(cookie)
-	go a.requestRoomCatchup(cookie)
 	return ""
 }
 
@@ -717,16 +734,58 @@ func (a *App) roomCookieByName(name string) (string, bool) {
 
 // --- Room catch-up ----------------------------------------------------------
 
-// lastSeenRoom remembers how far we had caught up in each room, so a returning
-// member asks for the right window instead of the whole history.
-func (a *App) roomLastSeen(cookie string) time.Time {
-	room, ok := a.store.Room(cookie)
-	if !ok || len(room.Messages) == 0 {
-		// Nothing local: ask for a day's worth rather than everything, which
-		// would blow past the response size limit and mostly be trimmed anyway.
-		return time.Now().Add(-24 * time.Hour)
+// noteRoomJoined records when we first entered a room, if we have not already.
+//
+// Only the FIRST time: this is the floor on what we may ask for, and moving it
+// on every rejoin would mean a member who reconnects can never catch up on
+// anything.
+func (a *App) noteRoomJoined(cookie string) {
+	a.roomJoinMu.Lock()
+	if a.roomJoinedAt == nil {
+		a.roomJoinedAt = map[string]time.Time{}
 	}
-	return room.Messages[len(room.Messages)-1].At
+	if _, seen := a.roomJoinedAt[cookie]; !seen {
+		a.roomJoinedAt[cookie] = time.Now()
+	}
+	a.roomJoinMu.Unlock()
+}
+
+// roomJoinedAtTime returns when we joined a room, and whether we know.
+func (a *App) roomJoinedAtTime(cookie string) (time.Time, bool) {
+	a.roomJoinMu.Lock()
+	defer a.roomJoinMu.Unlock()
+	t, ok := a.roomJoinedAt[cookie]
+	return t, ok
+}
+
+// roomLastSeen is how far back a catch-up request may reach.
+//
+// Bounded below by when we joined, which is the change chains force. Anything
+// earlier was sealed at positions we cannot derive, so asking for it returns
+// messages that render as "sent before you joined" — correct behaviour presented
+// as a fault, and a request nobody benefits from.
+//
+// The old floor was a flat 24 hours, which for a fresh joiner meant being handed
+// a day of conversation from before they arrived. That was the disclosure the
+// ratchet exists to prevent, delivered by the layer above it.
+func (a *App) roomLastSeen(cookie string) time.Time {
+	floor, haveFloor := a.roomJoinedAtTime(cookie)
+
+	room, ok := a.store.Room(cookie)
+	if ok && len(room.Messages) > 0 {
+		last := room.Messages[len(room.Messages)-1].At
+		if !haveFloor || last.After(floor) {
+			return last
+		}
+		return floor
+	}
+	if haveFloor {
+		return floor
+	}
+	// A room we have no record of joining and no local messages for. Ask for a
+	// day rather than everything, which would blow past the response size limit
+	// and mostly be trimmed anyway.
+	return time.Now().Add(-24 * time.Hour)
 }
 
 // requestRoomCatchup asks a member who was present what we missed.

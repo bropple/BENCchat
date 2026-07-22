@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/benco-holdings/benchat/internal/client"
 	"github.com/benco-holdings/benchat/internal/e2ee"
@@ -399,5 +400,80 @@ func TestOwnDeviceRemovalRekeysEveryRoom(t *testing.T) {
 	}
 	if a.client.RoomEncrypted("room-c") {
 		t.Error("an unencrypted room was marked encrypted")
+	}
+}
+
+// TestCatchupNeverReachesBeforeWeJoined is stage three's point.
+//
+// The old floor was a flat 24 hours whenever a room had no local messages, so a
+// fresh joiner asked for a day of conversation from before they arrived. Chains
+// make that unreadable, so it now returns a screenful of "sent before you
+// joined" — the ratchet working correctly, rendered as a fault. The floor is the
+// moment we joined.
+func TestCatchupNeverReachesBeforeWeJoined(t *testing.T) {
+	a := rosterTestApp(t, "me")
+
+	// Before we have joined anything, the old behaviour still applies: a room we
+	// have no record of is a day's window, not everything ever said.
+	if since := a.roomLastSeen("room-1"); time.Since(since) < 23*time.Hour {
+		t.Errorf("an unknown room asked back only %v", time.Since(since))
+	}
+
+	joined := time.Now()
+	a.noteRoomJoined("room-1")
+
+	since := a.roomLastSeen("room-1")
+	if since.Before(joined.Add(-time.Second)) {
+		t.Errorf("catch-up reached back to %v, before we joined at %v", since, joined)
+	}
+}
+
+// TestJoinTimeIsPinnedOnce: re-entering a room must not move the floor forward,
+// or a member who reconnects can never catch up on anything.
+func TestJoinTimeIsPinnedOnce(t *testing.T) {
+	a := rosterTestApp(t, "me")
+
+	a.noteRoomJoined("room-1")
+	first, ok := a.roomJoinedAtTime("room-1")
+	if !ok {
+		t.Fatal("join time was not recorded")
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	a.noteRoomJoined("room-1")
+	again, _ := a.roomJoinedAtTime("room-1")
+	if !again.Equal(first) {
+		t.Errorf("rejoining moved the floor from %v to %v — a returning member "+
+			"would never catch up on anything", first, again)
+	}
+}
+
+// TestLocalHistoryWinsOverJoinTime: once we have messages, the window starts at
+// the last one. Otherwise every reconnect would re-request the whole session.
+func TestLocalHistoryWinsOverJoinTime(t *testing.T) {
+	a := rosterTestApp(t, "me")
+	a.noteRoomJoined("room-1")
+
+	last := time.Now().Add(time.Hour) // later than the join
+	a.store.AddRoomMessage("room-1", state.Message{From: "alice", Text: "hi", At: last})
+
+	if since := a.roomLastSeen("room-1"); !since.Equal(last) {
+		t.Errorf("catch-up window starts at %v, want the last local message at %v", since, last)
+	}
+}
+
+// TestJoinTimeStillFloorsOlderHistory: a stale local message must not drag the
+// window back past the join — that is the disclosure chains exist to prevent.
+func TestJoinTimeStillFloorsOlderHistory(t *testing.T) {
+	a := rosterTestApp(t, "me")
+
+	old := time.Now().Add(-48 * time.Hour)
+	a.store.AddRoomMessage("room-1", state.Message{From: "alice", Text: "ancient", At: old})
+	a.noteRoomJoined("room-1")
+
+	joined, _ := a.roomJoinedAtTime("room-1")
+	if since := a.roomLastSeen("room-1"); since.Before(joined) {
+		t.Errorf("a message from %v dragged the window back to %v, before we joined at %v",
+			old, since, joined)
 	}
 }

@@ -56,6 +56,13 @@ type Room struct {
 	// Members are the people we deliberately gave keys to, so a rotation
 	// redistributes to exactly them and not to whoever wandered in.
 	Members []string `json:"members,omitempty"`
+	// JoinedAt is when we first entered this room.
+	//
+	// It bounds catch-up. Everything before it was sealed at chain positions we
+	// cannot derive, so asking for it returns a screenful of messages that only
+	// say "sent before you joined" — the ratchet working correctly, rendered as
+	// though something had gone wrong.
+	JoinedAt time.Time `json:"joinedAt,omitempty"`
 	// Updated is when this room was last touched.
 	Updated time.Time `json:"updated"`
 }
