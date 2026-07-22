@@ -95,6 +95,7 @@ func TestRoomMembersTracksDeliberateInvitesOnly(t *testing.T) {
 // nothing. History is exactly what we withheld from an uninvited joiner by not
 // giving them the key — serving it on request would hand it over anyway.
 func TestOnlyInvitedMembersAreServedHistory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	a := &App{}
 	a.members.add("4-0-room", "bob")
 
@@ -118,6 +119,7 @@ func TestOnlyInvitedMembersAreServedHistory(t *testing.T) {
 // fetched on demand for any account — so a stranger who learns the room name
 // must not be able to redirect our traffic onto a key they hold.
 func TestRoomKeyRotationOnlyFromMembers(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store := state.NewStore()
 	a := &App{store: store, client: client.New(store, nil)}
 	store.UpsertRoom("room-1", "secret room")
@@ -151,6 +153,11 @@ func TestRoomKeyRotationOnlyFromMembers(t *testing.T) {
 // rosterTestApp is an App wired just enough to drive the room roster paths.
 func rosterTestApp(t *testing.T, self string) *App {
 	t.Helper()
+	// Redirected before anything can save. saveRoomKeys writes under the config
+	// dir, so without this the suite scribbles room state into the real
+	// ~/.config/BENCchat of whoever runs it — and would overwrite their own
+	// rooms outright if a test ever used their account name.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store := state.NewStore()
 	a := &App{store: store, client: client.New(store, nil)}
 	a.cfg.LastScreenName = self
@@ -436,6 +443,7 @@ func TestRemovingAMemberDropsThemFromTheRoster(t *testing.T) {
 // and OSCAR lets it rejoin any room whose name it knows. Rooms it could read get
 // a new key; rooms it was never in are left alone.
 func TestDeviceRemovalRekeysOnlyAffectedRooms(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store := state.NewStore()
 	a := &App{store: store, client: client.New(store, nil)}
 	a.cfg.LastScreenName = "me"
@@ -465,6 +473,7 @@ func TestDeviceRemovalRekeysOnlyAffectedRooms(t *testing.T) {
 // TestOwnDeviceRemovalRekeysEveryRoom: our own removed device held the keys to
 // every encrypted room we are in, so all of them are affected.
 func TestOwnDeviceRemovalRekeysEveryRoom(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store := state.NewStore()
 	a := &App{store: store, client: client.New(store, nil)}
 	a.cfg.LastScreenName = "me"
@@ -1300,7 +1309,11 @@ func TestMergedRoomEntryPrefersLiveStateAndTombstonesEverywhere(t *testing.T) {
 			t.Errorf("a tombstoned name was written back as a member: %v", got.Members)
 		}
 	}
-	if strings.Join(got.Members, ",") != "alice,bob" {
+	// Sorted before comparing: Members comes off a map, so its order is
+	// randomized per run and an ordered comparison passes or fails by luck.
+	members := append([]string(nil), got.Members...)
+	sort.Strings(members)
+	if strings.Join(members, ",") != "alice,bob" {
 		t.Errorf("Members = %v, want the live alice,bob", got.Members)
 	}
 }
