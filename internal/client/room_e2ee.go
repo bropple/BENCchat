@@ -1170,7 +1170,20 @@ func (c *Client) noteChainPosition(cookie, chainID string, index uint32) {
 // the views. A view says how far BACK we may read; handing that over would give
 // a newcomer our own read-back, which is precisely the history chains exist to
 // withhold. What they should get is "from the next message onward".
-func (c *Client) ChainBundleFor(cookie string) []e2ee.ChainView {
+//
+// recipient is who the bundle is for, and it must already be a member. This is
+// the last gate before the room's readable state leaves the machine, so it does
+// not assume the caller checked: an earlier version took only a cookie and
+// handed over every chain it held to whoever the caller named, which is how a
+// re-invite quietly restored a removed member's access to everybody's current
+// traffic. The app layer checks the tombstone and the owner pin before it gets
+// here; this checks the one thing that is true regardless of which caller asked.
+func (c *Client) ChainBundleFor(cookie, recipient string) []e2ee.ChainView {
+	if !c.isRoomMember(cookie, recipient) {
+		c.log.Warn("refusing a chain bundle for somebody who is not in the room",
+			"room", c.roomName(cookie), "recipient", recipient)
+		return nil
+	}
 	rk := c.roomCrypto.get(cookie)
 	if rk == nil {
 		return nil
@@ -1235,6 +1248,24 @@ func (c *Client) roomMembersFunc() func(string) []string {
 	c.e2eeMu.Lock()
 	defer c.e2eeMu.Unlock()
 	return c.roomMembersFn
+}
+
+// isRoomMember reports whether the app layer counts this person as a member.
+//
+// No membership hook means no answer, and no answer must not read as yes: this
+// gates handing over a room's readable state, so a client whose app layer has
+// not wired the lookup refuses rather than serves.
+func (c *Client) isRoomMember(cookie, screenName string) bool {
+	want := state.NormalizeScreenName(screenName)
+	if want == "" {
+		return false
+	}
+	for _, sn := range c.roomMembers(cookie) {
+		if state.NormalizeScreenName(sn) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) roomMembers(cookie string) []string {

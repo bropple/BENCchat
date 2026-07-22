@@ -29,7 +29,8 @@ func TestProbe_RetiredOwnChainBundledUnwound(t *testing.T) {
 		t.Fatal("setup: chain did not rotate")
 	}
 
-	bundle := alice.ChainBundleFor("4-0-r")
+	alice.SetRoomMembersFunc(func(string) []string { return []string{"bob"} })
+	bundle := alice.ChainBundleFor("4-0-r", "bob")
 	t.Logf("bundle has %d views", len(bundle))
 	for _, v := range bundle {
 		t.Logf("  chain %s at index %d (retired=%v)", v.ID, v.Index, v.ID == oldID)

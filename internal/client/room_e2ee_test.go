@@ -1476,3 +1476,41 @@ func TestRestoreRefusesADiscontinuousView(t *testing.T) {
 		t.Errorf("the genuine earlier view was refused (index %d, want 0)", got.Index)
 	}
 }
+
+// TestAChainBundleIsOnlyBuiltForAMember.
+//
+// This is the last gate before a room's readable state leaves the machine, and
+// it used to take only a cookie — so it handed every chain it held to whoever
+// the caller named. That is how re-inviting a removed member quietly restored
+// their access to everybody's current traffic: the app layer's checks were the
+// only thing standing there, and one call site skipped them.
+func TestAChainBundleIsOnlyBuiltForAMember(t *testing.T) {
+	c, _ := newTestClient(t)
+	c.MarkRoomEncrypted("room-1")
+
+	// A peer's chain we can read, and a position for it — the two things a
+	// bundle is built out of.
+	peer, err := e2ee.NewChain()
+	if err != nil {
+		t.Fatalf("NewChain: %v", err)
+	}
+	c.LearnChainView("room-1", peer.View())
+	c.noteChainPosition("room-1", peer.ID, 3)
+
+	// No membership hook at all: refuse rather than serve. A client whose app
+	// layer never wired the lookup must not read as "everyone is a member".
+	if got := c.ChainBundleFor("room-1", "alice"); got != nil {
+		t.Errorf("a bundle was built with no membership lookup installed: %d views", len(got))
+	}
+
+	c.SetRoomMembersFunc(func(string) []string { return []string{"alice"} })
+	if got := c.ChainBundleFor("room-1", "mallory"); got != nil {
+		t.Errorf("a bundle was built for somebody outside the room: %d views", len(got))
+	}
+	if got := c.ChainBundleFor("room-1", "ALICE"); len(got) == 0 {
+		t.Error("a member was refused their own bundle; the check is not normalizing names")
+	}
+	if got := c.ChainBundleFor("room-1", ""); got != nil {
+		t.Errorf("an empty recipient was served a bundle: %d views", len(got))
+	}
+}

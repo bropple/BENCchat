@@ -610,7 +610,15 @@ export function renderRoster(
         // to serve those keys, and the second is a settled fact about an older
         // client. Collapsing them made a withheld key look like a routine
         // artifact.
-        const lock = m.forged
+        // Transferred history is checked FIRST, because none of the flags below
+        // can tell the truth about it. The envelope doesn't survive a transfer,
+        // so this device cannot re-check anything: a 1:1 message that really was
+        // encrypted arrives with the flag cleared, and a room message arrives
+        // with it set for a reason that has nothing to do with what a padlock
+        // means to a reader. What IS true is where it came from.
+        const lock = m.transferred
+          ? `<span class="chat__lock chat__lock--transferred benco-caption" title="Copied here from another of your devices. It was carried in a sealed transfer, but the original message's own encryption can't be re-checked on this device, so it isn't shown as encrypted either way.">⇄</span>`
+          : m.forged
           ? `<span class="chat__lock chat__lock--forged benco-caption" title="This message did not come from the person it claims to be from — it is either unsigned by them or was sent in the clear into an encrypted room">⚠</span>`
           : m.encrypted && (m.senderVerified || !roomMsg)
             ? `<span class="chat__lock benco-caption" title="End-to-end encrypted">🔒</span>`

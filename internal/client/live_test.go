@@ -1585,7 +1585,7 @@ func TestLiveRoomHost(t *testing.T) {
 	hostCookie.Store(cookie)
 	t.Logf("created encrypted room %q (key id %s)", roomName, roomKey.ID())
 
-	if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie), liveRoster(t, c, roomName, sn, target)); err != nil {
+	if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie, target), liveRoster(t, c, roomName, sn, target)); err != nil {
 		t.Fatalf("inviting %q: %v", target, err)
 	}
 	t.Logf("invited %q — they should be prompted to join", target)
@@ -1617,7 +1617,7 @@ func TestLiveRoomHost(t *testing.T) {
 		}
 		switch {
 		case !present && !invitedWhileAway && tick >= 3:
-			if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie), liveRoster(t, c, roomName, sn, target)); err != nil {
+			if err := c.InviteToRoom(target, roomName, c.ChainBundleFor(cookie, target), liveRoster(t, c, roomName, sn, target)); err != nil {
 				t.Logf("re-invite failed: %v", err)
 			} else {
 				invitedWhileAway = true

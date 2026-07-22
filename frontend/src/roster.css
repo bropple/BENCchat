@@ -1161,6 +1161,14 @@
   background: color-mix(in srgb, var(--benco-amber) 8%, transparent);
 }
 
+/* Transferred history: informational, not a warning. It must not read as a
+   problem — nothing is wrong with these messages, they simply arrived by a route
+   that carries no proof of their own. Muted, and deliberately not the forged
+   colour. */
+.chat__lock--transferred {
+  opacity: 0.55;
+}
+
 .chat__lock--forged {
   color: var(--benco-amber);
   opacity: 1;

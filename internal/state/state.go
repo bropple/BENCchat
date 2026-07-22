@@ -122,6 +122,18 @@ type Message struct {
 	// sender's keys yet", which resolves and which a hostile server can induce by
 	// withholding them, and the second is "there is nothing here to check".
 	Signed bool `json:"signed,omitempty"`
+	// Transferred marks history that arrived in a device transfer rather than
+	// over the wire, so the UI can say where it came from.
+	//
+	// It exists because the other flags on a transferred message cannot be
+	// honest. The envelope does not travel, so nothing about the original can be
+	// re-checked here: a 1:1 message that genuinely WAS encrypted arrives with
+	// Encrypted cleared, and a room message arrives with it set for a reason
+	// that has nothing to do with what the user should read into a padlock — see
+	// sanitizeTransferredRoomMessage. Without a flag of its own the UI has to
+	// either overclaim or underclaim; with one it can say the true thing, which
+	// is "another of your devices gave us this".
+	Transferred bool `json:"transferred,omitempty"`
 	// Forged marks a room message whose signature did NOT verify — positive
 	// evidence of impersonation, not merely an unknown sender.
 	Forged bool `json:"forged,omitempty"`

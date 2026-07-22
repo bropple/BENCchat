@@ -240,7 +240,7 @@ func (m *roomMembers) acceptOwnerEpoch(cookie string, e uint64) {
 // repeats an epoch already spent. The only way to reach the ceiling is an owner
 // SIGNING it — increments cannot get there — so saturation strands exactly the
 // room whose owner jammed it, and nothing else.
-func (m *roomMembers) nextEpoch(cookie string) uint64 {
+func (m *roomMembers) nextEpoch(cookie string, now time.Time) uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensure()
@@ -251,6 +251,22 @@ func (m *roomMembers) nextEpoch(cookie string) uint64 {
 	next := cur + 1
 	if next == 0 {
 		next = ^uint64(0)
+	}
+	// Floored at the wall clock, which is what lets an owner run two devices.
+	//
+	// Epochs only have to increase; nothing reads their value. Two devices of
+	// the same account never see each other's rosters — SendRoster skips self,
+	// and the server refuses a self-addressed message anyway — so each keeps its
+	// own counter, and the second one to remove somebody stamps an epoch the
+	// first already used. Every recipient discards it as stale, and the owner is
+	// told the room was re-keyed. Seconds since the epoch are a counter both
+	// devices already share without having to exchange anything.
+	//
+	// Still a strict increment on top: the clock is a FLOOR, never the value, so
+	// two removals in the same second, or a clock that has gone backwards, still
+	// produce increasing epochs rather than a collision or a rollback.
+	if sec := now.Unix(); sec > 0 && uint64(sec) > next {
+		next = uint64(sec)
 	}
 	m.epoch[cookie] = next
 	return next
@@ -708,7 +724,7 @@ func (a *App) InviteToRoom(cookie, screenName string) string {
 	// what they need is every chain we can read, each wound forward to where the
 	// conversation has got to — readable from here on, and not one message
 	// before. ChainBundleFor does the winding.
-	bundle := a.client.ChainBundleFor(cookie)
+	bundle := a.client.ChainBundleFor(cookie, screenName)
 	if err := a.client.InviteToRoom(screenName, room.Name, bundle, a.encodedRoster(cookie, room.Name)); err != nil {
 		// Nothing happened, so do not leave a member recorded who got nothing —
 		// or a removal lifted for somebody who was never readmitted.
@@ -768,7 +784,7 @@ func (a *App) signedRoster(cookie, roomName string) (e2ee.Roster, error) {
 	}
 	r := e2ee.Roster{
 		Room:    roomName,
-		Epoch:   a.members.nextEpoch(cookie),
+		Epoch:   a.members.nextEpoch(cookie, time.Now()),
 		Members: a.roomRoster(cookie),
 		Owner:   owner,
 		Author:  self,

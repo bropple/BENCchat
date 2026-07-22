@@ -653,3 +653,43 @@ func TestATransferFromAFutureVersionIsRefused(t *testing.T) {
 		t.Errorf("the refusal does not say why: %v", err)
 	}
 }
+
+// TestTransferredHistoryIsMarkedAsSuch.
+//
+// The other trust flags cannot be honest about a transferred message: the sealed
+// envelope does not travel, so nothing about the original can be re-checked
+// here. A 1:1 message that genuinely was encrypted arrives with the flag
+// cleared, and a room message arrives with it SET for an unrelated reason — it
+// keeps catch-up from relaying unverifiable history onward. Either one shown as
+// a padlock claims something this device cannot know, so the marker the UI
+// actually reads has to be carried separately.
+func TestTransferredHistoryIsMarkedAsSuch(t *testing.T) {
+	now := time.Now()
+
+	direct := sanitizeTransferredMessage(state.Message{
+		From: "bob", Text: "hello", At: now, Encrypted: true, SenderVerified: true, Signed: true,
+	}, now)
+	if !direct.Transferred {
+		t.Error("a transferred 1:1 message is not marked as transferred")
+	}
+	if direct.Encrypted || direct.SenderVerified || direct.Signed || direct.Forged {
+		t.Errorf("a transferred 1:1 message kept a trust flag it cannot prove: %+v", direct)
+	}
+
+	room := sanitizeTransferredRoomMessage(state.Message{
+		From: "bob", Text: "hello", At: now, SenderVerified: true, Signed: true, Forged: true,
+	}, now)
+	if !room.Transferred {
+		t.Error("transferred room history is not marked as transferred")
+	}
+	if room.SenderVerified || room.Signed || room.Forged {
+		t.Errorf("transferred room history kept a trust flag it cannot prove: %+v", room)
+	}
+	// Encrypted stays SET here, and deliberately: RoomHistorySince relays a
+	// plaintext room message's text verbatim but refuses an encrypted one whose
+	// envelope is missing. Cleared, forged history planted on one device would
+	// be served onward to other members as catch-up.
+	if !room.Encrypted {
+		t.Error("transferred room history would be relayable as catch-up")
+	}
+}

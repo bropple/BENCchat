@@ -916,13 +916,19 @@ func TestAMemberEpochCannotSaturateTheCounter(t *testing.T) {
 		}
 		// ...and our own stamps must be untouched by the poison: strictly
 		// increasing, nowhere near the ceiling, never zero.
-		first := a.members.nextEpoch("room-1")
-		second := a.members.nextEpoch("room-1")
+		first := a.members.nextEpoch("room-1", time.Now())
+		second := a.members.nextEpoch("room-1", time.Now())
 		if first == 0 || second == 0 || second <= first {
 			t.Errorf("poison=%d: our stamps wrapped or stalled: %d then %d", poison, first, second)
 		}
-		if first > 1000 {
-			t.Errorf("poison=%d: a member's epoch dragged our counter to %d", poison, first)
+		// And nowhere near the poison. Our stamps are floored at the wall clock
+		// (so an owner's two devices agree without talking), so "small" is no
+		// longer the test — "not dragged toward what the member claimed" is.
+		clean := rosterTestApp(t, "carol")
+		clean.members.pinOwner("room-1", "alice")
+		if want := clean.members.nextEpoch("room-1", time.Now()); first > want+60 {
+			t.Errorf("poison=%d: a member's epoch dragged our counter to %d, want about %d",
+				poison, first, want)
 		}
 	}
 }
@@ -935,7 +941,7 @@ func TestNextEpochSaturatesInsteadOfWrapping(t *testing.T) {
 	var m roomMembers
 	m.acceptOwnerEpoch("r", ^uint64(0))
 	for i := 0; i < 3; i++ {
-		if got := m.nextEpoch("r"); got != ^uint64(0) {
+		if got := m.nextEpoch("r", time.Now()); got != ^uint64(0) {
 			t.Fatalf("nextEpoch at the ceiling = %d, want it pinned there", got)
 		}
 	}
@@ -1349,5 +1355,60 @@ func TestRestoreRefusesTombstonedMembers(t *testing.T) {
 	}
 	if !a.isRoomMember("room-1", "alice") {
 		t.Error("an ordinary member was not restored")
+	}
+}
+
+// TestAnOwnersTwoDevicesDoNotCollideOnEpochs.
+//
+// An owner's devices never see each other's rosters — SendRoster skips self, and
+// the server refuses a self-addressed message anyway — so each keeps its own
+// counter. With a plain increment the second device to remove somebody stamps an
+// epoch the first already used, every recipient discards it as stale, and the
+// owner is told the room was re-keyed. Flooring at the wall clock gives both
+// devices a counter they already share without exchanging anything.
+func TestAnOwnersTwoDevicesDoNotCollideOnEpochs(t *testing.T) {
+	laptop := rosterTestApp(t, "me")
+	desktop := rosterTestApp(t, "me")
+	for _, a := range []*App{laptop, desktop} {
+		a.client.MarkRoomEncrypted("room-1")
+		a.members.pinOwner("room-1", "me")
+		a.members.setAll("room-1", []string{"alice", "bob"}, "me")
+	}
+
+	now := time.Now()
+	first := laptop.members.nextEpoch("room-1", now)
+	// The desktop has never heard about that one, and stamps a second later.
+	second := desktop.members.nextEpoch("room-1", now.Add(time.Second))
+
+	if second <= first {
+		t.Errorf("the second device's roster would be discarded as stale: %d then %d", first, second)
+	}
+
+	// Within the same second the clock cannot separate them, so the strict
+	// increment must: a device removing twice in a row still moves forward.
+	again := laptop.members.nextEpoch("room-1", now)
+	if again <= first {
+		t.Errorf("two removals in one second collided: %d then %d", first, again)
+	}
+}
+
+// TestTheClockIsAFloorNotTheValue: a clock that has gone backwards must not
+// stall or rewind an epoch, or a removal made after an NTP correction would be
+// discarded as a replay of one made before it.
+func TestTheClockIsAFloorNotTheValue(t *testing.T) {
+	a := rosterTestApp(t, "me")
+	a.members.pinOwner("room-1", "me")
+
+	now := time.Now()
+	first := a.members.nextEpoch("room-1", now)
+	second := a.members.nextEpoch("room-1", now.Add(-24*time.Hour))
+	if second <= first {
+		t.Errorf("a backwards clock rewound the epoch: %d then %d", first, second)
+	}
+
+	// And a clock at the zero value must not drag it down either.
+	third := a.members.nextEpoch("room-1", time.Time{})
+	if third <= second {
+		t.Errorf("a zero clock rewound the epoch: %d then %d", second, third)
 	}
 }

@@ -535,6 +535,7 @@ func sanitizeTransferredMessage(m state.Message, now time.Time) state.Message {
 	m.SenderVerified = false
 	m.Signed = false
 	m.Forged = false
+	m.Transferred = true
 	m.ID = "" // resend handles belong to messages THIS device sent
 	if m.At.After(now) {
 		m.At = now
@@ -559,6 +560,8 @@ func sanitizeTransferredRoomMessage(m state.Message, now time.Time) state.Messag
 	m.Encrypted = true
 	m.SenderVerified = false
 	m.Signed = false
+	m.Forged = false
+	m.Transferred = true
 	m.ID = ""
 	if m.At.After(now) {
 		m.At = now

@@ -57,7 +57,10 @@ func TestAudit_SeenOverflowDefeatsBundleWinding(t *testing.T) {
 		base64.StdEncoding.EncodeToString(make([]byte, 64))
 	bob.decodeRoomMessageFrom("4-0-r", "mallory", poison)
 
-	bundle := bob.ChainBundleFor("4-0-r")
+	// A bundle is only built for a member, so say who is in the room. Bob is
+	// the one handing it over; Alice is the recipient.
+	bob.SetRoomMembersFunc(func(string) []string { return []string{"alice"} })
+	bundle := bob.ChainBundleFor("4-0-r", "alice")
 	if len(bundle) != 1 {
 		t.Fatalf("bundle = %d views", len(bundle))
 	}

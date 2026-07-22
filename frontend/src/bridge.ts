@@ -70,6 +70,16 @@ export interface Message {
   /** Room message whose signature did NOT verify — someone in the room is
    *  putting words in another member's mouth. */
   forged?: boolean;
+  /** History that arrived in a device transfer rather than over the wire.
+   *
+   *  It overrides the lock, because none of the other flags can be honest about
+   *  a transferred message: the sealed envelope doesn't travel, so nothing about
+   *  the original can be re-checked on this device. A 1:1 message that genuinely
+   *  was encrypted arrives with `encrypted` cleared, and a room message arrives
+   *  with it set for an unrelated reason (it keeps catch-up from relaying
+   *  unverifiable history onward). Showing either as a padlock would claim
+   *  something this device cannot know. */
+  transferred?: boolean;
   /** Outgoing message the server never accepted — rejected, or silently dropped
    *  (which is what hitting a rate limit looks like). It's still in your local
    *  history, so it has to be visibly marked or it reads as delivered. */
