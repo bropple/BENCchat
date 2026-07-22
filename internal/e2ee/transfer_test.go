@@ -130,6 +130,7 @@ func TestTheTransferSignatureCoversEverything(t *testing.T) {
 		"recipient": func(x Transfer) Transfer { x.Recipient = "another-device"; return x },
 		"payload":   func(x Transfer) Transfer { x.Payload = append([]byte{}, "swapped"...); return x },
 		"timestamp": func(x Transfer) Transfer { x.IssuedAt = 1; return x },
+		"signer":    func(x Transfer) Transfer { x.SignerID = "another-device"; return x },
 	}
 	for name, edit := range tamper {
 		got := edit(base)
@@ -167,6 +168,37 @@ func TestTransferIsNotAnotherSignature(t *testing.T) {
 	r, _ := SignRoster(Roster{Room: "r", Members: []string{"me"}, Owner: "me", Author: "me"}, p.sign)
 	if ed25519.Verify(p.sign.Public, ctx, r.Signature) {
 		t.Error("a roster signature verified as a transfer")
+	}
+}
+
+// TestTheSignerLabelIsBoundNotFiltered: relabelling a bundle used to fail only
+// because the label picks which key verification tries, which makes the label a
+// lookup hint rather than a signed claim. With SignerID inside the context, a
+// relabelled bundle fails even against a key set that contains the named device.
+func TestTheSignerLabelIsBoundNotFiltered(t *testing.T) {
+	old, other, fresh := newTransferParty(t), newTransferParty(t), newTransferParty(t)
+
+	sealed, err := SealTransfer("me", fresh.signID, fresh.box.Public, []byte("x"), old.box.Private, old.sign, 1)
+	if err != nil {
+		t.Fatalf("SealTransfer: %v", err)
+	}
+	sealed.SignerID = other.signID
+
+	_, err = OpenTransfer(sealed, "me", fresh.signID,
+		[]ed25519.PublicKey{old.sign.Public, other.sign.Public},
+		[][32]byte{old.box.Public, other.box.Public}, fresh.box.Private)
+	if !errors.Is(err, ErrTransferSignature) {
+		t.Errorf("a relabelled bundle gave %v, want ErrTransferSignature", err)
+	}
+}
+
+// TestDecodeRefusesAnOversizedTransfer: the payload limit was enforced by
+// SealTransfer and EncodeTransfer — the sender's half — and nowhere on the path
+// an attacker actually writes to. The decoder must refuse before it allocates.
+func TestDecodeRefusesAnOversizedTransfer(t *testing.T) {
+	huge := TransferPrefix + strings.Repeat("A", MaxEncodedTransfer)
+	if _, err := DecodeTransfer(huge); err == nil {
+		t.Error("an oversized transfer decoded")
 	}
 }
 

@@ -59,8 +59,17 @@ const transferDomain = "BENCO-XFER-v1"
 
 // maxTransferPayload bounds a bundle. History is the bulk of it and there is no
 // useful ceiling on how much of that an account has, so this is generous — but
-// it is present, because the length arrives from outside.
+// it is present, because the length arrives from outside. Enforced on the way
+// out AND in DecodeTransfer: a limit the encoder applies and the decoder does
+// not is a limit on honest senders only.
 const maxTransferPayload = 64 * 1024 * 1024
+
+// MaxEncodedTransfer bounds an ENCODED bundle: the payload limit, headroom for
+// the framing fields, and base64 expansion. Exported so a caller reading a
+// bundle off disk or a socket can refuse an oversized one while the bytes are
+// still cheap — DecodeTransfer re-checks it, but by the time a decoder sees the
+// string, an uncapped read has already paid for it in memory several times over.
+const MaxEncodedTransfer = len(TransferPrefix) + (maxTransferPayload+4096+2)/3*4
 
 // ErrTransferSignature means a bundle did not verify against the sender's
 // published signing keys.
@@ -91,12 +100,19 @@ type Transfer struct {
 }
 
 // transferSigningContext is what gets signed.
+//
+// SignerID is inside the signature too. Verification never actually needed it —
+// the label only picks which manifest key to try, and a relabelled bundle fails
+// against the wrong key — but that made it a lookup hint rather than a bound
+// claim, and a field the recipient reads out of a bundle should be a field the
+// signature covers, not one that happens to be checked as a side effect.
 func transferSigningContext(t Transfer) []byte {
 	out := make([]byte, 0, 64+len(t.Account)+len(t.Recipient)+len(t.Payload))
 	out = append(out, transferDomain...)
 	out = append(out, 0x00)
 	out = appendLenPrefixed(out, t.Account)
 	out = appendLenPrefixed(out, t.Recipient)
+	out = appendLenPrefixed(out, t.SignerID)
 
 	var n [4]byte
 	binary.BigEndian.PutUint32(n[:], uint32(len(t.Payload)))
@@ -223,6 +239,13 @@ func DecodeTransfer(body string) (Transfer, error) {
 	if !IsTransfer(body) {
 		return t, errors.New("e2ee: not a transfer bundle")
 	}
+	// Before the base64 decode, which is the first of several allocations an
+	// oversized body would otherwise be paid for in full. SealTransfer and
+	// EncodeTransfer already enforce the limit — but those run on the sender,
+	// and the sender is not who the limit is for.
+	if len(body) > MaxEncodedTransfer {
+		return t, fmt.Errorf("e2ee: transfer is %d bytes, limit is %d", len(body), MaxEncodedTransfer)
+	}
 	raw, err := base64.StdEncoding.DecodeString(body[len(TransferPrefix):])
 	if err != nil {
 		return t, fmt.Errorf("e2ee: decode transfer: %w", err)
@@ -256,6 +279,9 @@ func DecodeTransfer(body string) (Transfer, error) {
 	payload, ok := take()
 	if !ok {
 		return Transfer{}, errors.New("e2ee: truncated transfer payload")
+	}
+	if len(payload) > maxTransferPayload {
+		return Transfer{}, fmt.Errorf("e2ee: transfer payload is %d bytes, limit is %d", len(payload), maxTransferPayload)
 	}
 	if len(raw) < 8 {
 		return Transfer{}, errors.New("e2ee: truncated transfer")
