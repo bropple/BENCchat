@@ -163,11 +163,15 @@ func publishSelfDevices(t *testing.T, c *Client, devices ...e2ee.Device) {
 		if err != nil {
 			t.Fatalf("SignManifest: %v", err)
 		}
-		accepted, serverCounter, ok := c.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
+		outcome, serverCounter, ok := c.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
 		if !ok {
 			t.Fatal("the key directory did not answer a publish")
 		}
-		if accepted {
+		if outcome == PublishIdentityPinned {
+			t.Fatal("this account is bound to a different identity key; the test account's " +
+				"key directory needs clearing (DELETE /user/{screenname}/keydir) before it can publish")
+		}
+		if outcome == PublishStored {
 			t.Logf("published %d device(s) at counter %d", len(devices), counter)
 			return
 		}

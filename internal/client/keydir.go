@@ -97,7 +97,7 @@ type keyDirReply struct {
 	// Publish. counter is what the server holds after the call, which is what
 	// makes a lost race actionable: a client refused as stale learns the value
 	// it has to beat instead of having to re-query for it.
-	accepted bool
+	outcome  PublishOutcome
 	counter  uint64
 
 	stored bool
@@ -176,34 +176,57 @@ func (c *Client) QueryManifest(screenName string) (SignedManifest, bool) {
 	}
 }
 
+// PublishOutcome is what the key directory did with a manifest.
+//
+// Three-valued rather than a boolean, because the two failures want opposite
+// responses. A stale counter is a race with our own other device and the fix is
+// to re-sign higher; a pinned identity cannot be fixed by any client, and
+// retrying it just spins while the user is told nothing.
+type PublishOutcome uint8
+
+const (
+	// PublishRefused is a stale or out-of-range counter. Retryable.
+	PublishRefused PublishOutcome = iota
+	// PublishStored means the manifest is now the account's.
+	PublishStored
+	// PublishIdentityPinned means the account is bound to a DIFFERENT identity
+	// key than the one we just signed with. Not retryable: an administrator has
+	// to clear the account's key directory, which is destructive by design.
+	//
+	// Reaching this means one of two things, and they are worth distinguishing
+	// out loud because the remedy differs: either this device unwrapped the
+	// wrong identity (a stale or foreign recovery key), or somebody else has
+	// established an identity on this account.
+	PublishIdentityPinned
+)
+
 // PublishManifest publishes this account's signed device manifest.
 //
-// manifest must be the exact bytes that were signed. accepted is false when the
-// server refused it — most usefully because the counter did not advance, which
-// means another device published first; counter then carries what the server
-// holds, so the caller can re-sign above it rather than guess.
-func (c *Client) PublishManifest(manifest []byte, sigAlg uint8, signature []byte) (accepted bool, counter uint64, ok bool) {
+// manifest must be the exact bytes that were signed. counter carries what the
+// server holds afterwards, so a caller refused as stale can re-sign above it
+// rather than guess.
+func (c *Client) PublishManifest(manifest []byte, sigAlg uint8, signature []byte) (outcome PublishOutcome, counter uint64, ok bool) {
 	c.mu.Lock()
 	sess := c.session
 	c.mu.Unlock()
 	if sess == nil || !sess.SupportsKeyDir() {
-		return false, 0, false
+		return PublishRefused, 0, false
 	}
 
 	reqID, err := sess.PublishManifest(manifest, sigAlg, signature)
 	if err != nil {
 		c.log.Warn("key directory publish failed to send", "err", err)
-		return false, 0, false
+		return PublishRefused, 0, false
 	}
 	ch, done := c.waitKeyDir(reqID)
 	defer done()
 
 	select {
 	case r := <-ch:
-		return r.accepted, r.counter, true
+		return r.outcome, r.counter, true
 	case <-time.After(keyDirTimeout):
 		c.log.Warn("key directory publish timed out")
-		return false, 0, false
+		return PublishRefused, 0, false
 	}
 }
 
@@ -404,15 +427,24 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 			c.log.Warn("bad key directory publish reply", "err", err)
 			return
 		}
-		if reply.Accepted == 0 {
+		// Anything we do not recognize reads as a refusal, so a server that
+		// grows a new outcome cannot make an old client treat it as success.
+		outcome := PublishRefused
+		switch reply.Accepted {
+		case wire.BENCOPublishStored:
+			outcome = PublishStored
+		case wire.BENCOPublishIdentityPinned:
+			outcome = PublishIdentityPinned
+			c.log.Warn("the key directory is bound to a different identity for this account")
+		default:
 			// Worth logging rather than only returning: the usual cause is
 			// another device of ours having published at a higher counter, and
 			// that is a fact about the account, not about this call.
 			c.log.Info("key directory refused a manifest", "server_counter", reply.Counter)
 		}
 		c.deliverKeyDir(frame.RequestID, keyDirReply{
-			accepted: reply.Accepted != 0,
-			counter:  reply.Counter,
+			outcome: outcome,
+			counter: reply.Counter,
 		})
 
 	case wire.BENCOKeyDirPutBackupReply:

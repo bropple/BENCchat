@@ -44,7 +44,7 @@ import (
 type keyDirectory interface {
 	SupportsKeyDir() bool
 	QueryManifest(screenName string) (client.SignedManifest, bool)
-	PublishManifest(manifest []byte, sigAlg uint8, signature []byte) (accepted bool, counter uint64, ok bool)
+	PublishManifest(manifest []byte, sigAlg uint8, signature []byte) (outcome client.PublishOutcome, counter uint64, ok bool)
 	PutIdentityBackup(kdf uint8, params, salt, blob []byte) (stored bool, ok bool)
 	GetIdentityBackup() (client.IdentityBackup, bool)
 }
@@ -388,11 +388,27 @@ func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error 
 		if err != nil {
 			return err
 		}
-		accepted, serverCounter, ok := a.keyDir.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
+		outcome, serverCounter, ok := a.keyDir.PublishManifest(manifest, wire.BENCOAlgEd25519, sig)
 		if !ok {
 			return fmt.Errorf("the key directory did not answer")
 		}
-		if accepted {
+		if outcome == client.PublishIdentityPinned {
+			// Not retryable, and not a race. The account already has an identity
+			// and it is not the one we just signed with, so climbing the counter
+			// would spin forever against a check that has nothing to do with
+			// counters.
+			//
+			// Two causes, opposite remedies, and we genuinely cannot tell them
+			// apart — which is the honest thing to say rather than guessing.
+			// Either this device unwrapped the wrong identity (a stale recovery
+			// key, or one from a different account), or somebody else has
+			// established an identity on this account.
+			return fmt.Errorf("this account is already bound to a different identity key, so this device's list was refused. " +
+				"Either the recovery key used here belongs to a different identity, or someone else has claimed this account. " +
+				"Nothing on this device can override it: an administrator has to clear the account's key directory, " +
+				"which permanently destroys the old identity and moves every contact's safety number")
+		}
+		if outcome == client.PublishStored {
 			// Record the counter we just published BEFORE anything else can
 			// query. Otherwise our own fresh manifest could be answered by a
 			// replay of the previous one, which our high-water mark would then

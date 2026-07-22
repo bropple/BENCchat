@@ -40,9 +40,9 @@ func (f *fakeKeyDir) QueryManifest(string) (client.SignedManifest, bool) {
 	return client.SignedManifest{}, !f.unreachable
 }
 
-func (f *fakeKeyDir) PublishManifest([]byte, uint8, []byte) (bool, uint64, bool) {
+func (f *fakeKeyDir) PublishManifest([]byte, uint8, []byte) (client.PublishOutcome, uint64, bool) {
 	f.publishes++
-	return true, 1, true
+	return client.PublishStored, 1, true
 }
 
 func (f *fakeKeyDir) PutIdentityBackup(kdf uint8, params, salt, blob []byte) (bool, bool) {
