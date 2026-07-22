@@ -18,31 +18,6 @@ func (c *Client) SetE2EEKeyPair(kp e2ee.KeyPair, has bool) {
 	c.e2eeMu.Unlock()
 }
 
-// SetOwnDeviceKeys installs this ACCOUNT's full published device set — ours plus
-// any other machine signed in to it.
-//
-// Kept apart from the peer cache on purpose. learnFromManifest deliberately does
-// not file our own screen name as a peer, because that would record a trust entry
-// against ourselves and then warn us that our own key had changed the moment a
-// second device published. But sent-message sync needs exactly those keys, and
-// reading them out of a cache that is never populated is a silent no-op — the
-// sync would simply never fire, and nothing would say so.
-func (c *Client) SetOwnDeviceKeys(keys [][32]byte) {
-	c.e2eeMu.Lock()
-	c.ownDeviceKeys = keys
-	c.e2eeMu.Unlock()
-}
-
-// ownDevices returns the account's device set and our private key.
-func (c *Client) ownDevices() (keys [][32]byte, ourPriv [32]byte, ok bool) {
-	c.e2eeMu.Lock()
-	defer c.e2eeMu.Unlock()
-	if !c.e2eeHasKP || len(c.ownDeviceKeys) == 0 {
-		return nil, [32]byte{}, false
-	}
-	return c.ownDeviceKeys, c.e2eeKP.Private, true
-}
-
 // EncryptionPrivateKey returns this device's box private key, for the paths that
 // seal outside the ordinary message flow.
 func (c *Client) EncryptionPrivateKey() ([32]byte, bool) {
@@ -285,13 +260,8 @@ func (c *Client) seenBefore(from string, id [16]byte) bool {
 	if id == zero {
 		return false // a legacy envelope carried no ID; nothing to compare
 	}
-	return c.seenKeyBefore(state.NormalizeScreenName(from) + ":" + string(id[:]))
-}
+	key := state.NormalizeScreenName(from) + ":" + string(id[:])
 
-// seenKeyBefore is seenBefore over an arbitrary key, for traffic whose identity
-// is derived rather than carried — sync copies, whose ID is a hash of the copy
-// itself.
-func (c *Client) seenKeyBefore(key string) bool {
 	c.seenMu.Lock()
 	defer c.seenMu.Unlock()
 	if c.seenIDs == nil {
@@ -353,126 +323,4 @@ func (c *Client) setLocateCapsProbe(fn func(screenName string, caps []oscar.Capa
 	c.e2eeMu.Lock()
 	c.locateCapsProbe = fn
 	c.e2eeMu.Unlock()
-}
-
-// --- Sent-message sync ------------------------------------------------------
-
-// syncSentMessage sends a copy of an outbound message to our own other devices.
-//
-// Best effort and deliberately silent on failure: the message itself has already
-// gone, and failing to mirror it to a laptop is not a reason to tell the user
-// their message did not send. It is logged, not surfaced.
-//
-// Gated on the account actually having another device. Every sync costs a second
-// outbound message against the same rate limiter as the first, and a
-// single-device account — which is most of them — would otherwise pay double for
-// a copy nothing will ever read.
-func (c *Client) syncSentMessage(to, text string) {
-	c.e2eeMu.Lock()
-	self := c.selfNormalized
-	signer, hasSigner := c.signKP, c.hasSignKP
-	c.e2eeMu.Unlock()
-	if self == "" || !hasSigner {
-		return
-	}
-	// Never mirror a message we sent to ourselves. It already reached every
-	// device, and a sync of a sync is a loop with a network hop in it.
-	if state.NormalizeScreenName(to) == self {
-		return
-	}
-
-	ourKeys, ourPriv, ok := c.ownDevices()
-	if !ok || len(ourKeys) < 2 {
-		// Fewer than two device keys means this device is the only one, so
-		// there is nobody to tell.
-		return
-	}
-
-	body, err := e2ee.EncodeSentCopy(e2ee.SentCopy{
-		Origin: e2ee.SignerID(signer.Public),
-		Peer:   to,
-		Text:   text,
-		SentAt: time.Now().Unix(),
-	})
-	if err != nil {
-		c.log.Warn("could not encode a sent-message copy", "err", err)
-		return
-	}
-	env, err := e2ee.SealFor(body, ourKeys, ourPriv)
-	if err != nil {
-		c.log.Warn("could not seal a sent-message copy", "err", err)
-		return
-	}
-
-	c.mu.Lock()
-	session := c.session
-	c.mu.Unlock()
-	if session == nil {
-		return
-	}
-	// To ourselves. The server relays an inbound message to every instance of
-	// the recipient, which is precisely the fan-out we want and the reason this
-	// needs no new infrastructure.
-	if _, _, err := session.SendMessage(self, env, false); err != nil {
-		c.log.Debug("could not deliver a sent-message copy", "err", err)
-	}
-}
-
-// applySentCopy records a message another of our devices sent.
-//
-// The sender check is the whole trust story here: the envelope was sealed to our
-// own device keys and authenticated against the sender's, so only somebody
-// holding one of THIS ACCOUNT's device private keys could have produced it. A
-// copy claiming to come from anyone else is not a sync, it is somebody trying to
-// write into our conversations.
-func (c *Client) applySentCopy(from, body string) {
-	c.e2eeMu.Lock()
-	self := c.selfNormalized
-	signer, hasSigner := c.signKP, c.hasSignKP
-	c.e2eeMu.Unlock()
-	if state.NormalizeScreenName(from) != self {
-		c.log.Warn("discarding a sent-message copy that did not come from us", "from", from)
-		return
-	}
-
-	sc, err := e2ee.DecodeSentCopy(body)
-	if err != nil {
-		c.log.Warn("bad sent-message copy", "err", err)
-		return
-	}
-	// Our own copy, come back around. Harmless to receive and wrong to apply:
-	// the message is already in this device's store, and adding it again would
-	// show the user everything they said twice.
-	if hasSigner && sc.Origin == e2ee.SignerID(signer.Public) {
-		return
-	}
-	// The same copy twice — a redelivery, or two connections briefly overlapping
-	// — must not put the message in the conversation twice.
-	id := e2ee.SentCopyID(sc)
-	if c.seenKeyBefore("sync:" + id) {
-		c.log.Debug("dropping a duplicate sent-message copy")
-		return
-	}
-
-	at := time.Unix(sc.SentAt, 0)
-	if !e2ee.PlausibleSendTime(at, time.Now()) {
-		// Clamped rather than refused. The stamp is another of our own devices'
-		// clocks, which can be wrong without anything being wrong, and dropping
-		// the message over it would lose real content to a timezone bug.
-		c.log.Debug("a sent-message copy carried an implausible time; using now", "at", at)
-		at = time.Now()
-	}
-
-	c.store.AddMessage(state.Message{
-		From:      c.store.Self().ScreenName,
-		To:        sc.Peer,
-		Text:      sc.Text,
-		At:        at,
-		Outgoing:  true,
-		Encrypted: true,
-		// No cookie: this is not a send from THIS device, so there is no
-		// acknowledgement coming and nothing to track. The ID is derived from
-		// the copy rather than assigned, so it is stable across devices.
-		ID: id,
-	})
 }

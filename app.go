@@ -411,6 +411,19 @@ func (a *App) doSignOn(screenName, password string, remember bool) error {
 		}
 	}
 
+	// The device signing key goes in BEFORE sign-on, split out from the rest of
+	// setupE2EE below. The server challenges this session to prove which device
+	// it is the moment we announce ourselves online, the read loop is already
+	// running when SignOn returns, and a challenge is asked exactly once — so a
+	// key installed afterwards loses the race essentially always (the keyring
+	// read here can sit behind a D-Bus unlock prompt for minutes while the
+	// challenge sits buffered on the socket). An unanswered challenge means a
+	// session the server may refuse everything, presenting as a mystery hang
+	// rather than an auth failure. Only the signing key moves up: it depends on
+	// nothing but the keyring, while the rest of setupE2EE (trust state,
+	// directory round trips) legitimately wants the live session.
+	a.setupSigningKey(screenName)
+
 	if err := a.client.SignOn(a.ctx, a.cfg.Address(), oscar.Credentials{
 		ScreenName: screenName,
 		Password:   password,

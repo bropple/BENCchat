@@ -142,6 +142,21 @@ func (c *Client) deliverKeyDir(reqID uint32, reply keyDirReply) {
 	}
 }
 
+// keyDirSolicited reports whether reqID belongs to a request this client sent
+// and is still waiting on.
+//
+// The waiter map doubles as the record of what we asked: an entry exists from
+// just after the request goes out until its caller stops waiting. Anything not
+// in it was never requested — or answered after the caller gave up, which is
+// treated the same on purpose: a reply we can no longer correlate is exactly as
+// unverifiable as one we never solicited, and learning from it anyway would
+// reopen the unsolicited-reply hole for any server willing to answer slowly.
+func (c *Client) keyDirSolicited(reqID uint32) bool {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	return c.keyDirWait[reqID] != nil
+}
+
 // QueryManifest fetches an account's signed manifest from the directory.
 //
 // ok is false when the directory is unavailable or the reply does not arrive.
@@ -406,6 +421,21 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 		}
 
 	case wire.BENCOKeyDirQueryReply:
+		// Correlate before reading anything. A signature cannot vet a query
+		// reply on its own — a manifest vouches for itself, verified against the
+		// identity key carried INSIDE it, so any freshly minted keypair yields a
+		// "valid" manifest for any screen name. The one thing tying a reply to
+		// reality is that we asked. An unsolicited one is the server's word
+		// alone, and acting on it handed the server a lever: one pushed
+		// self-manifest under a fresh identity read as "this account's identity
+		// was replaced", which signs this client out and deletes its saved
+		// password — repeatably, without touching the real directory. Dropped
+		// unread; a directory that answers questions nobody asked is
+		// misbehaving.
+		if !c.keyDirSolicited(frame.RequestID) {
+			c.log.Warn("dropping an unsolicited key directory reply", "request_id", frame.RequestID)
+			return
+		}
 		reply, err := oscar.DecodeKeyDirQueryReply(body)
 		if err != nil {
 			c.log.Warn("bad key directory query reply", "err", err)
@@ -479,9 +509,10 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 
 // learnFromManifest caches a peer's device keys off a query reply.
 //
-// This runs on every query, not just ones a caller is waiting on, so that a
-// lookup made for any reason keeps the send-side cache warm — the same thing the
-// profile path used to do on a locate reply.
+// This runs on every reply that answers a query WE sent — the dispatcher has
+// already checked the correlation — so that a lookup made for any reason keeps
+// the send-side cache warm, the same thing the profile path used to do on a
+// locate reply. It must never run on an uncorrelated reply; see handleKeyDir.
 //
 // It goes through the verifier and does nothing without one. A manifest that
 // has not been checked is exactly as good as one the server invented, and the
@@ -508,6 +539,18 @@ func (c *Client) learnFromManifest(sm SignedManifest) {
 	// answers with our own account, and treating that like anyone else's would
 	// record a trust entry against ourselves and then warn us that our own key
 	// had changed the moment a second device published.
+	//
+	// This line is load-bearing beyond its own purpose, so it is worth knowing
+	// what it forecloses. Sent-message sync (bc0f912, since removed) mirrored
+	// each outbound message to our other devices by sealing a copy to our own
+	// device keys and addressing it to our own screen name. It could never have
+	// worked: openFrom resolves sender keys out of this same cache, so a copy
+	// from ourselves was undecryptable by construction, and the failure was
+	// silent — the branch simply never ran. The server also refuses a
+	// self-addressed message outright (RequiresAuthorization is true for
+	// self→self), so nothing was relayed either. Rebuilding that idea needs BOTH
+	// fixed, and the second is a server-side authorization decision rather than
+	// anything a client can patch.
 	if c.isSelf(sm.ScreenName) || len(devices) == 0 {
 		return
 	}
@@ -521,10 +564,15 @@ func (c *Client) learnFromManifest(sm SignedManifest) {
 // devices is talking — without this, a device removed from the manifest keeps
 // signing in with the same password and nothing on the server can tell.
 //
-// A challenge we cannot answer is left unanswered rather than answered badly.
-// There is nothing useful to send without the signing key, and an empty or
+// A challenge we cannot answer is left unanswered rather than answered badly —
+// there is nothing useful to send without the signing key, and an empty or
 // invented response would look like an attestation failure rather than like a
-// device that has not finished setting itself up.
+// device that has not finished setting itself up. But it is never left
+// unanswered SILENTLY: the challenge comes once, the server does not re-ask,
+// and under enforcement an unattested session is refused everything for its
+// lifetime. The app installs the signing key before sign-on precisely so this
+// cannot happen in the ordinary flow (see doSignOn); reaching the branch anyway
+// means something is wrong, and the one place that knows is here.
 func (c *Client) answerAttestChallenge(body []byte) {
 	ch, err := oscar.DecodeKeyDirAttestChallenge(body)
 	if err != nil {
@@ -544,6 +592,10 @@ func (c *Client) answerAttestChallenge(body []byte) {
 	signer, ok := c.signingKey()
 	if !ok {
 		c.log.Warn("cannot answer a device challenge: no signing key on this device")
+		c.store.Notify(state.NoticeWarn,
+			"The server asked this device to prove itself and there was no signing key "+
+				"to answer with, so the server may refuse this session. Make sure your "+
+				"keychain is unlocked, then sign off and back on.")
 		return
 	}
 

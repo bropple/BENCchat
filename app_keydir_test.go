@@ -1,13 +1,17 @@
 package main
 
 import (
+	"math"
+	"net"
 	"testing"
 
 	"github.com/benco-holdings/benchat/internal/client"
+	"github.com/benco-holdings/benchat/internal/config"
 	"github.com/benco-holdings/benchat/internal/e2ee"
 	"github.com/benco-holdings/benchat/internal/state"
 	"github.com/benco-holdings/benchat/internal/trust"
 	"github.com/benco-holdings/benchat/internal/wire"
+	"github.com/zalando/go-keyring"
 )
 
 // signedFor builds a manifest exactly as a peer's client would, and signs it.
@@ -40,8 +44,8 @@ func appForVerify(t *testing.T) *App {
 	t.Helper()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	store := state.NewStore()
-	// A real client, because the self-manifest path hands it the account's
-	// device set — the keys sent-message sync mirrors to.
+	// A real client, matching what NewApp wires up; nothing here signs it on,
+	// so it never touches the network.
 	a := &App{store: store, client: client.New(store, nil)}
 	a.histAccount = "us" // what currentAccount() names the trust file after
 	return a
@@ -378,5 +382,120 @@ func TestSelfManifestWithDigestlessPinIsAcceptedAfterRestart(t *testing.T) {
 	// And the pin now carries a digest, so it is self-healed.
 	if b.selfIdentityPin().Digest == "" {
 		t.Error("the pin was not re-recorded with a digest")
+	}
+}
+
+// The server challenges this session to prove which device it is the moment it
+// announces itself online. The read loop is already running when SignOn
+// returns, and the challenge is asked exactly once — so a signing key installed
+// after sign-on loses the race essentially always (the keyring read can sit
+// behind an unlock prompt for minutes while the challenge waits on the socket),
+// and under enforcement the session is then refused everything with no visible
+// cause. The property, not an example: a sign-on that FAILS returns before any
+// post-sign-on setup can run, so the key can only be in the client if it was
+// installed first.
+func TestDeviceSigningKeyIsInstalledBeforeSignOn(t *testing.T) {
+	keyring.MockInit() // the minted key must not land in a real keychain
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// A port that was just listening and no longer is, so the dial fails fast.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+
+	off := false
+	store := state.NewStore()
+	c := client.New(store, nil)
+	a := &App{
+		cfg:    config.Config{AuthHost: "127.0.0.1", AuthPort: port, HistoryEnabled: &off},
+		store:  store,
+		client: c,
+		keyDir: c,
+	}
+
+	// The sign-on cannot succeed: the port is closed, and outside Wails a.ctx
+	// is nil, which the dialer may refuse with a panic before touching the
+	// network at all. Either way doSignOn stops AT the sign-on step, which is
+	// the point — everything after it has provably not run.
+	func() {
+		defer func() { _ = recover() }()
+		_ = a.doSignOn("tester", "hunter2", false)
+	}()
+
+	if _, ok := c.SigningKeyPair(); !ok {
+		t.Fatal("no signing key in the client after a failed sign-on; it must be installed " +
+			"BEFORE SignOn, or the server's device challenge races it and wins")
+	}
+}
+
+// ceilingKeyDir answers a publish the way a hostile directory poisons a pin:
+// refuse the first attempt claiming a counter at the very top of the range,
+// then "accept" whatever the client re-signs. It records the counter of every
+// manifest actually published, because that is where the damage happens —
+// signing at MaxInt64+1 and pinning it on the "success" leaves nextCounter()
+// permanently out of range for an honest server.
+type ceilingKeyDir struct {
+	counters []uint64
+}
+
+func (d *ceilingKeyDir) SupportsKeyDir() bool { return true }
+
+func (d *ceilingKeyDir) QueryManifest(string) (client.SignedManifest, bool) {
+	return client.SignedManifest{}, true
+}
+
+func (d *ceilingKeyDir) PublishManifest(manifest []byte, _ uint8, _ []byte) (client.PublishOutcome, uint64, bool) {
+	m, err := wire.DecodeManifest(manifest)
+	if err != nil {
+		return client.PublishRefused, 0, true
+	}
+	d.counters = append(d.counters, m.Counter)
+	if len(d.counters) == 1 {
+		return client.PublishRefused, math.MaxInt64, true
+	}
+	return client.PublishStored, m.Counter, true
+}
+
+func (d *ceilingKeyDir) PutIdentityBackup(uint8, []byte, []byte, []byte) (bool, bool) {
+	return true, true
+}
+
+func (d *ceilingKeyDir) GetIdentityBackup() (client.IdentityBackup, bool) {
+	return client.IdentityBackup{}, true
+}
+
+// Inbound manifests already refuse a counter above MaxInt64 (see
+// verifyManifest); the publish retry must hold the server's claimed counter to
+// the same rule. Believed, one Rejected reply claiming MaxInt64 walks the
+// client past the ceiling and pins the result, after which every honest publish
+// is refused forever — no device add, no removal — and the only way back is a
+// destructive admin reset of the account's key directory.
+func TestPublishRefusesToClimbPastTheCounterCeiling(t *testing.T) {
+	a := appForVerify(t)
+	a.store.SetSelf("us")
+	dir := &ceilingKeyDir{}
+	a.keyDir = dir
+
+	kp, err := e2ee.GenerateIdentityKey()
+	if err != nil {
+		t.Fatalf("GenerateIdentityKey: %v", err)
+	}
+	defer kp.Zero()
+
+	if err := a.publishManifest(kp, []e2ee.Device{{Box: box(1)}}); err == nil {
+		t.Fatal("a publish that could only proceed past the counter ceiling reported success")
+	}
+	for _, ctr := range dir.counters {
+		if ctr == 0 || ctr > math.MaxInt64 {
+			t.Errorf("a manifest went out at out-of-range counter %d", ctr)
+		}
+	}
+	// The lasting damage would be the pin: once it records a counter past the
+	// ceiling, this device can never publish again. It must not have moved.
+	if pin := a.selfIdentityPin(); pin.Counter != 0 {
+		t.Errorf("the identity pin moved to counter %d on a refused publish", pin.Counter)
 	}
 }

@@ -289,12 +289,6 @@ func (a *App) onSelfManifest(identity ed25519.PublicKey, m wire.BENCOManifest, d
 	wasLinked := a.linked
 	a.trustMu.Unlock()
 
-	// The client needs these to mirror sent messages to our other devices, and
-	// it cannot get them from the peer cache — our own screen name is
-	// deliberately not filed there, so reading them from it would be a silent
-	// no-op with nothing to say it had happened.
-	a.client.SetOwnDeviceKeys(e2ee.BoxKeysOf(devices))
-
 	if pinned.Key != "" && pinned.Key != encoded {
 		// Proposal §6, row two.
 		a.setLinked(false)
@@ -442,12 +436,8 @@ func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error 
 				devices: devices,
 			}
 			a.e2eeDevices = e2ee.BoxKeysOf(devices)
-			own := a.e2eeDevices
 			a.manifestIssuedAt = issuedAt
 			a.trustMu.Unlock()
-			// Outside trustMu: this takes the client's lock, and holding one
-			// across the other is how a deadlock gets built by accident.
-			a.client.SetOwnDeviceKeys(own)
 			a.setLinked(true)
 			return nil
 		}
@@ -455,6 +445,19 @@ func (a *App) publishManifest(kp e2ee.IdentityKey, devices []e2ee.Device) error 
 		// server now holds rather than guessing.
 		if serverCounter < counter {
 			return fmt.Errorf("the key directory refused the device list")
+		}
+		// The server's value gets the same ceiling verifyManifest applies to a
+		// counter arriving in a manifest — this is the one path where an
+		// unchecked one used to come straight from the server. Believed, a
+		// refusal claiming MaxInt64 makes us sign at MaxInt64+1, and if the
+		// server then "accepts" it, that value is pinned: every later
+		// nextCounter() is out of range, an honest server refuses it forever,
+		// and this account can never publish again — no device add, no removal —
+		// short of a destructive admin reset. No honest directory is anywhere
+		// near this value, so there is nothing to climb to; refuse instead.
+		if serverCounter >= math.MaxInt64 {
+			return fmt.Errorf("the key directory reported a device-list counter at the top of its range, " +
+				"which no honest server reaches — refusing to publish over it")
 		}
 		counter = serverCounter + 1
 	}

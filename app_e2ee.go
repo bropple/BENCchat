@@ -80,7 +80,10 @@ func (a *App) setupE2EE(screenName string) {
 		a.e2eePub = kp.Public
 	}
 	a.client.SetE2EEKeyPair(kp, a.e2eeHasKey)
-	a.setupSigningKey(screenName)
+	// The signing key is deliberately NOT loaded here. doSignOn installs it
+	// before the client signs on, because the server's device challenge arrives
+	// as soon as the session announces itself and is never re-asked — by the
+	// time this function runs, the one chance to answer it has passed.
 	a.client.SetE2EEOn(a.cfg.E2EEOn() && a.e2eeHasKey)
 
 	// Load this account's verified peer keys so the UI can flag verified vs.
@@ -104,11 +107,6 @@ func (a *App) setupE2EE(screenName string) {
 	// learned — silently, since nothing errors. It goes in before anything can
 	// query the directory.
 	a.installManifestVerifier()
-	// Cleared with the rest of the per-account state above, but from outside
-	// trustMu: this reaches into the client's own lock, and holding one lock
-	// across a call that takes another is how orderings get established by
-	// accident.
-	a.client.SetOwnDeviceKeys(nil)
 	a.client.SetPeerKeyHandler(a.notePeerKey)
 	a.client.SetRoomInviteHandler(a.handleRoomInvite)
 	a.client.SetRoomMembersFunc(a.members.list)
@@ -128,11 +126,16 @@ func (a *App) setupE2EE(screenName string) {
 	go a.setupIdentity()
 }
 
-// setupSigningKey loads or mints this device's room-message signing key.
+// setupSigningKey loads or mints this device's signing key — the one that
+// signs room messages and answers the server's device challenge.
 //
 // Separate from the encryption key because the two do different jobs: X25519
 // agrees on secrets, Ed25519 proves authorship. A room's group key is shared,
 // so without this any member could produce messages attributed to anyone else.
+//
+// Called from doSignOn BEFORE the session comes up, not from setupE2EE with
+// everything else: the challenge this key answers arrives the instant the
+// session exists, so the key has to be in the client first.
 func (a *App) setupSigningKey(screenName string) {
 	var kp e2ee.SigningKeyPair
 	have := false

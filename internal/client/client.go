@@ -85,9 +85,6 @@ type Client struct {
 	seenIDs map[string]bool
 	// locateCapsProbe is a test hook; see setLocateCapsProbe.
 	locateCapsProbe func(screenName string, caps []oscar.Capability)
-	// ownDeviceKeys is this ACCOUNT's published device set, ours included.
-	// Guarded by e2eeMu. Not in e2eeKeys — see SetOwnDeviceKeys.
-	ownDeviceKeys [][32]byte
 	// onRoster is notified when a verified roster arrives. Guarded by e2eeMu.
 	onRoster rosterHandler
 	// peerHistoryFn reports whether a peer has ever been seen to publish keys,
@@ -334,7 +331,6 @@ func (c *Client) SendMessage(to, text string) error {
 		ID:        strconv.FormatUint(cookie, 16),
 	})
 	c.trackSend(to, cookie, reqID)
-	c.syncSentMessage(to, text)
 	return nil
 }
 
@@ -1155,11 +1151,6 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 			c.handleRoster(msg.From, text)
 			return
 		}
-		// A copy of something WE sent, from one of our own devices.
-		if encrypted && e2ee.IsSentCopy(text) {
-			c.applySentCopy(msg.From, text)
-			return
-		}
 		// Catch-up traffic is likewise machine-to-machine.
 		if encrypted && e2ee.IsCatchup(text) {
 			c.handleCatchup(msg.From, text)
@@ -1211,22 +1202,33 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 	case wire.ICBMErr:
 		// The body is a bare error code, and it doesn't name the message it refers
 		// to — but the request ID does, so the rejected message can be flagged.
-		if p, ok := c.takeSendByReq(frame.RequestID); ok {
-			c.store.SetMessageNotSent(p.to, p.cookie, true)
+		var code uint16
+		if len(body) >= 2 {
+			code = binary.BigEndian.Uint16(body[:2])
 		}
+		p, tracked := c.takeSendByReq(frame.RequestID)
+		if !tracked {
+			// Not one of our tracked chat sends. ICBM also carries the client's
+			// machine-to-machine traffic — invites, rosters, catch-up — and a
+			// rejection of those surfaced as "couldn't send that message" blames
+			// a chat message that in fact went through fine. Log it; whatever
+			// sent it owns deciding what its failure means.
+			c.log.Warn("the server rejected an ICBM that was not a tracked message",
+				"code", code, "reqID", frame.RequestID)
+			return
+		}
+		c.store.SetMessageNotSent(p.to, p.cookie, true)
 		// ErrorCodeNotLoggedOn is heavily overloaded server-side: the consensual-
 		// connection gate, a block, and "offline and won't take offline messages"
 		// all return it. So describe the possibilities rather than asserting one.
-		msg := "The server rejected that action."
-		if len(body) >= 2 {
-			switch binary.BigEndian.Uint16(body[:2]) {
-			case wire.ErrorCodeRateToHost:
-				msg = "You're sending too fast — that message wasn't delivered. " +
-					"Wait a moment, then resend it."
-			case wire.ErrorCodeNotLoggedOn, wire.ErrorCodeInLocalPermitDeny:
-				msg = "Couldn't send that message — you may not be connected to this person, " +
-					"they may have blocked you, or they're offline and not accepting messages."
-			}
+		msg := "The server rejected that message."
+		switch code {
+		case wire.ErrorCodeRateToHost:
+			msg = "You're sending too fast — that message wasn't delivered. " +
+				"Wait a moment, then resend it."
+		case wire.ErrorCodeNotLoggedOn, wire.ErrorCodeInLocalPermitDeny:
+			msg = "Couldn't send that message — you may not be connected to this person, " +
+				"they may have blocked you, or they're offline and not accepting messages."
 		}
 		c.store.Notify(state.NoticeError, msg)
 	}
