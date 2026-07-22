@@ -9,6 +9,7 @@
 #   .\reset-local-state.ps1 -KeepIdentity    # keep the encryption keypair
 #   .\reset-local-state.ps1 -KeepHistory     # keep message history
 #   .\reset-local-state.ps1 -KeepServer      # keep the server address
+#   .\reset-local-state.ps1 -KeepBackups     # keep previous runs' backup folders
 #   .\reset-local-state.ps1 -DryRun          # show what would happen
 #   .\reset-local-state.ps1 -Yes             # skip the confirmation
 #
@@ -17,15 +18,18 @@
 # or run it without changing your policy permanently:
 #     powershell -ExecutionPolicy Bypass -File .\reset-local-state.ps1
 #
-# NOTHING IS DELETED. Files move to a timestamped backup folder and the restore
-# command is printed. Credentials are the exception — those cannot be backed up,
-# which is why -KeepIdentity exists.
+# Files move to a timestamped backup folder and the restore command is printed.
+# Two exceptions: credentials cannot be backed up (which is why -KeepIdentity
+# exists), and a default run DELETES the backup folders previous runs left
+# behind — they are themselves snapshots, and keeping every one forever is what
+# stops a "blank slate" from being blank. -KeepBackups keeps them.
 
 [CmdletBinding()]
 param(
     [switch]$KeepIdentity,
     [switch]$KeepHistory,
     [switch]$KeepServer,
+    [switch]$KeepBackups,
     [switch]$DryRun,
     [switch]$Yes,
     [string]$Account = ""
@@ -82,20 +86,52 @@ function Get-Accounts {
 $Accounts = if ($Account) { @($Account) } else { @(Get-Accounts) }
 
 # --- what will be moved ----------------------------------------------------
+#
+# With no -Keep* and no -Account, this clears EVERYTHING in the config folder —
+# not an allowlist of the files we happen to know about, the whole folder.
+#
+# It used to name trust\, rooms\, history\ and config.json, which quietly meant
+# a "blank slate" left behind imported custom sounds, every backup folder
+# previous runs had made, and anything a later version of the app started
+# storing. An allowlist can only describe the app as it was when the script was
+# last edited, and it was already out of date.
+#
+# Asking to keep something switches this back to naming files, because keeping
+# and sweeping are opposites.
+$FullSweep = (-not $KeepIdentity) -and (-not $KeepHistory) -and
+             (-not $KeepServer) -and (-not $Account)
+
 $Targets = @()
-foreach ($a in $Accounts) {
-    foreach ($rel in @("trust\$a.json", "rooms\$a.json")) {
-        if (Test-Path (Join-Path $ConfDir $rel)) { $Targets += $rel }
+if ($FullSweep) {
+    $Targets = @(Get-ChildItem -Path $ConfDir -Force |
+                 Where-Object { $_.Name -notlike 'backup-*' } |
+                 ForEach-Object { $_.Name })
+} else {
+    foreach ($a in $Accounts) {
+        foreach ($rel in @("trust\$a.json", "rooms\$a.json")) {
+            if (Test-Path (Join-Path $ConfDir $rel)) { $Targets += $rel }
+        }
+        if (-not $KeepHistory) {
+            $rel = "history\$a.json"
+            if (Test-Path (Join-Path $ConfDir $rel)) { $Targets += $rel }
+        }
     }
-    if (-not $KeepHistory) {
-        $rel = "history\$a.json"
-        if (Test-Path (Join-Path $ConfDir $rel)) { $Targets += $rel }
+    # config.json holds the server address AND the remembered screen name, so it
+    # is what makes the app auto-sign-on. Keeping it means keeping auto-login.
+    if (-not $KeepServer -and (Test-Path (Join-Path $ConfDir 'config.json'))) {
+        $Targets += 'config.json'
     }
 }
-# config.json holds the server address AND the remembered screen name, so it is
-# what makes the app auto-sign-on. Keeping it means keeping auto-login.
-if (-not $KeepServer -and (Test-Path (Join-Path $ConfDir 'config.json'))) {
-    $Targets += 'config.json'
+
+# Old backups: the one thing here that is not recoverable, and only on a full
+# sweep. Each is already a copy of state some earlier run set aside, so moving
+# them into the new one just makes the pile deeper. What is being cleared right
+# now still goes to a backup, so this run stays undoable.
+$OldBackups = @()
+if ($FullSweep -and -not $KeepBackups) {
+    $OldBackups = @(Get-ChildItem -Path $ConfDir -Force -Directory |
+                    Where-Object { $_.Name -like 'backup-*' } |
+                    ForEach-Object { $_.Name })
 }
 
 Say "BENCchat reset"
@@ -112,10 +148,21 @@ Write-Host     "                 saved password"
 if ($KeepIdentity) { Write-Host "                 (keeping encryption identity)" }
 else               { Write-Host "                 encryption identity (keypair + signing seed)" }
 
+if ($FullSweep) {
+    Write-Host "                 imported sounds, and anything else in the folder"
+}
+
 if ($Targets) {
     Write-Host ""
     Write-Host "    files      :"
     $Targets | ForEach-Object { Write-Host "                 $_" }
+}
+
+if ($OldBackups) {
+    Write-Host ""
+    Write-Host "    deleting   : $($OldBackups.Count) backup folder(s) from previous runs"
+    $OldBackups | ForEach-Object { Write-Host "                 $_" }
+    Write-Host "                 (each holds a history file — pass -KeepBackups to keep them)"
 }
 
 if (-not $KeepIdentity) {
@@ -146,6 +193,17 @@ if ($Targets) {
         New-Item -ItemType Directory -Force -Path (Split-Path $dst -Parent) | Out-Null
         Move-Item -Path (Join-Path $ConfDir $rel) -Destination $dst -Force
         Write-Host "    $rel"
+    }
+}
+
+# The one thing here that is not recoverable. Deliberate: these are previous
+# runs' snapshots, and keeping every one forever is why a "blank slate" left a
+# pile of old history behind.
+if ($OldBackups) {
+    Say "Deleting $($OldBackups.Count) backup folder(s) from previous runs"
+    foreach ($b in $OldBackups) {
+        Remove-Item -Recurse -Force -Path (Join-Path $ConfDir $b)
+        Write-Host "    $b"
     }
 }
 

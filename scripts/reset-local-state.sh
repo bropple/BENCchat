@@ -11,6 +11,8 @@
 #   ./reset-local-state.sh --keep-history    # keep message history
 #   ./reset-local-state.sh --keep-server     # keep the server address
 #
+#   --keep-backups   keep the backup directories previous runs left behind
+#
 #   --account NAME   act on one account only (default: all found)
 #   --dry-run        show what would happen, change nothing
 #   --yes            skip the confirmation
@@ -31,6 +33,7 @@ KEYRING_SERVICE=BENCchat
 KEEP_IDENTITY=0
 KEEP_HISTORY=0
 KEEP_SERVER=0
+KEEP_BACKUPS=0
 DRY_RUN=0
 ASSUME_YES=0
 ONLY_ACCOUNT=""
@@ -43,6 +46,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --keep-identity) KEEP_IDENTITY=1 ;;
     --keep-history)  KEEP_HISTORY=1 ;;
+    --keep-backups)  KEEP_BACKUPS=1 ;;
     --keep-server)   KEEP_SERVER=1 ;;
     --account) shift; ONLY_ACCOUNT="${1:-}"; [ -n "$ONLY_ACCOUNT" ] || die "--account needs a name" ;;
     --dry-run) DRY_RUN=1 ;;
@@ -83,15 +87,60 @@ ACCOUNTS="$(accounts | sort -u || true)"
 [ -n "$ONLY_ACCOUNT" ] && ACCOUNTS="$ONLY_ACCOUNT"
 
 # --- what will be moved ----------------------------------------------------
+#
+# With no --keep-* and no --account, this clears EVERYTHING in the config
+# directory. Not an allowlist of the files we happen to know about: the whole
+# directory, whatever is in it.
+#
+# It used to name trust/, rooms/, history/ and config.json, which quietly meant
+# a "blank slate" left behind imported custom sounds, every backup directory
+# previous runs had made, and anything a later version of the app started
+# storing. The allowlist could only ever describe the app as it was when the
+# script was last edited, and it was already wrong.
+#
+# Asking to keep something switches this back to naming files, because keeping
+# and sweeping are opposites.
+FULL_SWEEP=0
+if [ "$KEEP_IDENTITY" -eq 0 ] && [ "$KEEP_HISTORY" -eq 0 ] &&
+   [ "$KEEP_SERVER" -eq 0 ] && [ -z "$ONLY_ACCOUNT" ]; then
+  FULL_SWEEP=1
+fi
+
 TARGETS=()
-for a in $ACCOUNTS; do
-  [ -f "$CONF_DIR/trust/$a.json" ] && TARGETS+=("trust/$a.json")
-  [ -f "$CONF_DIR/rooms/$a.json" ] && TARGETS+=("rooms/$a.json")
-  [ "$KEEP_HISTORY" -eq 0 ] && [ -f "$CONF_DIR/history/$a.json" ] && TARGETS+=("history/$a.json")
-done
-# config.json holds the server address AND the remembered screen name, so it is
-# what makes the app auto-sign-on. Keeping it means keeping auto-login.
-[ "$KEEP_SERVER" -eq 0 ] && [ -f "$CONF_DIR/config.json" ] && TARGETS+=("config.json")
+if [ "$FULL_SWEEP" -eq 1 ]; then
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    # Previous runs' backups are handled separately below: they are snapshots,
+    # and nesting snapshots inside snapshots is what produced the pile this is
+    # meant to clear.
+    case "$e" in backup-*) continue ;; esac
+    TARGETS+=("$e")
+  done <<EOF
+$(ls -A "$CONF_DIR" 2>/dev/null)
+EOF
+else
+  for a in $ACCOUNTS; do
+    [ -f "$CONF_DIR/trust/$a.json" ] && TARGETS+=("trust/$a.json")
+    [ -f "$CONF_DIR/rooms/$a.json" ] && TARGETS+=("rooms/$a.json")
+    [ "$KEEP_HISTORY" -eq 0 ] && [ -f "$CONF_DIR/history/$a.json" ] && TARGETS+=("history/$a.json")
+  done
+  # config.json holds the server address AND the remembered screen name, so it
+  # is what makes the app auto-sign-on. Keeping it means keeping auto-login.
+  [ "$KEEP_SERVER" -eq 0 ] && [ -f "$CONF_DIR/config.json" ] && TARGETS+=("config.json")
+fi
+
+# Old backups. These are the only thing this script DELETES rather than moves,
+# and only on a full sweep: each is already a copy of state some earlier run set
+# aside, so moving them into the new one just makes the pile deeper. The state
+# being cleared right now still goes to a backup, so this run stays undoable.
+OLD_BACKUPS=()
+if [ "$FULL_SWEEP" -eq 1 ] && [ "$KEEP_BACKUPS" -eq 0 ]; then
+  while IFS= read -r e; do
+    [ -n "$e" ] && OLD_BACKUPS+=("$e")
+  done <<EOF
+$(ls -Ad "$CONF_DIR"/backup-* 2>/dev/null | xargs -r -n1 basename)
+EOF
+fi
 
 say "BENCchat reset"
 echo "    config dir : $CONF_DIR"
@@ -107,10 +156,21 @@ echo "                 saved password"
 [ "$KEEP_IDENTITY" -eq 0 ] && echo "                 encryption identity (keypair + signing seed)" \
                            || echo "                 (keeping encryption identity)"
 
+if [ "$FULL_SWEEP" -eq 1 ]; then
+  echo "                 imported sounds, and anything else in the directory"
+fi
+
 if [ ${#TARGETS[@]} -gt 0 ]; then
   echo
   echo "    files      :"
   for t in "${TARGETS[@]}"; do echo "                 $t"; done
+fi
+
+if [ ${#OLD_BACKUPS[@]} -gt 0 ]; then
+  echo
+  echo "    deleting   : ${#OLD_BACKUPS[@]} backup director$([ ${#OLD_BACKUPS[@]} -eq 1 ] && echo y || echo ies) from previous runs"
+  for b in "${OLD_BACKUPS[@]}"; do echo "                 $b"; done
+  echo "                 (each holds a history file — pass --keep-backups to keep them)"
 fi
 
 if [ "$KEEP_IDENTITY" -eq 0 ]; then
@@ -145,6 +205,17 @@ if [ ${#TARGETS[@]} -gt 0 ]; then
     mkdir -p "$BACKUP/$(dirname "$t")"
     mv "$CONF_DIR/$t" "$BACKUP/$t"
     echo "    $t"
+  done
+fi
+
+# The one thing here that is not recoverable. Deliberate: these are previous
+# runs' snapshots, and keeping every one forever is why a "blank slate" left
+# eleven directories of old history behind.
+if [ ${#OLD_BACKUPS[@]} -gt 0 ]; then
+  say "Deleting ${#OLD_BACKUPS[@]} backup director$([ ${#OLD_BACKUPS[@]} -eq 1 ] && echo y || echo ies) from previous runs"
+  for b in "${OLD_BACKUPS[@]}"; do
+    rm -rf "${CONF_DIR:?}/$b"
+    echo "    $b"
   done
 fi
 
