@@ -514,6 +514,32 @@ than silently reverting to plaintext (`room_e2ee.go:21-25`).
 A legacy symmetric room key still exists in the code and still opens old
 scrollback; nothing mints one any more.
 
+### Your own other devices
+
+Two mechanisms, because a device is missing two different things.
+
+**What you send** is mirrored to your other devices as a self-addressed copy
+(`internal/e2ee/sync.go`). The server already relays an inbound message to every
+INSTANCE of the recipient, so a message to your own screen name reaches all your
+devices and nowhere else; it is sealed to your own device keys, so this is not
+escrow. Gated on the manifest actually listing a second device, since every copy
+costs a second message against the same rate limiter. The copy names the device
+that sent it, so a sender does not apply its own copy back to itself.
+
+**What you already had** — history and room chain views — moves as a transfer
+bundle one device builds for another (`internal/e2ee/transfer.go`,
+`app_transfer.go`). It is sealed to the recipient's box key as published in the
+verified manifest and signed by the sender's published signing key, so the
+recipient's key is never something a user typed. Carried as a file the user
+moves: this client makes only outbound connections, and a listening socket would
+be the first thing on it that anyone sharing a network could reach.
+
+**The outbound chain never travels.** A chain is a position counter, and two
+devices advancing one would seal two different messages at the same position
+under the same key. A transfer carries the ability to read what others send, never
+the ability to speak as the device that sent it; the receiving device mints its
+own chain on its first send. Stripped at both ends by `withoutOutboundChain`.
+
 ### Room membership
 
 Membership is a **signed roster**: Ed25519 over a domain-tagged, length-prefixed
