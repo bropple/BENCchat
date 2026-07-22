@@ -43,6 +43,17 @@ func (c *Client) ownDevices() (keys [][32]byte, ourPriv [32]byte, ok bool) {
 	return c.ownDeviceKeys, c.e2eeKP.Private, true
 }
 
+// EncryptionPrivateKey returns this device's box private key, for the paths that
+// seal outside the ordinary message flow.
+func (c *Client) EncryptionPrivateKey() ([32]byte, bool) {
+	c.e2eeMu.Lock()
+	defer c.e2eeMu.Unlock()
+	if !c.e2eeHasKP {
+		return [32]byte{}, false
+	}
+	return c.e2eeKP.Private, true
+}
+
 // SetE2EEOn toggles whether outbound messages are encrypted (when the peer's key
 // is known).
 func (c *Client) SetE2EEOn(on bool) {

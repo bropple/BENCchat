@@ -158,6 +158,16 @@ export interface ConnectionRequestInfo {
   reason: string;
 }
 
+/** Another device on this account, as a transfer can be addressed to it.
+ *  Mirrors app.TransferTarget. */
+export interface TransferTarget {
+  /** The device's signing key ID — what names it in a bundle. */
+  id: string;
+  /** How it appears in a list. Derived from the ID; a manifest carries no
+   *  nickname. */
+  label: string;
+}
+
 /** Encryption state of a chat room. Mirrors app.RoomSecurity. */
 export interface RoomSecurity {
   encrypted: boolean;
@@ -338,6 +348,9 @@ interface AppBindings {
   AcceptRoomInvite(roomName: string): Promise<string>;
   DeclineRoomInvite(roomName: string): Promise<void>;
   RotateRoomKey(cookie: string, drop: string[]): Promise<string>;
+  TransferTargets(): Promise<TransferTarget[] | null>;
+  ExportDeviceTransfer(recipientID: string, path: string): Promise<string>;
+  ImportDeviceTransfer(path: string): Promise<string>;
   ReformRoom(cookie: string, drop: string[]): Promise<string>;
   LeaveRoom(cookie: string): Promise<void>;
   ForgetRoom(cookie: string): Promise<void>;
@@ -456,6 +469,10 @@ export const Bridge = {
   acceptRoomInvite: (room: string) => app().AcceptRoomInvite(room),
   declineRoomInvite: (room: string) => app().DeclineRoomInvite(room),
   rotateRoomKey: (cookie: string, drop: string[]) => app().RotateRoomKey(cookie, drop),
+  transferTargets: () => app().TransferTargets(),
+  exportDeviceTransfer: (recipientID: string, path: string) =>
+    app().ExportDeviceTransfer(recipientID, path),
+  importDeviceTransfer: (path: string) => app().ImportDeviceTransfer(path),
   reformRoom: (cookie: string, drop: string[]) => app().ReformRoom(cookie, drop),
 
   /** Someone shared an encrypted room's key with us. */

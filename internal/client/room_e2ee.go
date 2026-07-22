@@ -398,6 +398,10 @@ func (c *Client) signingKey() (e2ee.SigningKeyPair, bool) {
 	return c.signKP, c.hasSignKP
 }
 
+// SigningKeyPair returns this device's signing keypair, for the paths that must
+// sign something other than a room message.
+func (c *Client) SigningKeyPair() (e2ee.SigningKeyPair, bool) { return c.signingKey() }
+
 // SigningPublicKey returns this device's public signing key, for publication.
 func (c *Client) SigningPublicKey() (ed25519.PublicKey, bool) {
 	c.e2eeMu.Lock()
