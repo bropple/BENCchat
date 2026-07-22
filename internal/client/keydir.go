@@ -97,8 +97,8 @@ type keyDirReply struct {
 	// Publish. counter is what the server holds after the call, which is what
 	// makes a lost race actionable: a client refused as stale learns the value
 	// it has to beat instead of having to re-query for it.
-	outcome  PublishOutcome
-	counter  uint64
+	outcome PublishOutcome
+	counter uint64
 
 	stored bool
 	backup IdentityBackup
