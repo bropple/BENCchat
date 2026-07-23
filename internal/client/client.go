@@ -148,6 +148,18 @@ type Client struct {
 	hasSignKP    bool
 	peerSignKeys map[string][]ed25519.PublicKey
 
+	// Device-attestation session state, guarded by attestMu and independent of
+	// the key material above. attestNonce is the latest challenge the server
+	// sent; deviceEnrolled is whether the app has confirmed this device is named
+	// in the account's manifest; attested is whether the server accepted our
+	// proof this session. Together they let a device that answered a challenge
+	// before it was enrolled — a link in progress — re-answer once it is, rather
+	// than sit degraded until it reconnects. Reset on each sign-on.
+	attestMu       sync.Mutex
+	attestNonce    []byte
+	deviceEnrolled bool
+	attested       bool
+
 	// peerCaps caches what each peer's client advertises, keyed by normalized
 	// screen name. Populated from buddy arrivals and locate replies — the BOS
 	// paths that actually carry capabilities. Guarded by e2eeMu.
@@ -229,6 +241,17 @@ func (c *Client) SignOn(ctx context.Context, addr string, creds oscar.Credential
 	c.e2eeMu.Lock()
 	c.selfNormalized = state.NormalizeScreenName(creds.ScreenName)
 	c.e2eeMu.Unlock()
+
+	// A fresh sign-on proves nothing yet: forget last session's attestation, and
+	// start un-enrolled until setupIdentity confirms this device is in the
+	// manifest (via SetDeviceEnrolled). The reflexive answer below still fires
+	// for an already-enrolled device; this only governs re-answering and whether
+	// a rejection is treated as alarming.
+	c.attestMu.Lock()
+	c.attestNonce = nil
+	c.deviceEnrolled = false
+	c.attested = false
+	c.attestMu.Unlock()
 
 	c.publishBuddyList(session.BuddyList())
 

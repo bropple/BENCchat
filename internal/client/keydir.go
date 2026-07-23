@@ -411,13 +411,33 @@ func (c *Client) handleKeyDir(frame wire.SNACFrame, body []byte) {
 			return
 		}
 		if reply.Accepted == 0 {
-			// The session is not proven. The server decides what that costs —
-			// it may simply close the connection — but say so, because the
-			// alternative is a session that silently stops working.
-			c.log.Warn("the server did not accept this device's attestation")
-			c.store.Notify(state.NoticeWarn,
-				"This device couldn't prove itself to the server. If it was removed "+
-					"from your account, link it again with your recovery key.")
+			// Not proven — but a rejection means two very different things, and the
+			// one signal that tells them apart is whether we believe this device is
+			// enrolled. If it is, this is a genuine problem worth alarming about: a
+			// removed device, or a name/clock/key mismatch. If it is NOT, this is
+			// the ordinary linking window — we answered before publishing the
+			// manifest that enrols us, and SetDeviceEnrolled will re-answer the
+			// moment it lands. Saying "you were removed, link again" in that window
+			// would be a scare that resolves itself a breath later.
+			c.attestMu.Lock()
+			enrolled := c.deviceEnrolled
+			c.attested = false
+			c.attestMu.Unlock()
+			if enrolled {
+				c.log.Warn("the server did not accept this device's attestation")
+				c.store.Notify(state.NoticeWarn,
+					"This device couldn't prove itself to the server. If it was removed "+
+						"from your account, link it again with your recovery key.")
+			} else {
+				c.log.Info("device attestation rejected while not yet enrolled; " +
+					"will retry once this device's manifest is published")
+			}
+		} else {
+			// Proven. Remember it, so a redundant re-answer (SetDeviceEnrolled
+			// firing after we already attested) is skipped.
+			c.attestMu.Lock()
+			c.attested = true
+			c.attestMu.Unlock()
 		}
 
 	case wire.BENCOKeyDirQueryReply:
@@ -589,6 +609,27 @@ func (c *Client) answerAttestChallenge(body []byte) {
 			"len", len(ch.Nonce), "want", e2ee.AttestNonceLen)
 		return
 	}
+	// Remember the latest nonce so we can answer it AGAIN once we become enrolled
+	// (see SetDeviceEnrolled). A fresh challenge also means the server wants proof
+	// again, so this session is no longer attested until we re-prove.
+	c.attestMu.Lock()
+	c.attestNonce = append([]byte(nil), ch.Nonce...)
+	c.attested = false
+	c.attestMu.Unlock()
+
+	// Answer immediately, unconditionally. For an already-enrolled device — every
+	// ordinary sign-on — this is the whole story: the signature verifies and the
+	// session is attested. For a device that is LINKING it will not verify yet
+	// (this device is not in the manifest until it publishes one), the server
+	// degrades the session rather than closing it, and SetDeviceEnrolled answers
+	// the same nonce again the moment the enrolling manifest is published.
+	c.sendAttestation(ch.Nonce)
+}
+
+// sendAttestation signs the nonce with this device's signing key and sends the
+// response. Split from answerAttestChallenge so the re-answer after enrolment
+// (SetDeviceEnrolled) goes out by the exact same path.
+func (c *Client) sendAttestation(nonce []byte) {
 	signer, ok := c.signingKey()
 	if !ok {
 		c.log.Warn("cannot answer a device challenge: no signing key on this device")
@@ -625,9 +666,31 @@ func (c *Client) answerAttestChallenge(body []byte) {
 		return
 	}
 
-	sig := e2ee.SignAttestation(self, ch.Nonce, signer.Private)
+	sig := e2ee.SignAttestation(self, nonce, signer.Private)
 	if err := sess.AttestDevice(signer.Public, sig); err != nil {
 		c.log.Warn("could not answer the device challenge", "err", err)
+	}
+}
+
+// SetDeviceEnrolled tells the client whether this device is named in the
+// account's current manifest. The app derives it from setLinked — set false when
+// a sign-on finds this device is not (yet) in the manifest, and true once a
+// manifest that enrols it is published or a sign-on confirms it listed.
+//
+// The transition to true is what closes the link ordering gap: a linking device
+// answers the sign-on challenge before it has published itself, that answer is
+// rejected, and this re-answers the same nonce now that the answer will verify —
+// so the device attests within the same session instead of staying degraded
+// until it reconnects.
+func (c *Client) SetDeviceEnrolled(enrolled bool) {
+	c.attestMu.Lock()
+	c.deviceEnrolled = enrolled
+	nonce := append([]byte(nil), c.attestNonce...)
+	already := c.attested
+	c.attestMu.Unlock()
+
+	if enrolled && !already && len(nonce) == e2ee.AttestNonceLen {
+		c.sendAttestation(nonce)
 	}
 }
 

@@ -122,6 +122,16 @@ An account that can't attest is locked out, and there is currently **no
 `benco_admin` command to clear a device list** — recovery today is `user rm` or
 hand-editing SQLite.
 
+**New since 2026-07-23 — verify the linking fix under enforce before trusting
+it.** The link ordering deadlock (a fresh device couldn't publish to enrol, and
+was torn down on its first failed attest) is fixed: a failed attest now degrades
+rather than closes, publish is allowed while unattested, and the client
+re-answers once enrolled. Under enforce, run part **D1** with a real second
+device: it must link with the recovery key and end up able to send — not sit
+degraded. Watch the journal for `session has not proven its device; degraded
+until it does` (expected briefly during the link) followed by a successful
+`BENCOKeyDirAttestReply`, and confirm it does **not** disconnect.
+
 ```bash
 sudo grep -n BENCO_DEVICE_AUTH /etc/bencoscar/bencoscar.env    # expect nothing
 echo 'BENCO_DEVICE_AUTH=enforce' | sudo tee -a /etc/bencoscar/bencoscar.env

@@ -4,9 +4,10 @@ Living checklist. **Keep it current**: as work lands, tests run, or new problems
 surface, update this file in the same change — check items off, add what was
 found, re-order when priorities move. A stale TODO is worse than none.
 
-Last updated: 2026-07-22 — System-log durability fixed, block-evasion B1 fixed
-(BENCoscar), Rooms "no key" fixed in code (chain-request round-trip + bundle/
-readable fixes) pending live re-test, at-rest encryption test filed.
+Last updated: 2026-07-23 — System-log durability fixed; block-evasion B1 fixed
+(BENCoscar); Rooms "no key" fixed in code (chain-request round-trip + bundle/
+readable fixes); device-link attestation ordering fixed in code (Option C);
+at-rest encryption test filed. The two "fixed in code" items need a live re-test.
 
 ---
 
@@ -62,10 +63,29 @@ readable fixes) pending live re-test, at-rest encryption test filed.
       Fix direction is a **design choice** (mint-at-create vs re-send-on-invite
       vs add a chain-request SNAC) — decide before building. See
       `room-consent-model.md`.
-- [ ] **Device-link attestation ordering.** A freshly-linked device fails its
-      first challenge because it is not yet in the manifest when the challenge
-      is issued. **Gates the `BENCO_DEVICE_AUTH=enforce` flip** — do not flip
-      until this is fixed. Log mode caught it on 2026-07-23.
+- [~] **Device-link attestation ordering** — **fixed in code (Option C), needs
+      a live re-test.** Uncommitted. A freshly-linked device answered the sign-on
+      challenge reflexively with a key not yet in the manifest, failed, and under
+      enforce was (a) torn down and (b) unable to publish the manifest that would
+      enrol it — a deadlock. Fix, keeping "attested = a device signature was
+      verified" intact and never touching the working normal-sign-on path:
+      - **Server (BENCoscar):** `gateDeviceAuth` now also exempts
+        `BENCOKeyDirPublishRequest` (safe — publish demands an identity-signed,
+        monotonic manifest a password-only/removed-device attacker can't forge;
+        backup get/put stay gated). And a failed attest **degrades** the session
+        instead of tearing it down (`BENCOKeyDirAttestResponse`), keeping the
+        nonce and the attest path open so the device can recover in place.
+      - **Client (BENCchat):** still answers reflexively (normal sign-on
+        unchanged), but stores the nonce and **re-answers once enrolled**
+        (`SetDeviceEnrolled`, driven by `setLinked`); a rejection only alarms the
+        user when we actually believe we're enrolled — otherwise it's the linking
+        window and self-heals. That gated notice is the "client knows it messed
+        up" signal, and the now-durable System log means it survives.
+      Tests: `TestAttestRejectionNoticeGatedOnEnrollment`,
+      `TestChallengeStoresNonceAndResetsAttested`,
+      `TestEnrollmentReanswersHeldChallenge`. **Re-verify with a real second
+      device (procedure D1 + E) before flipping enforce.** Still also wants the
+      `devices clear` tooling below.
 - [ ] **`benco_admin user devices clear <name>`.** The documented device-loss
       recovery path has no tooling; today it is `user rm` or hand-editing
       SQLite. Wanted before `enforce` regardless.

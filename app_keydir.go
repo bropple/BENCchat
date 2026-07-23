@@ -587,6 +587,14 @@ func (a *App) setLinked(linked bool) {
 	changed := a.linked != linked
 	a.linked = linked
 	a.trustMu.Unlock()
+	// Tell the client its enrolment state on every call, not only on a change:
+	// the transition to true is what re-answers a challenge a linking device
+	// already failed, and a link finishes with setLinked(true) whether or not the
+	// flag had settled to false first. Guarded because some tests drive the app
+	// with no client attached.
+	if a.client != nil {
+		a.client.SetDeviceEnrolled(linked)
+	}
 	if changed {
 		a.emitIdentityState()
 	}
