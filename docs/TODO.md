@@ -4,7 +4,8 @@ Living checklist. **Keep it current**: as work lands, tests run, or new problems
 surface, update this file in the same change — check items off, add what was
 found, re-order when priorities move. A stale TODO is worse than none.
 
-Last updated: 2026-07-23, after the A–D live-test run on build `f955c6f-dirty`.
+Last updated: 2026-07-23 — A–D live-test run on `f955c6f-dirty`, plus the
+PROXY-protocol pre-deploy guard.
 
 ---
 
@@ -72,6 +73,20 @@ Last updated: 2026-07-23, after the A–D live-test run on build `f955c6f-dirty`
 - [ ] **Client-invariant audit** — for each rule the client enforces, does a
       recipient or the server enforce it independently? Anywhere the answer is
       no is where a modified client wins.
+- [ ] **PROXY protocol support in BENCoscar, BEFORE any reverse proxy / Cloudflare
+      Spectrum goes in front.** `IPRateLimiter` (`server.go:737`) keys on
+      `conn.RemoteAddr()`, which is the real client IP *only* because TLS
+      terminates in-process with nothing in front today. The moment a stream
+      proxy sits in front, every connection's `RemoteAddr()` becomes the proxy's
+      IP and the per-IP login-flood guard silently collapses to one shared global
+      bucket. Fix: have the proxy (HAProxy / nginx stream, or Spectrum if it
+      supports it) send the PROXY protocol header, and parse it in BENCoscar's
+      accept path to key the limiter off the carried IP instead of `RemoteAddr()`.
+      **Order matters:** ship and verify PROXY support first — two clients from
+      different real IPs behind the proxy must get independent buckets — *then*
+      deploy the proxy. Doing it after leaves a window where the guard is
+      degraded with no signal that it happened. (No proxy is planned today; this
+      is a guard against a future one.)
 
 ## Done (recent)
 
