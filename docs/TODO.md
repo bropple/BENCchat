@@ -7,7 +7,8 @@ found, re-order when priorities move. A stale TODO is worse than none.
 Last updated: 2026-07-23 — System-log durability fixed; block-evasion B1 fixed
 (BENCoscar); Rooms "no key" fixed in code (chain-request round-trip + bundle/
 readable fixes); device-link attestation ordering fixed in code (Option C);
-at-rest encryption test filed. The two "fixed in code" items need a live re-test.
+`benco_admin user devices clear` added; at-rest encryption test filed. The
+in-code fixes (rooms, B1, attestation) still need a live re-test.
 
 ---
 
@@ -86,9 +87,15 @@ at-rest encryption test filed. The two "fixed in code" items need a live re-test
       `TestEnrollmentReanswersHeldChallenge`. **Re-verify with a real second
       device (procedure D1 + E) before flipping enforce.** Still also wants the
       `devices clear` tooling below.
-- [ ] **`benco_admin user devices clear <name>`.** The documented device-loss
-      recovery path has no tooling; today it is `user rm` or hand-editing
-      SQLite. Wanted before `enforce` regardless.
+- [x] **`benco_admin user devices clear <name>`.** ~~The documented device-loss
+      recovery path has no tooling.~~ Added to the CLI (BENCoscar). The server
+      side already existed (`DELETE /user/{screenname}/keydir` →
+      `ClearKeyDirectory`, which archives then wipes the manifest AND the
+      identity backup, returning the account to zero devices / password-only
+      auth); only the `benco_admin` command was missing. Loud confirmation
+      spelling out that it resets the whole identity and moves every contact's
+      safety number. Tests cover the request construction and the CLI routing.
+      **Uncommitted.**
 - [~] **Block evasion** (test result B1/B2).
       - **B1 (buddy request) — FIXED** in BENCoscar. `RequestAuthorizeToHost`
         (`foodgroup/feedbag.go`) relayed the request with no deny check, unlike

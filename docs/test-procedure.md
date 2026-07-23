@@ -118,9 +118,11 @@ Two accounts, two machines.
 ## E · Flip `BENCO_DEVICE_AUTH=enforce`  ⬜ gated
 
 **Do not flip until A·4 has passed for every account with a published device.**
-An account that can't attest is locked out, and there is currently **no
-`benco_admin` command to clear a device list** — recovery today is `user rm` or
-hand-editing SQLite.
+An account that can't attest is locked out. Recovery is now
+`benco_admin user devices clear <name>`, which resets the account's whole
+encryption identity (clears every device and the backup) so it falls back to
+password auth and can re-bootstrap — keep an operator with socket access on hand
+in case an account can't attest after the flip.
 
 **New since 2026-07-23 — verify the linking fix under enforce before trusting
 it.** The link ordering deadlock (a fresh device couldn't publish to enrol, and
