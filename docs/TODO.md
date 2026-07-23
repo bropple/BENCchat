@@ -5,10 +5,11 @@ surface, update this file in the same change — check items off, add what was
 found, re-order when priorities move. A stale TODO is worse than none.
 
 Last updated: 2026-07-23 — System-log durability fixed; block-evasion B1 fixed
-(BENCoscar); Rooms "no key" fixed in code (chain-request round-trip + bundle/
-readable fixes); device-link attestation ordering fixed in code (Option C);
-`benco_admin user devices clear` added; at-rest encryption test filed. The
-in-code fixes (rooms, B1, attestation) still need a live re-test.
+(BENCoscar); Rooms "no key" fixed in code; device-link attestation ordering
+fixed in code (Option C); `benco_admin user devices clear` added; B6 sound
+coalescing fixed; B5/B3 theories disproven (mostly the System-log bug, now
+fixed); at-rest encryption test filed. The in-code fixes (rooms, B1,
+attestation) still need a live re-test.
 
 ---
 
@@ -112,15 +113,31 @@ in-code fixes (rooms, B1, attestation) still need a live re-test.
 
 ## Client bugs (from 2026-07-23)
 
-- [ ] **B5** — a message to an offline peer errors on the sender
-      (`ICBMChannelMsgToHost → ICBMErr`) instead of being stored offline;
-      arrives when the peer returns. Likely the E2EE 1:1 send is not setting the
-      store-offline TLV.
-- [ ] **B3** — the client adds a **nonexistent** screen name (no pending state,
-      opens a dead "unencrypted" conversation, sends fail silently). Refuse the
-      add, or tell the user the name doesn't exist.
-- [ ] **B6** — catch-up plays one notification sound per delivered message
-      ("earrape"). Coalesce to a single sound for a batch.
+- [x] **B6 — FIXED.** Catch-up played one notification sound per delivered
+      message ("earrape"). `playMessageIn` (`frontend/src/sound.ts`) now coalesces
+      with a 500 ms sliding window: the first message in a burst chimes, the rest
+      are silent, and each slides the window so a backlog that trickles in still
+      collapses to one chime. Ordinary conversation pace still chimes per message.
+      **Uncommitted.**
+- [~] **B5 — theory disproven; re-observe live.** The stated cause ("not setting
+      the store-offline TLV") is wrong: `oscar/icbm.go:75` sets `ICBMTLVStore` on
+      every send, the E2EE path goes through the same `Session.SendMessage`, and
+      the BENCoscar server *acks* a stored offline message rather than erroring
+      (`canSendOfflineMessage` returns true for a fresh account;
+      `sendOfflineMessage` returns `ICBMHostAck`). A likelier real trigger is the
+      fused-consent gate (`foodgroup/icbm.go:125-133` returns
+      `ErrorCodeNotLoggedOn` when the recipient hasn't authorised the sender,
+      online or not), and the *silence* was the System-log durability bug — the
+      client already surfaces `ICBMErr` (`client.go:1262`), that notice was just
+      being lost. No speculative fix; reproduce with the durable log first.
+- [~] **B3 — largely the System-log bug; re-observe live.** "Sends fail silently"
+      was that bug: the client *does* notice a rejected send and emits a
+      `NoticeError` (`client.go:1258-1262`), it was just lost before the roster
+      captured it. The "no validation on add" half is inherent, not a quick fix:
+      locate only confirms *online* users and the directory is opt-in name/email,
+      so the client cannot tell an offline-but-real name from a nonexistent one at
+      add time — refusing on "can't find" would wrongly reject offline buddies.
+      Re-observe with the durable log; if a concrete gap remains, decide then.
 - [x] **System log durability.** ~~Notices emitted before the roster mounts are
       lost — the log is session-scoped and lives inside the roster component,
       destroyed on every screen change.~~ Hoisted the buffer into a new

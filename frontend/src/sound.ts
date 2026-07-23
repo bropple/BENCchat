@@ -444,7 +444,26 @@ export function hasCustomSound(key: SoundKey): boolean {
 }
 
 // --- Semantic wrappers kept for existing call sites ---------------------------
+
+/** How long after an inbound chime further inbound chimes are folded into it.
+ *  Sized to swallow a catch-up backlog — the server dumps every offline message
+ *  at sign-on, and one notification per message is the "earrape" this avoids —
+ *  while staying short enough that an ordinary back-and-forth still chimes per
+ *  message once the pace drops below a burst. */
+const MESSAGE_IN_COALESCE_MS = 500;
+let lastMessageInAt = -Infinity;
+
+/** The inbound-message chime, coalesced. The first message in a burst plays; the
+ *  rest within the window are silent, and each one slides the window forward so a
+ *  backlog that arrives in a trickle rather than all at once still collapses to a
+ *  single chime instead of a machine-gun of them. */
 export function playMessageIn(): void {
+  const now = performance.now();
+  if (now - lastMessageInAt < MESSAGE_IN_COALESCE_MS) {
+    lastMessageInAt = now; // extend the window; stay silent for this one
+    return;
+  }
+  lastMessageInAt = now;
   play("imrcv");
 }
 export function playMessageOut(): void {
