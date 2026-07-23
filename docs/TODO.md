@@ -87,6 +87,28 @@ PROXY-protocol pre-deploy guard.
       deploy the proxy. Doing it after leaves a window where the guard is
       degraded with no signal that it happened. (No proxy is planned today; this
       is a guard against a future one.)
+- [ ] **Redact client IPs in BENCoscar's logs** (recommended over a proxy for
+      the IP-privacy goal). `WithIP` (`server/oscar/middleware/logger.go:24`)
+      stores the raw `RemoteAddr` in context; every log line pulls it, at info
+      too — `"user signed on"` / `"user disconnected"` carry `ip=` even with
+      debug off. Hash (keyed HMAC) or truncate the `ip` attribute in
+      `NewLogger`'s existing `ReplaceAttr` hook — one chokepoint, covers every
+      level. The rate limiter reads a *separate* `ip` variable
+      (`server.go:206/419`), so this does NOT touch the flood guard. Directly
+      closes the log half of `SECURITY-FINDINGS` S3, with no proxy and no
+      conflict with the PROXY-protocol item.
+- [ ] **If nginx / a stream proxy IS deployed** (for reasons other than log
+      privacy — hiding the origin IP from clients, volumetric DDoS): it must be
+      `stream`-module PASSTHROUGH, never TLS-terminating (that is the stunnel
+      model the project rejected — TLS stays native in BENCoscar). It conflicts
+      with the two items above: a passthrough proxy hides IPs from BENCoscar
+      (breaking the app rate limiter) OR carries them via PROXY protocol
+      (re-exposing them in BENCoscar's logs) — pick one, or move per-IP limiting
+      into nginx (`limit_conn`/`limit_req` on `$remote_addr`) and let BENCoscar
+      stay IP-blind. **Whatever is chosen, add the nginx setup to the deploy
+      script (`scripts/benco-deploy/install.sh`) so it is provisioned with the
+      server and cannot be forgotten on a rebuild** — a hand-configured proxy
+      that a `reset`/reinstall drops would silently un-harden the deployment.
 
 ## Done (recent)
 
