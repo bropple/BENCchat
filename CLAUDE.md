@@ -140,6 +140,12 @@ silently overriding it.
   resist the urge to silently extend the wire format with custom BENCO-only
   fields; if BENCchat needs something OSCAR can't express, that's a real
   design decision to surface, not something to sneak into a TLV.
+- **Keep [`docs/TODO.md`](docs/TODO.md) current.** It is the living checklist
+  of outstanding work — bugs, blockers, decided-but-unbuilt design, deferred
+  items. When work lands, a test runs, or a new problem surfaces, update the
+  TODO in the *same* change: check items off, add what was found, re-order when
+  priorities move, and note what gates what. Treat a fix that leaves the TODO
+  stale as unfinished. It is the first thing to read when picking work back up.
 
 ## How the client actually works
 
