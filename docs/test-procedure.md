@@ -10,6 +10,108 @@ expectation is a step that can't fail.
 
 ---
 
+## Re-test after the 2026-07-23 fixes
+
+A batch of fixes landed after the 23 Jul run — Rooms key distribution, device-
+link attestation under enforce, block-evasion B1, the sound backlog, and the
+System-log durability that underpins all client-side observation. This is the
+targeted pass to confirm them. Run the referenced lettered parts, but watch for
+the *new* expected behaviour called out here.
+
+**Deploy the fixes first, or you are testing the old build.** These are
+committed, not deployed:
+- **Server:** on the VPS, pull BENCoscar and rebuild/redeploy so the commits
+  through `d611bae` are running (`fd97919` attestation, `cb74d89` B1,
+  `d611bae` devices-clear). Confirm the running binary is the new one before
+  starting.
+- **Clients:** rebuild with `scripts/build-desktop.sh` so the sign-on screen
+  shows a stamp at or past `fd758d4`. `dev (unknown)` means you rebuilt wrong.
+
+**The System log is now durable** (`syslog.ts`) — notices from before the roster
+mounts survive, so for the first time the client's own account of a failure is
+trustworthy. Use "Copy all" from the System Log freely; it no longer evaporates
+on a screen change.
+
+### R1 · Rooms "no key" on join  (was test result C — the priority)
+
+Run **Part C**, but specifically in the order that used to fail:
+
+1. One account creates an encrypted room and **says nothing yet**.
+2. It invites the second account **before ever sending a message**.
+3. The invitee accepts. **It must be able to read the room** — `RoomSecurityInfo`
+   no longer reports "no key" for a chain room, and the invite now carries the
+   owner's live chain even though the owner hasn't spoken.
+4. The owner sends its first message. The invitee reads it. The invitee must
+   **not** be able to read anything from before it joined.
+5. Now the reverse-recovery path: have the invitee join a room where the owner's
+   chain didn't reach it (or force it — remove/rejoin). A message it can't read
+   should trigger a **chain request**, and the sender should re-broadcast so it
+   becomes readable rather than staying stuck. There is no more one-shot-and-lost
+   broadcast.
+
+If the joiner still reports no key, the durable System log now says *why* — copy
+it. Then D4/D5 (room re-key on device removal) unblock.
+
+### R2 · Device-link attestation under enforce  (was the enforce blocker)
+
+This is the fix that lets **Part E** happen at all. Do it with a real second
+device.
+
+1. In **log** mode first, run **Part D1**: link a second device with the recovery
+   key. It must end up **able to send**, not merely admitted.
+2. Then flip to **enforce** (Part E) and link a *third* device, or remove and
+   re-link the second. Under enforce the linking device must still get in.
+   - Journal shows, briefly, `session has not proven its device; degraded until
+     it does` — expected: the device answered before it published its manifest.
+   - Then a successful `BENCOKeyDirAttestReply`, and the session **stays up**.
+     The old bug disconnected here.
+   - The client must **not** show "This device was removed… link again" during
+     the linking window. That notice now fires only if the device believes it is
+     already enrolled — a genuine problem, not the link in progress.
+3. If a device does get stuck degraded, recovery is now tooled:
+   `benco_admin user devices clear <name>` (see Part E note) resets it to
+   password auth. Confirm that command works end to end while you have enforce on.
+
+### R3 · Block evasion B1  (was test result B1)
+
+From **Part B**, with the deny list in play:
+
+1. Account X blocks account Y (Settings → blocked users, or the block action).
+2. Y sends X a **buddy / connection request**.
+3. X must **not** receive it. Before the fix the request reached the blocker.
+   Y sees nothing that reveals the block (it looks like X is simply offline).
+
+(B2 — a *warn* landing on a blocker — is believed already handled server-side;
+if you can, confirm a warn from Y to X is refused too, but it is not the target
+of this pass.)
+
+### R4 · Re-observe B5 and B3 with the durable log
+
+These two had their stated causes disproven; the point now is to see what, if
+anything, is actually there, with a log that no longer lies.
+
+- **B5:** send to a peer who is signed off. Watch whether the client reports a
+  failure (it should, via a notice) and whether the message is **stored and
+  delivered when the peer signs back on**. If it errors, capture the journal —
+  the likely real cause is the consent gate (the sender not yet authorised),
+  not offline storage. Note whether the two accounts had accepted each other
+  first.
+- **B3:** open a New IM to a **made-up** screen name and send. The failure
+  should now be **visible** (a notice), not silent. Whether to also refuse the
+  add up front is deferred — the client can't tell an offline real name from a
+  fake one — so just confirm the send failure is surfaced.
+
+### R5 · Sound backlog (B6)
+
+1. Sign the second account off.
+2. From the first, send it several messages (5+).
+3. Sign the second back on. The offline backlog arrives at once, and there must
+   be **one** receive chime for the batch, not one per message.
+4. Then send a single live message a few seconds later: it chimes on its own —
+   the coalescing window is short enough that ordinary conversation is unaffected.
+
+---
+
 ## 0 · Before you start
 
 - [ ] `LOG_LEVEL=debug` in `/etc/bencoscar/bencoscar.env`, service restarted.
