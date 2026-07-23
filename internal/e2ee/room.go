@@ -488,3 +488,44 @@ func DecodeCatchup(body string) (isRequest bool, req CatchupRequest, res Catchup
 	}
 	return false, req, res, false
 }
+
+// --- Chain request ----------------------------------------------------------
+//
+// A chain BROADCAST goes out once, into the room, when a sender starts a chain.
+// That one send is the only offer: a member who was offline for it, who joined
+// after it, or whose invite bundle didn't happen to carry that sender's chain
+// has no way to read that sender and no way to ask — the recovery paths only
+// re-fetch identity keys, never the chain itself.
+//
+// A chain request closes that hole. It names a room and travels 1:1 over the
+// same encrypted channel invites use; the recipient answers by re-broadcasting
+// its current outbound chain into the room. Serving it leaks nothing: the
+// re-broadcast is sealed per recipient device, so only an actual member can open
+// a slot, and a stranger who guesses the room name gets ciphertext addressed to
+// other people's keys. It carries only the room name — no position, no chain ID
+// — because "give me your current chain" is the whole request; where the asker
+// has got to is not the responder's business and not something to trust from the
+// wire.
+
+const chainRequestPrefix = "\x1bBENCO-CHAINREQ:v1:"
+
+// IsChainRequest reports whether a 1:1 body is a chain request. Like invites and
+// catch-up, these are machine-to-machine and must never be shown as chat text.
+func IsChainRequest(body string) bool { return strings.HasPrefix(body, chainRequestPrefix) }
+
+// EncodeChainRequest builds a request body for a room.
+func EncodeChainRequest(room string) string {
+	return chainRequestPrefix + base64.StdEncoding.EncodeToString([]byte(room))
+}
+
+// DecodeChainRequest parses one, returning the room it asks about.
+func DecodeChainRequest(body string) (room string, ok bool) {
+	if !IsChainRequest(body) {
+		return "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(body[len(chainRequestPrefix):])
+	if err != nil || len(raw) == 0 {
+		return "", false
+	}
+	return string(raw), true
+}

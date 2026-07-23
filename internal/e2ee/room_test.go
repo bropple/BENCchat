@@ -218,6 +218,32 @@ func TestCatchupRoundTrip(t *testing.T) {
 	}
 }
 
+func TestChainRequestRoundTrip(t *testing.T) {
+	body := EncodeChainRequest("weird:room:name")
+	if !IsChainRequest(body) {
+		t.Fatal("our own encoding is not recognized as a chain request")
+	}
+	room, ok := DecodeChainRequest(body)
+	if !ok || room != "weird:room:name" {
+		t.Fatalf("round trip failed: room=%q ok=%v", room, ok)
+	}
+	// A chain request must not be confused with chat text or the other two
+	// machine-to-machine message kinds that ride the same channel.
+	if IsChainRequest("just a normal message") {
+		t.Error("plain text matched IsChainRequest")
+	}
+	if IsRoomInvite(body) || IsCatchup(body) {
+		t.Error("a chain request matched another protocol prefix")
+	}
+	// An empty room name is malformed, not an empty-named room.
+	if _, ok := DecodeChainRequest(chainRequestPrefix); ok {
+		t.Error("empty room name was accepted")
+	}
+	if _, ok := DecodeChainRequest("nope"); ok {
+		t.Error("non-chain-request body decoded")
+	}
+}
+
 // TestCatchupTrimsToFit: a response must fit an instant message, and should
 // drop the OLDEST messages — a returning member needs the recent ones most.
 func TestCatchupTrimsToFit(t *testing.T) {

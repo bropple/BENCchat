@@ -664,10 +664,18 @@ func (a *App) CreateEncryptedRoom(name string) string {
 	if !ok {
 		return "Joined the room but couldn't identify it — try again."
 	}
-	// Marked encrypted and nothing more. The chain is minted and broadcast on
-	// the first send, by the same path every other room uses — a shared key
-	// here would be a second key model to keep alive for one code path.
 	a.client.MarkRoomEncrypted(cookie)
+	// Mint our outbound chain now, at creation, rather than lazily on the first
+	// send. Two things need it early: an invite issued before we have said
+	// anything must still carry a usable chain (ChainBundleFor includes our live
+	// outbound view), and a member's chain request must have something to answer
+	// with. It is not broadcast here — there is nobody to receive it yet — so it
+	// stays un-shared and the first send distributes it by the ordinary path.
+	if _, _, err := a.client.EnsureOutboundChain(cookie); err != nil {
+		// Non-fatal: the first send will mint one. The room is still created.
+		slog.Default().Warn("couldn't mint the room's outbound chain at creation",
+			"room", name, "err", err)
+	}
 	// Ours, and pinned now rather than at the first invite: the creator is the
 	// owner, and the pin is what lets us sign removals later.
 	a.members.pinOwner(cookie, a.currentAccount())
@@ -1149,6 +1157,18 @@ func (a *App) AcceptRoomInvite(roomName string) string {
 		return "Joined but couldn't identify the room."
 	}
 	a.adoptInviteState(cookie, from, inv, r, verified)
+	// If the invitation carried no chain we can read — the inviter created the
+	// room and invited us before ever speaking, so their bundle was empty — ask
+	// them to re-broadcast it rather than sitting unreadable until they happen to
+	// send. Without this, create-then-invite-then-nobody-speaks left the joiner
+	// permanently keyless. Best-effort: if it doesn't land, the first message we
+	// can't read will ask again.
+	if !a.client.RoomReadable(cookie) {
+		if err := a.client.RequestRoomChain(from, cookie); err != nil {
+			slog.Default().Warn("couldn't ask for the room's chain after joining",
+				"room", inv.Room, "from", from, "err", err)
+		}
+	}
 	// From here, and not one message before it. The bundle grants exactly that,
 	// and asking for history would fetch messages sealed at positions we cannot
 	// derive — a screenful of "sent before you joined", which is the ratchet
@@ -1609,6 +1629,34 @@ func (a *App) serveCatchup(from string, req e2ee.CatchupRequest) {
 	}
 	if err := a.client.SendCatchup(from, e2ee.CatchupResponse{Room: req.Room, Messages: msgs}); err != nil {
 		slog.Default().Warn("could not serve room history", "peer", from, "err", err)
+	}
+}
+
+// handleChainRequest answers a member who says they hold no readable chain for a
+// room by re-broadcasting our current one into it.
+//
+// Only members we count are served, for the same reason serveCatchup gates:
+// the room is joinable by name, so being present is not evidence of membership.
+// Serving leaks nothing regardless — the re-broadcast is sealed per device, so a
+// non-member's request would only ever hand them ciphertext for other people's
+// keys — but there is no reason to answer one, and the throttle below stops a
+// member turning repeated asks into repeated broadcasts.
+func (a *App) handleChainRequest(from, roomName string) {
+	cookie, ok := a.roomCookieByName(roomName)
+	if !ok {
+		return // we're not in that room
+	}
+	if !a.isRoomMember(cookie, from) {
+		slog.Default().Warn("ignoring a chain request from a non-member",
+			"peer", from, "room", roomName)
+		return
+	}
+	if !a.client.AllowChainReply(cookie, from) {
+		return // answered them recently; don't loop
+	}
+	if err := a.client.RedistributeRoomChain(cookie); err != nil {
+		slog.Default().Warn("could not re-broadcast a room chain on request",
+			"peer", from, "room", roomName, "err", err)
 	}
 }
 

@@ -312,6 +312,10 @@ func (c *Client) retryPendingDecrypts(screenName string) {
 			c.handleCatchup(screenName, plain.Text)
 			return "", true
 		}
+		if e2ee.IsChainRequest(plain.Text) {
+			c.handleChainRequest(screenName, plain.Text)
+			return "", true
+		}
 		return plain.Text, true
 	})
 }

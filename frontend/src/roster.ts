@@ -27,6 +27,8 @@ import { renderMessageBody } from "./message";
 import { EMOJI_CATEGORIES, EMOJI_NAMES } from "./emoji_data";
 import { EMOJI_KEYWORDS } from "./emoji_synonyms";
 import { applyTone, toneable, toneVariants, onSkinToneChange, setSkinTonePref } from "./emojiTone";
+import * as syslog from "./syslog";
+import type { LogEntry, NoticeLevel } from "./syslog";
 
 /** How long after the last keystroke we tell the other end we stopped typing. */
 const TYPING_IDLE_MS = 3000;
@@ -2214,8 +2216,10 @@ export function renderRoster(
   // A toast is gone in five seconds, which is fine for "message sent" and
   // useless for anything you might want to act on. Every notice is therefore
   // also filed in the system log, where it keeps its timestamp and stays
-  // clickable. The log is session-scoped — it's a record of what happened
-  // while signed on, not a persisted audit trail.
+  // clickable. The log itself lives in the `syslog` module, above this
+  // component, so it survives the screen changes that destroy the roster and
+  // so it can hold notices that arrived before any roster was mounted; this
+  // component only renders it and subscribes for changes.
 
   const toastEl = el<HTMLDivElement>("toast");
   const logBtnEl = el<HTMLButtonElement>("logBtn");
@@ -2225,36 +2229,19 @@ export function renderRoster(
   const logClearEl = el<HTMLButtonElement>("logClear");
   const logCopyEl = el<HTMLButtonElement>("logCopy");
 
-  type NoticeLevel = "info" | "warn" | "error";
-
-  interface LogEntry {
-    id: number;
-    at: Date;
-    level: NoticeLevel;
-    text: string;
-    /** Set when the server sent this; also means `text` is AIM HTML. */
-    from?: string;
-  }
-
-  /** Oldest entries fall off the end; a chat client left running for days
-   *  shouldn't accumulate notices without bound. */
-  const LOG_MAX = 200;
-
-  let logEntries: LogEntry[] = [];
-  let logSeq = 0;
-  let logUnseen = 0;
   let toastTimer: number | undefined;
 
-  function showToast(text: string, level: NoticeLevel, from?: string): void {
-    logEntries.unshift({ id: ++logSeq, at: new Date(), level, text, from });
-    if (logEntries.length > LOG_MAX) logEntries.length = LOG_MAX;
+  /** A client-side notice: filed in the durable log and flashed as a toast.
+   *  Server notices do NOT come through here — they are recorded once, globally
+   *  (main.ts), and only flashed below, so a server notice is never filed
+   *  twice. These are all our own, plain-text, and only happen while mounted. */
+  function showToast(text: string, level: NoticeLevel): void {
+    syslog.record(text, level);
+    flashToast(text, level);
+  }
 
-    if (logPanelEl.hidden) {
-      logUnseen++;
-      renderLogDot();
-    }
-    renderLog();
-
+  /** The transient toast alone, with no durable record. */
+  function flashToast(text: string, level: NoticeLevel, from?: string): void {
     // Server notices arrive as markup. The toast shows their text only: a link
     // that disappears after five seconds is a tease, and the log keeps the real
     // one. Our own notices are already plain text.
@@ -2282,13 +2269,15 @@ export function renderRoster(
   }
 
   function renderLogDot(): void {
-    logDotEl.hidden = logUnseen === 0;
-    logDotEl.textContent = logUnseen > 9 ? "9+" : String(logUnseen);
+    const unseen = syslog.unseenCount();
+    logDotEl.hidden = unseen === 0;
+    logDotEl.textContent = unseen > 9 ? "9+" : String(unseen);
   }
 
   function renderLog(): void {
     logListEl.replaceChildren();
 
+    const logEntries = syslog.list();
     if (logEntries.length === 0) {
       const empty = document.createElement("p");
       empty.className = "benco-caption roster__log-empty";
@@ -2342,8 +2331,7 @@ export function renderRoster(
       dismiss.setAttribute("aria-label", "Dismiss this notice");
       dismiss.textContent = "×";
       dismiss.addEventListener("click", () => {
-        logEntries = logEntries.filter((x) => x.id !== entry.id);
-        renderLog();
+        syslog.dismiss(entry.id);
       });
       meta.appendChild(dismiss);
 
@@ -2364,8 +2352,9 @@ export function renderRoster(
     logPanelEl.hidden = !open;
     logBtnEl.setAttribute("aria-expanded", String(open));
     if (!open) return;
-    logUnseen = 0;
-    renderLogDot();
+    // Opening the panel is what marks the log seen; markSeen notifies, which
+    // re-renders the dot through the subscription below.
+    syslog.markSeen();
     logListEl.scrollTop = 0;
   }
 
@@ -2375,14 +2364,14 @@ export function renderRoster(
   });
 
   logClearEl.addEventListener("click", () => {
-    logEntries = [];
-    renderLog();
+    syslog.clear();
   });
 
   // Oldest first when copying: a log you're pasting for someone else to read
   // should run in the order things happened, even though the panel shows the
   // newest at the top.
   logCopyEl.addEventListener("click", async () => {
+    const logEntries = syslog.list();
     if (logEntries.length === 0) return;
     const text = [...logEntries].reverse().map(entryText).join("\n");
     const ok = await Bridge.copyText(text);
@@ -2411,7 +2400,18 @@ export function renderRoster(
   document.addEventListener("click", closeLogOnOutsideClick);
   document.addEventListener("keydown", closeLogOnEscape);
 
+  // Render whatever the durable log already holds — including notices from
+  // before this roster mounted — then keep it live. The subscription fires on
+  // every record/dismiss/clear; if the panel is open when a notice lands it is
+  // already seen, so we clear the count rather than dinging the dot for
+  // something on screen.
+  const unsubLog = syslog.subscribe(() => {
+    if (!logPanelEl.hidden) syslog.markSeen();
+    renderLog();
+    renderLogDot();
+  });
   renderLog();
+  renderLogDot();
 
   async function refreshBuddies(): Promise<void> {
     buddies = await Bridge.getBuddies();
@@ -2525,7 +2525,9 @@ export function renderRoster(
         if (e.notice) {
           const level = e.noticeLevel ?? "info";
           if (level === "error" || level === "warn") playAlert();
-          showToast(e.notice, level, e.noticeFrom);
+          // Filed in the log globally (main.ts); here we only flash it, so a
+          // server notice isn't recorded twice.
+          flashToast(e.notice, level, e.noticeFrom);
         }
         break;
 
@@ -2602,7 +2604,7 @@ export function renderRoster(
     meMenuBtn.classList.toggle("is-away", selfAway);
   }
 
-  Bridge.onStateEvent(handleStateEvent);
+  const unsubState = Bridge.onStateEvent(handleStateEvent);
 
   // An invitation arrives quietly: it lands in the roster's Invitations
   // section with a dot, rather than seizing the screen.
@@ -2647,6 +2649,13 @@ export function renderRoster(
       window.clearTimeout(typingTimer);
       window.clearTimeout(stopTypingTimer);
       window.clearTimeout(toastTimer);
+      // Detach the state-event listener. Wails keeps one per EventsOn call and
+      // never dedupes, so without this every screen change would leave another
+      // dead handler firing into detached nodes for the rest of the process.
+      unsubState();
+      // Stop re-rendering a panel that's about to be torn out. The buffer it
+      // reflects lives on in the syslog module.
+      unsubLog();
       // These two are on `document`, so clearing root would leave them bound to
       // detached nodes and firing for the rest of the process's life.
       document.removeEventListener("click", closeLogOnOutsideClick);

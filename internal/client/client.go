@@ -1156,6 +1156,12 @@ func (c *Client) handleICBM(frame wire.SNACFrame, body []byte) {
 			c.handleCatchup(msg.From, text)
 			return
 		}
+		// A chain request is a peer asking us to re-broadcast a room's chain —
+		// also machine-to-machine, never chat text.
+		if encrypted && e2ee.IsChainRequest(text) {
+			c.handleChainRequest(msg.From, text)
+			return
+		}
 		// Prefer the sender's own sealed claim about when they sent it. Stamping
 		// the arrival instead is what let a replayed message read as something
 		// said just now: the server chooses when to deliver, so a timestamp it

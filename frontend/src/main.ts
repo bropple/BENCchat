@@ -13,6 +13,7 @@ import { renderIdentity, type IdentityHandle } from "./identity";
 import { loadAndApplyTheme } from "./theme";
 import { setSoundEnabled, setSoundPack, setMutedSounds, loadCustomSounds } from "./sound";
 import { mountTitlebar } from "./titlebar";
+import * as syslog from "./syslog";
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -159,6 +160,19 @@ window.addEventListener("DOMContentLoaded", () => {
   const root = el<HTMLDivElement>("app");
 
   Bridge.onSessionStatus((status) => handleStatus(root, status));
+
+  // The system log is fed here, once, for the life of the process — not from
+  // inside the roster. Server notices arrive as state events whether or not a
+  // roster is mounted, and the ones that matter most (a sign-on failure, a
+  // first-run key problem) arrive before it ever is. Recording them at this
+  // level is what keeps them; the roster, when it exists, only renders the
+  // buffer. The roster still handles the transient toast and sound for a notice
+  // that lands while it is up, so this does not touch that.
+  Bridge.onStateEvent((e) => {
+    if (e.kind === "notice" && e.notice) {
+      syslog.record(e.notice, e.noticeLevel ?? "info", e.noticeFrom);
+    }
+  });
 
   // Which identity flow this device is in is decided by the backend at sign-on
   // and whenever it changes — a first run completing, a link succeeding, the

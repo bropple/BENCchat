@@ -117,6 +117,7 @@ func (a *App) setupE2EE(screenName string) {
 	a.client.SetPersistChainFunc(a.persistRoomChain)
 	a.client.SetPeerHistoryFunc(a.peerHasPublishedBefore)
 	a.client.SetCatchupHandler(a.handleCatchup)
+	a.client.SetChainRequestHandler(a.handleChainRequest)
 	a.client.SetConnectionRequestHandler(a.handleConnectionRequest)
 	a.client.SetConnectionResponseHandler(a.handleConnectionResponse)
 	a.restoreRoomKeys()

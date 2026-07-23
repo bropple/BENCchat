@@ -62,17 +62,29 @@ type roomKeys struct {
 }
 
 type roomCrypto struct {
-	mu        sync.Mutex
-	rooms     map[string]*roomKeys // by room cookie
-	onInvite  roomInviteHandler
-	onCatchup catchupHandler
+	mu         sync.Mutex
+	rooms      map[string]*roomKeys // by room cookie
+	onInvite   roomInviteHandler
+	onCatchup  catchupHandler
+	onChainReq chainRequestHandler
 	// pendingRosters holds rosters that arrived before their author's signing
 	// keys did, so they can be re-checked when the keys land. Discarding them
 	// instead — the old behaviour — silently lost any roster delivered as an
 	// offline message at sign-on, and a removal is exactly the roster most
 	// likely to arrive that way. Bounded; see maxPendingRosters.
 	pendingRosters []pendingRoster
+	// chainReqOut throttles the chain requests we SEND, keyed by cookie+sender,
+	// so an unreadable backlog from one sender fires a single request instead of
+	// one per message. chainReqIn throttles the ones we ANSWER, keyed by
+	// cookie+requester, so a member cannot make us re-broadcast in a loop.
+	chainReqOut map[string]time.Time
+	chainReqIn  map[string]time.Time
 }
+
+// chainRequestCooldown is how long a chain request (in either direction) is
+// suppressed after the last one for the same room+peer. Long enough that a burst
+// collapses to one, short enough that a genuine second miss recovers promptly.
+const chainRequestCooldown = 30 * time.Second
 
 // pendingRoster is one stashed roster body, kept exactly as it arrived so the
 // retry verifies the same bytes the sender signed.
@@ -187,7 +199,13 @@ func (c *Client) RoomEncrypted(cookie string) bool {
 	return rk.encrypted
 }
 
-// RoomReadable reports whether we hold a usable key for an encrypted room.
+// RoomReadable reports whether we hold usable key material for an encrypted
+// room — under either model. `hasCurrent` covers the shared-key path; the
+// chain model never sets it, so a room that has moved to per-sender chains is
+// readable when we hold our own outbound chain (we can write, and read our own
+// scrollback) or any inbound view (we can read someone). Reporting only
+// `hasCurrent` marked every chain room unreadable even with chains present,
+// which is the "I don't have this room's key" a freshly-joined member saw.
 func (c *Client) RoomReadable(cookie string) bool {
 	rk := c.roomCrypto.get(cookie)
 	if rk == nil {
@@ -195,7 +213,7 @@ func (c *Client) RoomReadable(cookie string) bool {
 	}
 	c.roomCrypto.mu.Lock()
 	defer c.roomCrypto.mu.Unlock()
-	return rk.hasCurrent
+	return rk.hasCurrent || rk.out != nil || len(rk.views) > 0
 }
 
 // RoomKey returns a room's current group key, for handing to an invitee.
@@ -729,6 +747,73 @@ func (c *Client) handleCatchup(from, body string) {
 	}
 }
 
+// --- Chain request ----------------------------------------------------------
+
+// chainRequestHandler is notified when a peer asks us to re-send a room's chain.
+// The app layer answers, since it owns membership: it checks the asker is a
+// member and calls RedistributeRoomChain.
+type chainRequestHandler func(from, roomName string)
+
+// SetChainRequestHandler registers the callback for inbound chain requests.
+func (c *Client) SetChainRequestHandler(fn chainRequestHandler) {
+	c.roomCrypto.mu.Lock()
+	c.roomCrypto.onChainReq = fn
+	c.roomCrypto.mu.Unlock()
+}
+
+func (c *Client) handleChainRequest(from, body string) {
+	room, ok := e2ee.DecodeChainRequest(body)
+	if !ok {
+		return
+	}
+	c.roomCrypto.mu.Lock()
+	fn := c.roomCrypto.onChainReq
+	c.roomCrypto.mu.Unlock()
+	if fn != nil {
+		fn(from, room)
+	}
+}
+
+// RequestRoomChain asks a peer to re-broadcast their current room chain, for
+// when we hold nothing that reads a room — an accepted invite whose bundle was
+// empty, or a message under a chain we were never given. Best-effort and
+// throttled per peer, so a burst of unreadable messages from one sender fires a
+// single request rather than one each. Silently does nothing over an
+// unencryptable channel: a chain request in the clear would name the room.
+func (c *Client) RequestRoomChain(peer, cookie string) error {
+	if !c.CanEncryptTo(peer) {
+		return nil
+	}
+	if !c.allowChainRequest(&c.roomCrypto.chainReqOut, cookie, peer) {
+		return nil
+	}
+	return c.sendProtocolMessage(peer, e2ee.EncodeChainRequest(c.roomName(cookie)))
+}
+
+// AllowChainReply reports whether we should answer a chain request from this
+// peer now, throttling repeats so a member cannot loop us into re-broadcasting.
+func (c *Client) AllowChainReply(cookie, requester string) bool {
+	return c.allowChainRequest(&c.roomCrypto.chainReqIn, cookie, requester)
+}
+
+// allowChainRequest is the shared throttle for both directions. It records
+// "now" for the room+peer key and returns whether the cooldown had elapsed.
+// Callers hold neither lock; this takes roomCrypto.mu itself.
+func (c *Client) allowChainRequest(m *map[string]time.Time, cookie, peer string) bool {
+	key := cookie + "\x00" + state.NormalizeScreenName(peer)
+	now := time.Now()
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	if *m == nil {
+		*m = map[string]time.Time{}
+	}
+	if last, ok := (*m)[key]; ok && now.Sub(last) < chainRequestCooldown {
+		return false
+	}
+	(*m)[key] = now
+	return true
+}
+
 // RequestCatchup asks a peer what we missed in a room.
 //
 // Refuses over an unencrypted channel: room history would otherwise cross the
@@ -1000,8 +1085,12 @@ func (c *Client) decodeRoomChainMessage(cookie, sender, text string, rk *roomKey
 
 	case errors.Is(err, e2ee.ErrUnknownChain):
 		// A chain nobody has handed us. Usually a sender who started a new one
-		// while we were away, which a request can fix.
+		// while we were away, or whose one-time broadcast we joined too late for.
+		// Fetch their keys AND ask them to re-broadcast the chain itself — the
+		// key fetch alone never produced the chain, which is why a missed
+		// broadcast used to be permanent. Both are best-effort and throttled.
 		go c.RefreshPeerKeys(sender)
+		go func() { _ = c.RequestRoomChain(sender, cookie) }()
 		return roomDecode{Text: "🔒 [encrypted room message — waiting for the sender's key…]"}
 
 	case errors.Is(err, e2ee.ErrForgedSignature):
@@ -1192,15 +1281,36 @@ func (c *Client) ChainBundleFor(cookie, recipient string) []e2ee.ChainView {
 	defer c.roomCrypto.mu.Unlock()
 
 	out := make([]e2ee.ChainView, 0, len(rk.views))
+
+	// Our CURRENT outbound chain rides at its live position — the next index we
+	// will seal — so a newcomer reads our messages from now on and none before.
+	// We know that position exactly, without a `seen` entry, precisely because
+	// it is our own chain; this is what lets an invite carry a usable chain
+	// before we have ever sent (rk.out.Index == 0 → the newcomer reads our first
+	// message onward). Without it, the winding loop below skips our own chain for
+	// want of a `seen` entry and the invite goes out empty — the "no key on join"
+	// a create-then-invite always produced. The retired-chain hazard the loop
+	// guards against does not apply here: this is only ever the one live chain,
+	// never a retired one (retired chains stay in rk.views and go through `seen`).
+	curOut := ""
+	if rk.out != nil {
+		curOut = rk.out.ID
+		out = append(out, rk.out.View())
+	}
+
 	for id, v := range rk.views {
-		// Every chain goes through the SAME winding, including our own. The
-		// special case that used to sit here — "our own chain is already at now"
-		// — was true only of the CURRENT one. A chain we retired stayed in the
-		// map, stopped matching rk.out.ID, and fell through to a `seen` entry
-		// that was never written for our own chains, so it was bundled at index
-		// zero and handed every newcomer our whole pre-rotation history. Deleting
-		// the special case is the fix; sealRoomMessage now records our position
-		// like anybody else's.
+		if id == curOut {
+			// Already added at its live position above; the `seen`-based winding
+			// would only re-derive the same (or an older, read-back) view.
+			continue
+		}
+		// Every other chain goes through the SAME winding. The special case that
+		// used to sit here — "our own chain is already at now" — was true only of
+		// the CURRENT one. A chain we retired stayed in the map, stopped matching
+		// rk.out.ID, and fell through to a `seen` entry that was never written for
+		// our own chains, so it was bundled at index zero and handed every
+		// newcomer our whole pre-rotation history. sealRoomMessage now records our
+		// position like anybody else's, so retired chains wind correctly here.
 		n, known := rk.seen[id]
 		if !known {
 			// We do not know where this chain has got to, so we cannot wind it
@@ -1295,14 +1405,39 @@ func (c *Client) ensureRoomChainDistributed(cookie string) error {
 	if !c.RoomEncrypted(cookie) {
 		return nil
 	}
-	view, fresh, err := c.EnsureOutboundChain(cookie)
+	view, _, err := c.EnsureOutboundChain(cookie)
 	if err != nil {
 		return err
 	}
-	if !fresh {
+	// Broadcast when our current chain has NOT reached the room yet, rather than
+	// only when it was just minted. A chain minted at room creation — before
+	// there was anyone to receive it — is no longer "fresh" by the time the first
+	// message is sent, but is still un-shared; gating on freshness left it
+	// undistributed and sealing refused forever. A rotation re-mints and clears
+	// the shared flag, so a replaced chain is still re-broadcast here.
+	if c.roomChainShared(cookie) {
 		return nil
 	}
+	return c.broadcastChainView(cookie, view)
+}
 
+// roomChainShared reports whether our current outbound chain has been handed to
+// the room.
+func (c *Client) roomChainShared(cookie string) bool {
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return false
+	}
+	c.roomCrypto.mu.Lock()
+	defer c.roomCrypto.mu.Unlock()
+	return rk.chainShared
+}
+
+// broadcastChainView seals a chain view once per recipient device and sends it
+// into the room, then records the chain as shared. Distributing into the room
+// rather than fanning out 1:1 costs one message instead of one per member, and a
+// member a rotation excluded receives it like everyone else and can open nothing.
+func (c *Client) broadcastChainView(cookie string, view e2ee.ChainView) error {
 	members := c.roomMembers(cookie)
 	self := state.NormalizeScreenName(c.store.Self().ScreenName)
 	var recipients [][32]byte
@@ -1359,6 +1494,34 @@ func (c *Client) ensureRoomChainDistributed(cookie string) error {
 	}
 	c.MarkChainShared(cookie)
 	return nil
+}
+
+// RedistributeRoomChain re-broadcasts our current outbound chain into the room
+// even though it has already been shared. This answers a member's chain request
+// — someone who joined holding no readable chain, or who saw a message under a
+// chain they were never given. It is safe to serve to any requester: the
+// broadcast is sealed per recipient device, so a slot opens only for an actual
+// member, and a stranger who knows the room name gains nothing. Does nothing if
+// we have no outbound chain to hand over.
+func (c *Client) RedistributeRoomChain(cookie string) error {
+	if !c.RoomEncrypted(cookie) {
+		return nil
+	}
+	rk := c.roomCrypto.get(cookie)
+	if rk == nil {
+		return nil
+	}
+	c.roomCrypto.mu.Lock()
+	haveOut := rk.out != nil
+	var view e2ee.ChainView
+	if haveOut {
+		view = rk.out.View()
+	}
+	c.roomCrypto.mu.Unlock()
+	if !haveOut {
+		return nil
+	}
+	return c.broadcastChainView(cookie, view)
 }
 
 // ourPrivateKey returns this device's encryption private key.

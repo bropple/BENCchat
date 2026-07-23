@@ -407,7 +407,8 @@ interface AppBindings {
 }
 
 interface WailsRuntime {
-  EventsOn(event: string, cb: (data: unknown) => void): void;
+  /** Wails returns a cancel function that removes the listener. */
+  EventsOn(event: string, cb: (data: unknown) => void): () => void;
   BrowserOpenURL(url: string): void;
   ClipboardSetText(text: string): Promise<boolean>;
 }
@@ -589,8 +590,12 @@ export const Bridge = {
     );
   },
 
-  onStateEvent(cb: (event: StateEvent) => void): void {
-    window.runtime?.EventsOn("state:event", (data) => cb(data as StateEvent));
+  /** Subscribe to state-store events. Returns an unsubscribe function so a
+   *  component that re-mounts (the roster does, on every screen change) can
+   *  detach its old listener instead of leaking one per mount. A no-op
+   *  unsubscribe is returned when the runtime is absent. */
+  onStateEvent(cb: (event: StateEvent) => void): () => void {
+    return window.runtime?.EventsOn("state:event", (data) => cb(data as StateEvent)) ?? (() => {});
   },
 
   /** Open a URL in the user's real browser instead of navigating the webview
