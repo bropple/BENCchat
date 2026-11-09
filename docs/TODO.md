@@ -162,9 +162,21 @@ attestation) still need a live re-test.
 
 - [ ] **Refresh the status artifact** — the BENCoscar deploy landed, so its top
       blocking item is stale.
-- [ ] **Enable Dependabot + Actions on the BENCoscar fork** (GitHub UI; a fork
-      needs both switched on by hand, and Actions is disabled again after 60
-      days of inactivity).
+- [ ] **Redeploy BENCoscar built with Go 1.26.10.** The live server binary was
+      built on 1.26.5, which govulncheck shows has 19 *reachable* stdlib vulns
+      (net/http, crypto/tls, crypto/x509, html/template, …). The source fix is
+      committed (2026-11-09); the running binary stays exposed until it is
+      rebuilt and redeployed.
+- [ ] **Go patch releases break the weekly Security scan until someone bumps
+      `go.mod`.** That is the scan doing its job (CI builds on the `go`
+      directive's exact patch, so the shipped binary really is affected), but
+      Dependabot does not bump the directive. Every Go security release
+      needs a manual `go mod edit -go=<latest>` in both repos. It went unnoticed
+      for five weeks (2026-10-05 → 11-09). Decide whether to automate it.
+- [ ] **Upstream open-oscar-server builds on Go 1.27.2**, which has one reachable
+      stdlib vuln (GO-2026-6809, crypto/x509; fixed in 1.27.3). Upstream runs no
+      govulncheck. Worth reporting to mk6i; it matters to the fork at the
+      next rebase.
 - [ ] **Azure Trusted Signing secrets** — clears the Windows Defender
       false-positive at the source. Wiring is already in `build.yml`.
 
@@ -224,6 +236,13 @@ attestation) still need a live re-test.
       that a `reset`/reinstall drops would silently un-harden the deployment.
 
 ## Done (recent)
+
+- [x] Weekly Security (govulncheck) jobs green again in both repos: BENCchat Go
+      1.25.0 → 1.26.10 (1.25 is out of support; 27 reachable stdlib vulns),
+      BENCoscar Go 1.26.5 → 1.26.10 + x/net v0.56 → v0.62 (19 reachable). Both
+      verified locally with govulncheck on 1.26.10 (2026-11-09).
+- [x] Dependabot + Actions enabled on the BENCoscar fork (runs present since
+      2026-07-21).
 
 - [x] Sign-on routing race — first-run key screen no longer lost to the roster
       (`71aaac5`).
