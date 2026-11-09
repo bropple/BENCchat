@@ -173,10 +173,12 @@ attestation) still need a live re-test.
       Dependabot does not bump the directive. Every Go security release
       needs a manual `go mod edit -go=<latest>` in both repos. It went unnoticed
       for five weeks (2026-10-05 → 11-09). Decide whether to automate it.
-- [ ] **Upstream open-oscar-server builds on Go 1.27.2**, which has one reachable
-      stdlib vuln (GO-2026-6809, crypto/x509; fixed in 1.27.3). Upstream runs no
-      govulncheck. Worth reporting to mk6i; it matters to the fork at the
-      next rebase.
+- [ ] **At the next upstream rebase, keep the fork's Go pin.** Upstream's
+      `go.mod` says 1.26.2 and its CI/Dockerfile build on 1.27.2. That version
+      trips GO-2026-6809 (crypto/x509, fixed in 1.27.3), but it isn't reachable
+      in practice because upstream never verifies certs. Don't let the go.mod
+      conflict resolve downward. Deliberately not reported upstream
+      (2026-11-09).
 - [ ] **Azure Trusted Signing secrets** — clears the Windows Defender
       false-positive at the source. Wiring is already in `build.yml`.
 
