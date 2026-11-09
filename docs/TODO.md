@@ -167,12 +167,6 @@ attestation) still need a live re-test.
       (net/http, crypto/tls, crypto/x509, html/template, …). The source fix is
       committed (2026-11-09); the running binary stays exposed until it is
       rebuilt and redeployed.
-- [ ] **Go patch releases break the weekly Security scan until someone bumps
-      `go.mod`.** That is the scan doing its job (CI builds on the `go`
-      directive's exact patch, so the shipped binary really is affected), but
-      Dependabot does not bump the directive. Every Go security release
-      needs a manual `go mod edit -go=<latest>` in both repos. It went unnoticed
-      for five weeks (2026-10-05 → 11-09). Decide whether to automate it.
 - [ ] **At the next upstream rebase, keep the fork's Go pin.** Upstream's
       `go.mod` says 1.26.2 and its CI/Dockerfile build on 1.27.2. That version
       trips GO-2026-6809 (crypto/x509, fixed in 1.27.3), but it isn't reachable
@@ -238,6 +232,13 @@ attestation) still need a live re-test.
       that a `reset`/reinstall drops would silently un-harden the deployment.
 
 ## Done (recent)
+
+- [x] Go directive bumps automated: weekly (Mon) `go-bump.yml` (BENCchat) and
+      `benco-go-bump.yml` (BENCoscar) open a PR moving to the newest patch on the
+      current line, or to the oldest supported line once the current one drops
+      out of support, then dispatch Build/Test + Security on it. Dependabot never
+      bumped the directive, and that gap left the Security scan red from
+      2026-10-05 to 11-09.
 
 - [x] Weekly Security (govulncheck) jobs green again in both repos: BENCchat Go
       1.25.0 → 1.26.10 (1.25 is out of support; 27 reachable stdlib vulns),

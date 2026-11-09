@@ -1,0 +1,115 @@
+# Weekly Go toolchain bump.
+#
+# CI builds with the exact version in go.mod's `go` directive, so a Go security
+# release leaves the shipped binary vulnerable until someone edits that line —
+# and Dependabot does not. Security.yml then fails every Monday until a human
+# notices. Between 2026-10-05 and 2026-11-09 it failed five times running.
+#
+# This closes that gap. It moves to the newest patch on the line go.mod is
+# already on. When that line is out of support, it moves to the oldest line
+# that is still supported (the minimal jump; 1.25 → 1.26 was this case). It only
+# opens a PR and never merges, because the checks below are the real gate.
+#
+# A PR opened with GITHUB_TOKEN does not fire `pull_request` workflows (GitHub's
+# loop guard), so Build and Security would never run on it. workflow_dispatch is
+# the exception to that rule, so the job dispatches both against the branch;
+# their check runs land on the PR's head commit.
+#
+# Requires the repo setting "Allow GitHub Actions to create and approve pull
+# requests" (Settings → Actions → General).
+
+name: Go bump
+
+on:
+  schedule:
+    # Mondays, two hours before the Security scan, so a due bump is already
+    # waiting as a PR when that scan reports.
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: go-bump
+
+jobs:
+  bump:
+    name: Bump Go directive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick target version
+        id: pick
+        run: |
+          set -euo pipefail
+          cur=$(sed -n 's/^go \([0-9][0-9.]*\)$/\1/p' go.mod)
+          if [ -z "$cur" ]; then
+            echo "::error::go.mod has no plain release go directive (pre-release?)"
+            exit 1
+          fi
+          releases=$(curl -fsSL 'https://go.dev/dl/?mode=json' \
+            | jq -r '.[] | select(.stable) | .version | ltrimstr("go")')
+          minor=$(cut -d. -f1,2 <<<"$cur")
+          target=$(awk -F. -v m="$minor" '$1"."$2 == m' <<<"$releases" | head -n1)
+          if [ -z "$target" ]; then
+            target=$(sort -V <<<"$releases" | head -n1)
+            echo "Go $minor is not a supported line on go.dev; falling back to the oldest supported one."
+          fi
+          newest=$(printf '%s\n%s\n' "$cur" "$target" | sort -V | tail -n1)
+          echo "go.mod: $cur  target: $target  supported: $(echo $releases)"
+          if [ "$target" = "$cur" ] || [ "$newest" = "$cur" ]; then
+            echo "Up to date."
+            echo "target=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "cur=$cur" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR
+        if: steps.pick.outputs.target != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CUR: ${{ steps.pick.outputs.cur }}
+          TARGET: ${{ steps.pick.outputs.target }}
+          BASE: master
+        run: |
+          set -euo pipefail
+          branch="go-bump/$TARGET"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch already exists; nothing to do."
+            exit 0
+          fi
+
+          sed -i "s/^go $CUR\$/go $TARGET/" go.mod
+          if git diff --quiet go.mod; then
+            echo "::error::failed to rewrite the go directive"
+            exit 1
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898699+github-actions[bot]@users.noreply.github.com'
+          git switch -c "$branch"
+          git commit -am "security: bump Go to $TARGET"
+          git push origin "$branch"
+
+          cat > "$RUNNER_TEMP/body.md" <<EOF
+          Go $CUR → $TARGET, opened by \`go-bump.yml\` because go.dev lists a newer release.
+
+          CI builds on the \`go\` directive's exact version, so this is what actually moves the shipped binary onto the fixed stdlib. Release notes: https://go.dev/doc/devel/release
+
+          Build and Security were started with workflow_dispatch, since PRs opened by Actions do not trigger \`pull_request\` workflows. Their results show up as checks below. Merge once they are green. If either needs a re-run, start it from the Actions tab on branch \`$branch\`.
+          EOF
+          gh pr create --base "$BASE" --head "$branch" \
+            --title "security: bump Go to $TARGET" --body-file "$RUNNER_TEMP/body.md"
+
+          gh workflow run build.yml --ref "$branch"
+          gh workflow run security.yml --ref "$branch"
+
+          # An older bump PR that never got merged is now superseded.
+          gh pr list --state open --json number,headRefName \
+            -q ".[] | select(.headRefName | startswith(\"go-bump/\")) | select(.headRefName != \"$branch\") | .number" \
+            | xargs -r -n1 gh pr close --delete-branch -c "Superseded by the Go $TARGET bump."
