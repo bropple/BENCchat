@@ -166,7 +166,8 @@ attestation) still need a live re-test.
       built on 1.26.5, which govulncheck shows has 19 *reachable* stdlib vulns
       (net/http, crypto/tls, crypto/x509, html/template, …). The source fix is
       committed (2026-11-09); the running binary stays exposed until it is
-      rebuilt and redeployed.
+      rebuilt and redeployed. Run `./scripts/benco-deploy/push.sh benco` from
+      the BENCoscar checkout (BENCoscar `42ee497`).
 - [ ] **At the next upstream rebase, keep the fork's Go pin.** Upstream's
       `go.mod` says 1.26.2 and its CI/Dockerfile build on 1.27.2. That version
       trips GO-2026-6809 (crypto/x509, fixed in 1.27.3), but it isn't reachable
